@@ -1,0 +1,4 @@
+# pnpm 11 默认拦截依赖自身的 build 脚本；esbuild 需在第一次安装时构建原生二进制，
+# 否则 WXT 依赖预检（wxt prepare / wxt build）会因缺失 esbuild 而失败。
+allowBuilds:
+  esbuild: true

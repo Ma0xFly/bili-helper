@@ -25,6 +25,10 @@ _bmad-output/
 /icon/
 /_locales/
 
+# WXT 构建产物与生成类型目录（不进源码仓库）
+.output/
+.wxt/
+
 # 系统 / 编辑器
 .DS_Store
 *.log
