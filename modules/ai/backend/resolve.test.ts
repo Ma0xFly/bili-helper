@@ -119,14 +119,17 @@ describe('resolveBackend（mode 分派唯一入口）', () => {
     await expect(caps.summarize(SUMMARIZE_INPUT)).rejects.toMatchObject({ kind: 'http', status: 429 })
   })
 
-  it('mode=auto detectAds：server 失败回退 local，local 占位抛 config', async () => {
+  it('mode=auto detectAds：server 失败回退 local，local 走 RAG 降级链', async () => {
     const fetchMock = routedFetch(true)
     vi.stubGlobal('fetch', fetchMock)
     const caps = resolveBackend(await settingsOf('auto'))
-    await expect(caps.detectAds({ ...CONTEXT, strategy: 'smart' })).rejects.toMatchObject({
-      kind: 'config',
-      message: '本地去广告将在下一阶段上线',
-    })
+    // local 的 embeddings 收到补全形状响应 → 向量路解析失败 → 纯词表无命中 → 全文兜底：
+    // 兜底 chat 返回的 "本地总结" JSON 不是 ads 形状 → 定界无片段 → {ads:[], source:"none"}。
+    const result = await caps.detectAds({ ...CONTEXT, strategy: 'smart' })
+    expect(result).toEqual({ ads: [], source: 'none' })
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls[0]).toBe('https://srv.example/ai/ad-detection')
+    expect(urls[urls.length - 1]).toBe('https://llm.example/v1/chat/completions')
   })
 
   it('mode=auto：用户中止时原样上抛，不回退 local 二次请求', async () => {

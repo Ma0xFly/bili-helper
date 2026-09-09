@@ -29,6 +29,7 @@ interface FormModel {
   mode: AiMode
   serverBaseUrl: string
   serverToken: string
+  adSkipEnabled: boolean
 }
 
 const form = reactive<FormModel>({
@@ -41,6 +42,7 @@ const form = reactive<FormModel>({
   mode: 'local',
   serverBaseUrl: '',
   serverToken: '',
+  adSkipEnabled: false,
 })
 
 const loadError = ref('')
@@ -57,6 +59,7 @@ onMounted(async () => {
     form.mode = settings.mode
     form.serverBaseUrl = settings.serverBaseUrl
     form.serverToken = settings.serverToken
+    form.adSkipEnabled = settings.adSkipEnabled
   } catch {
     // 读取失败要给可见提示，而不是静默留下空表单。
     loadError.value = '设置加载失败，请刷新重试'
@@ -295,6 +298,24 @@ async function save(): Promise<void> {
               <span class="mode-desc">{{ mode.description }}</span>
             </label>
           </div>
+        </section>
+
+        <section class="card" aria-labelledby="features-title">
+          <h2 id="features-title" class="card-title">功能开关</h2>
+          <label class="switch-row">
+            <span class="switch-info">
+              <span class="switch-name">AI 去广告</span>
+              <span class="field-hint">
+                识别并自动跳过恰饭段。默认关闭，请先配好上方端点再开启；popup 里的「AI
+                去广告」开关只对当前页临时生效，这里的总开关控制所有页。
+              </span>
+            </span>
+            <span class="switch">
+              <input v-model="form.adSkipEnabled" type="checkbox" />
+              <span class="switch-track" aria-hidden="true" />
+              <span class="switch-knob" aria-hidden="true" />
+            </span>
+          </label>
         </section>
 
         <section v-if="showServerFields" class="card" aria-labelledby="server-fields-title">
@@ -590,6 +611,76 @@ input:focus-visible {
   font-size: 12px;
   color: #736b8a;
   line-height: 1.6;
+}
+
+/* 总开关：track 36×20 胶囊 + 16px 白圆 knob，开态渐变（与 popup 快开关同源视觉）。 */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+}
+
+.switch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.switch-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #2e2a3b;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #e3def0;
+  transition: background 180ms ease;
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 180ms ease;
+}
+
+.switch input:checked ~ .switch-track {
+  background: linear-gradient(135deg, #7c5cfc, #ff8fb1);
+}
+
+.switch input:checked ~ .switch-knob {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible ~ .switch-track {
+  outline: 2px solid #7c5cfc;
+  outline-offset: 2px;
 }
 
 .feedback {

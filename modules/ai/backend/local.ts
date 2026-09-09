@@ -1,21 +1,23 @@
 // local 适配器：端上直连实现。summarize/chat 走 OpenAI 兼容直连客户端，
-// detectAds 本阶段按裁决占位抛 config（RAG 混合检索在后续故事接入替换）。
-// chat 遵循端口 SSE 终止性：emit start 之后的任何失败（含外部中止）都以 end{error} 收尾，
-// 消费方永不悬挂。
+// detectAds 走 RAG 混合检索链路（召回→小转大→LLM 定界，strategy 固定 smart，
+// 降级链见模块注释）。chat 遵循端口 SSE 终止性：emit start 之后的任何失败（含外部中止）
+// 都以 end{error} 收尾，消费方永不悬挂。
 
-import { AiError, errorInfoFrom } from '../../shared/error'
+import { errorInfoFrom } from '../../shared/error'
 import type { AiSettings } from '../../settings'
 import type {
   AiCapabilities,
   ChatInput,
+  DetectAdsInput,
   DetectAdsResult,
   SummarizeInput,
   SummarizeResult,
 } from '../port'
 import { buildChatMessages, buildSummaryMessages, parseSummarizeResponse } from '../prompts'
 import { chatCompletion, chatCompletionStream, type ChatEndpoint } from '../llm/client'
+import { runRagDetect, type DetectHooks } from '../rag/detect'
 
-export function createLocalBackend(settings: AiSettings): AiCapabilities {
+export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}): AiCapabilities {
   const endpoint: ChatEndpoint = {
     baseUrl: settings.apiUrl,
     model: settings.model,
@@ -23,9 +25,9 @@ export function createLocalBackend(settings: AiSettings): AiCapabilities {
   }
 
   return {
-    async detectAds(): Promise<DetectAdsResult> {
-      // 占位：真实实现（RAG 混合检索 + 定界）在去广告故事接入。
-      throw new AiError('config', '本地去广告将在下一阶段上线')
+    async detectAds(input: DetectAdsInput): Promise<DetectAdsResult> {
+      // strategy 本阶段固定 smart：无论调用方传什么，链路只走 smart 路径。
+      return runRagDetect(input, settings, hooks)
     },
 
     async summarize(input: SummarizeInput): Promise<SummarizeResult> {

@@ -1,0 +1,326 @@
+/* 广告跳过浮层族（skip-banner / countdown-ring / progressBarAdMark / 成就 chip / 降级提示）。
+   设计 token 唯一登记处（本组件的全部色值/圆角/阴影），亮暗双套经 [data-dark] 切换，
+   随 B 站夜间模式由控制器驱动；宿主页样式与本文件互不渗透（寄居 Shadow DOM）。
+   基准：DESIGN.md colors / skip-banner token 族，视觉对齐 mockups/key-skip-overlay.html。 */
+
+.bh-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483000;
+  font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  /* 亮色 token */
+  --bh-text-primary: #2e2a3b;
+  --bh-text-secondary: #6f6a80;
+  --bh-surface-glass: rgba(255, 255, 255, 0.62);
+  --bh-surface-glass-strong: rgba(255, 255, 255, 0.72);
+  --bh-glass-border: rgba(255, 255, 255, 0.8);
+  --bh-inner-glow: rgba(255, 255, 255, 0.9);
+  --bh-border-hairline: #e3def0;
+  --bh-primary: #7c5cfc;
+  --bh-primary-deep: #7452f4;
+  --bh-primary-bright: #b47cf5;
+  --bh-primary-bright-deep: #8857df;
+  --bh-accent-pink: #ff8fb1;
+  --bh-accent-pink-deep: #c24873;
+  --bh-purple-soft: #f1edff;
+  --bh-pink-soft: #ffe3ec;
+  --bh-success: #2fa96b;
+  --bh-success-soft: #e9f6ee;
+  --bh-shadow-purple: rgba(124, 92, 252, 0.16);
+  --bh-shadow-chip: rgba(124, 92, 252, 0.1);
+  --bh-shadow-accent: rgba(124, 92, 252, 0.35);
+  --bh-shadow-accent-tab: rgba(124, 92, 252, 0.35);
+  --bh-glow-pink: rgba(255, 143, 177, 0.5);
+  --bh-tip-arrow: rgba(255, 255, 255, 0.85);
+}
+
+.bh-root[data-dark] {
+  --bh-text-primary: #ece8f5;
+  --bh-text-secondary: #b5aec9;
+  --bh-surface-glass: rgba(41, 34, 58, 0.66);
+  --bh-surface-glass-strong: rgba(41, 34, 58, 0.72);
+  --bh-glass-border: rgba(255, 255, 255, 0.14);
+  --bh-inner-glow: rgba(255, 255, 255, 0.07);
+  --bh-border-hairline: #342d47;
+  --bh-primary: #9c85ff;
+  --bh-primary-deep: #9c85ff;
+  --bh-primary-bright: #c29bf8;
+  --bh-primary-bright-deep: #c29bf8;
+  --bh-accent-pink: #ffa0bd;
+  --bh-accent-pink-deep: #ffa0bd;
+  --bh-purple-soft: #2b2442;
+  --bh-pink-soft: #3d2431;
+  --bh-success: #55d48f;
+  --bh-success-soft: #1b3227;
+  --bh-shadow-purple: rgba(0, 0, 0, 0.5);
+  --bh-shadow-chip: rgba(0, 0, 0, 0.4);
+  --bh-shadow-accent: rgba(156, 133, 255, 0.4);
+  --bh-shadow-accent-tab: rgba(156, 133, 255, 0.45);
+  --bh-glow-pink: rgba(255, 160, 189, 0.5);
+  --bh-tip-arrow: rgba(41, 34, 58, 0.9);
+}
+
+.bh-overlay {
+  position: absolute;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* ---------- 提示条（玻璃胶囊，悬浮播放器顶部居中） ---------- */
+.bh-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px 9px 16px;
+  background: var(--bh-surface-glass);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 999px;
+  box-shadow: 0 20px 50px var(--bh-shadow-purple), inset 0 1px 0 var(--bh-inner-glow);
+  white-space: nowrap;
+  pointer-events: auto;
+  max-width: 92%;
+}
+
+.bh-banner-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.45;
+  min-width: 0;
+}
+
+.bh-banner-copy {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bh-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bh-banner-sub {
+  font-size: 11px;
+  color: var(--bh-text-secondary);
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+}
+
+/* 倒计时环：28px SVG，轨道 purple-soft，进度 primary→accent-pink 渐变描边 */
+.bh-ring-wrap {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.bh-ring-wrap svg {
+  display: block;
+}
+
+.bh-ring-track {
+  stroke: var(--bh-purple-soft);
+}
+
+.bh-ring-fill {
+  stroke: url(#bh-ring-gradient);
+  transition: stroke-dasharray 0.15s linear;
+}
+
+.bh-ring-stop-a {
+  stop-color: var(--bh-primary);
+}
+
+.bh-ring-stop-b {
+  stop-color: var(--bh-accent-pink);
+}
+
+.bh-ring-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bh-primary);
+}
+
+/* 双按钮：primary 缩小版 + 弱化文字按钮（铁律：不点也自动跳） */
+.bh-btn-skip {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(135deg, var(--bh-primary-deep), var(--bh-primary-bright-deep));
+  border-radius: 999px;
+  padding: 5px 16px;
+  box-shadow: 0 4px 14px var(--bh-shadow-accent);
+  white-space: nowrap;
+}
+
+.bh-root[data-dark] .bh-btn-skip {
+  color: #191426;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--bh-primary), var(--bh-primary-bright));
+}
+
+.bh-btn-stay {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--bh-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 5px 2px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.bh-btn-stay:hover {
+  color: var(--bh-primary);
+}
+
+.bh-btn-skip:focus-visible,
+.bh-btn-stay:focus-visible {
+  outline: 2px solid var(--bh-primary);
+  outline-offset: 2px;
+}
+
+/* ---------- 成就 chip（跳过成功瞬时态，播放器左上） ---------- */
+.bh-saved-chip {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bh-surface-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 999px;
+  padding: 4px 14px 4px 10px;
+  box-shadow: 0 6px 20px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--bh-text-primary);
+  pointer-events: auto;
+}
+
+.bh-orb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--bh-primary), var(--bh-primary-bright) 55%, var(--bh-accent-pink));
+  box-shadow: 0 2px 8px var(--bh-shadow-accent-tab);
+}
+
+/* ---------- 向量降级提示（报错式，不静默；同视频一次） ---------- */
+.bh-vector-hint {
+  position: absolute;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 999px;
+  box-shadow: 0 10px 30px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--bh-text-primary);
+  white-space: nowrap;
+  pointer-events: auto;
+  max-width: 92%;
+}
+
+.bh-vector-hint-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 进度条广告标记（做标层，悬停商品名） ---------- */
+.bh-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.bh-mark {
+  position: absolute;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--bh-accent-pink);
+  box-shadow: 0 0 8px var(--bh-glow-pink);
+  transform: translateY(-50%);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.bh-mark.done {
+  opacity: 0.75;
+}
+
+.bh-mark-tip {
+  position: absolute;
+  bottom: 18px;
+  left: 0;
+  margin-left: -6px;
+  display: none;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 12px;
+  padding: 6px 13px;
+  box-shadow: 0 8px 24px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 11.5px;
+  color: var(--bh-text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.bh-mark-tip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 14px;
+  border: 5px solid transparent;
+  border-top-color: var(--bh-tip-arrow);
+}
+
+.bh-mark:hover .bh-mark-tip,
+.bh-mark:focus-visible .bh-mark-tip {
+  display: flex;
+}
+
+.bh-mark-range {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--bh-accent-pink);
+  font-weight: 600;
+}
+
+/* 可访问性底线：偏好减弱动效时倒计时环退化为静态数字（信息不丢）。 */
+@media (prefers-reduced-motion: reduce) {
+  .bh-ring-fill {
+    transition: none;
+  }
+}

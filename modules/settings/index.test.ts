@@ -25,6 +25,22 @@ describe('readAiSettings', () => {
     expect(settings.apiUrl).toBe('')
     expect(settings.mode).toBe('server')
   })
+
+  it('adSkipEnabled 默认 false（全新安装不自动跑）', async () => {
+    expect((await readAiSettings()).adSkipEnabled).toBe(false)
+  })
+
+  it('adSkipEnabled 非布尔值收敛到默认 false', async () => {
+    await chrome.storage.sync.set({ aiAssistantSettings: { adSkipEnabled: 1 } })
+    expect((await readAiSettings()).adSkipEnabled).toBe(false)
+  })
+
+  it('adSkipEnabled 持久化开合', async () => {
+    await writeAiSettings({ adSkipEnabled: true })
+    expect((await readAiSettings()).adSkipEnabled).toBe(true)
+    await writeAiSettings({ adSkipEnabled: false })
+    expect((await readAiSettings()).adSkipEnabled).toBe(false)
+  })
 })
 
 describe('writeAiSettings', () => {

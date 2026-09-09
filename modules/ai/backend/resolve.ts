@@ -4,24 +4,28 @@
 
 import type { AiSettings } from '../../settings'
 import type { AiCapabilities, AiChatEvent, ChatHandlers } from '../port'
+import type { DetectHooks } from '../rag/detect'
 import { createLocalBackend } from './local'
 import { createServerBackend } from './server'
 
-export function resolveBackend(settings: AiSettings): AiCapabilities {
+/** resolveBackend 可注入的本地链路钩子：向量降级提示等内容脚本听的回调经此透传。 */
+export type BackendHooks = DetectHooks
+
+export function resolveBackend(settings: AiSettings, hooks: BackendHooks = {}): AiCapabilities {
   switch (settings.mode) {
     case 'server':
       return createServerBackend(settings)
     case 'auto':
-      return createAutoBackend(settings)
+      return createAutoBackend(settings, hooks)
     case 'local':
     default:
-      return createLocalBackend(settings)
+      return createLocalBackend(settings, hooks)
   }
 }
 
-function createAutoBackend(settings: AiSettings): AiCapabilities {
+function createAutoBackend(settings: AiSettings, hooks: BackendHooks): AiCapabilities {
   const server = createServerBackend(settings)
-  const local = createLocalBackend(settings)
+  const local = createLocalBackend(settings, hooks)
   return {
     detectAds: (input) =>
       preferServer(() => server.detectAds(input), () => local.detectAds(input), input.signal),

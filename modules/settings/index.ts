@@ -19,6 +19,11 @@ export interface AiSettings {
   /** server 适配器端点/鉴权。 */
   serverBaseUrl: string
   serverToken: string
+  /**
+   * 去广告总开关：全新安装不自动跑，用户配好端点后手动开启。
+   * popup 的「AI 去广告」快开关是页内临时开关，与此总开关正交。
+   */
+  adSkipEnabled: boolean
 }
 
 export interface EmbeddingEndpoint {
@@ -37,6 +42,7 @@ export const DEFAULT_SETTINGS: AiSettings = {
   mode: 'local',
   serverBaseUrl: '',
   serverToken: '',
+  adSkipEnabled: false,
 }
 
 function isAiMode(value: unknown): value is AiMode {
@@ -60,6 +66,10 @@ function normalizeSettings(raw: unknown): AiSettings {
     mode: isAiMode(source.mode) ? source.mode : DEFAULT_SETTINGS.mode,
     serverBaseUrl: asString(source.serverBaseUrl, DEFAULT_SETTINGS.serverBaseUrl),
     serverToken: asString(source.serverToken, DEFAULT_SETTINGS.serverToken),
+    adSkipEnabled:
+      typeof source.adSkipEnabled === 'boolean'
+        ? source.adSkipEnabled
+        : DEFAULT_SETTINGS.adSkipEnabled,
   }
 }
 

@@ -47,7 +47,7 @@ describe('options AI 助手表单', () => {
     await wrapper.find('input[name="mode"][value="local"]').setValue()
     expect(wrapper.find('input[placeholder="https://your-service.example.com"]').exists()).toBe(false)
 
-    // 点保存：storage 写入完整表单值（含改动后的 mode）。
+    // 点保存：storage 写入完整表单值（含改动后的 mode 与默认关的 adSkipEnabled）。
     await wrapper.find('button.primary').trigger('click')
     await flushPromises()
     const stored = await storedSettings()
@@ -61,6 +61,24 @@ describe('options AI 助手表单', () => {
       mode: 'local',
       serverBaseUrl: 'https://srv.example',
       serverToken: 'tok',
+      adSkipEnabled: false,
     })
+  })
+
+  it('AI 去广告总开关回填并写回 schema', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { adSkipEnabled: true },
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const checkbox = wrapper.find('input[type="checkbox"]')
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+
+    await checkbox.setValue(false)
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).adSkipEnabled).toBe(false)
   })
 })

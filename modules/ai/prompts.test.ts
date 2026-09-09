@@ -4,6 +4,7 @@ import {
   buildSummaryMessages,
   extractJson,
   formatTimecode,
+  parseDetectAdResponse,
   parseSummarizeResponse,
   renderAiContext,
 } from './prompts'
@@ -153,5 +154,51 @@ describe('parseSummarizeResponse（先解析后退化）', () => {
 
   it('空输出退化为空 summary 空 segments，不抛错', () => {
     expect(parseSummarizeResponse('')).toEqual({ summary: '', segments: [] })
+  })
+})
+
+describe('parseDetectAdResponse（先 JSON 后宽松后保留召回窗口）', () => {
+  const FALLBACKS = [
+    { start: 492, end: 512, product_name: '', ad_content: '恰饭时间到了', confidence: 0.45 },
+  ]
+
+  it('字符串数字字段（"start":"492"）强转为数字后正常解析', () => {
+    const result = parseDetectAdResponse(
+      JSON.stringify({
+        ads: [{ start: '492', end: '580', product_name: '某产品', ad_content: '推广', confidence: '0.7' }],
+      }),
+      FALLBACKS,
+      600,
+    )
+    expect(result).toEqual([
+      { start: 492, end: 580, product_name: '某产品', ad_content: '推广', confidence: 0.7 },
+    ])
+  })
+
+  it('宽松解析：mm:ss–mm:ss 文本挖出时间段', () => {
+    const result = parseDetectAdResponse('广告段大概在 08:12–09:40 之间，别跳。', [], 600)
+    expect(result).toEqual([
+      { start: 492, end: 580, product_name: '', ad_content: '', confidence: 0.45 },
+    ])
+  })
+
+  it('宽松解析：start/end 字段对挖出时间段', () => {
+    const result = parseDetectAdResponse(
+      '根据上下文我判断：start: 120，直到 end: 180 都是推广内容。',
+      [],
+      600,
+    )
+    expect(result).toEqual([
+      { start: 120, end: 180, product_name: '', ad_content: '', confidence: 0.45 },
+    ])
+  })
+
+  it('模型明确回答 {"ads":[]}：尊重判定不拿召回窗口硬凑', () => {
+    expect(parseDetectAdResponse(JSON.stringify({ ads: [] }), FALLBACKS, 600)).toEqual([])
+  })
+
+  it('完全无法解析时退回召回窗口兜底', () => {
+    const result = parseDetectAdResponse('抱歉，我无法判断。', FALLBACKS, 600)
+    expect(result).toEqual(FALLBACKS)
   })
 })

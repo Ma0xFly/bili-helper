@@ -192,11 +192,40 @@ describe('local chat（直连流式转 SSE 事件）', () => {
   })
 })
 
-describe('local detectAds（占位）', () => {
-  it('抛 AiError config「本地去广告将在下一阶段上线」', async () => {
+describe('local detectAds（RAG 链路接线）', () => {
+  it('端点未配置抛 AiError config（内容脚本据此静默不弹 UI）', async () => {
+    const backend = createLocalBackend(settingsOf({ apiUrl: '', model: '' }))
+    await expect(backend.detectAds({ ...CONTEXT, strategy: 'smart' })).rejects.toMatchObject({
+      kind: 'config',
+      message: '还没配置端点，先去设置页填一下',
+    })
+  })
+
+  it('smart 策略走 RAG：恰饭字幕给出 rag 结果（检索与定界两端点都被请求）', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(url)
+      if (target.includes('/embeddings')) {
+        const inputs = (JSON.parse(String(init?.body)) as { input: string[] }).input
+        return new Response(
+          JSON.stringify({ data: inputs.map((_input, index) => ({ index, embedding: [1, 0] })) }),
+          { status: 200 },
+        )
+      }
+      if (target.includes('/chat/completions')) {
+        return completionResponse(
+          JSON.stringify({
+            ads: [{ start: 492, end: 580, product_name: '赞助商', ad_content: '', confidence: 0.8 }],
+          }),
+        )
+      }
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
     const backend = createLocalBackend(settingsOf({}))
-    await expect(
-      backend.detectAds({ ...CONTEXT, strategy: 'smart' }),
-    ).rejects.toMatchObject({ kind: 'config', message: '本地去广告将在下一阶段上线' })
+    const result = await backend.detectAds({ ...CONTEXT, strategy: 'smart' })
+    expect(result.source).toBe('rag')
+    expect(result.ads).toEqual([
+      { start: 492, end: 580, product_name: '赞助商', ad_content: '', confidence: 0.8 },
+    ])
   })
 })
