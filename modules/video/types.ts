@@ -20,6 +20,8 @@ export interface Danmaku {
   text: string
 }
 
+/** 评论条目：top 为置顶/父级文本；threads 结构未定，由后续采集故事按真实数据结构化。 */
 export interface Comment {
-  text: string
+  top?: { text: string }
+  threads?: unknown
 }

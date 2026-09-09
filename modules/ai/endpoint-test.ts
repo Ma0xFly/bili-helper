@@ -1,0 +1,74 @@
+// 设置页「测试连接」的数据来源：以最小补全/最小向量探测两端点，
+// 返回 {ok} 或 {ok:false, reason}，reason 由 AiError kind 映射（覆盖 CORS 未放行/Key/地址三类去向提示）。
+// 未配置时由直连客户端的 config 守卫拦截，reason 即「先去设置页配置端点」。
+
+import { AiError } from '../shared/error'
+import type { ChatEndpoint } from './llm/client'
+import { PROBE_TIMEOUT_MS, chatCompletion, embeddings, withDeadline } from './llm/client'
+
+export interface EndpointTestParams {
+  baseUrl: string
+  model: string
+  apiKey: string
+  signal?: AbortSignal
+}
+
+export type EndpointTestResult =
+  | { ok: true; model: string; ms: number }
+  | { ok: false; reason: string }
+
+export async function testChatEndpoint(params: EndpointTestParams): Promise<EndpointTestResult> {
+  // 探测用短死线：端点接受连接但不响应时不能悬挂配置台。
+  const signal = withDeadline(params.signal, PROBE_TIMEOUT_MS)
+  return runProbe(params, async (endpoint) => {
+    const { content } = await chatCompletion({
+      endpoint,
+      messages: [{ role: 'user', content: '连接测试：请只回复「pong」二字，不要补充其他内容。' }],
+      signal,
+    })
+    // 空回复同样不算连通：绿灯必须意味着端点真的答得出内容。
+    if (content.trim() === '') throw new AiError('parse', '端点返回了空回复')
+  })
+}
+
+export async function testEmbeddingEndpoint(params: EndpointTestParams): Promise<EndpointTestResult> {
+  const signal = withDeadline(params.signal, PROBE_TIMEOUT_MS)
+  return runProbe(params, async (endpoint) => {
+    await embeddings({ endpoint, inputs: ['连接测试'], signal })
+  })
+}
+
+async function runProbe(
+  params: EndpointTestParams,
+  probe: (endpoint: ChatEndpoint) => Promise<unknown>,
+): Promise<EndpointTestResult> {
+  const started = Date.now()
+  try {
+    await probe({ baseUrl: params.baseUrl, model: params.model, apiKey: params.apiKey })
+    return { ok: true, model: params.model, ms: Date.now() - started }
+  } catch (error) {
+    return { ok: false, reason: describeTestFailure(error) }
+  }
+}
+
+// AiError 五类映射为设置页红灯原因摘要；网络类附带 CORS 排查提示（浏览器直连的首要排查项）。
+export function describeTestFailure(error: unknown): string {
+  if (!(error instanceof AiError)) {
+    return error instanceof Error ? `未知错误：${error.message}` : '未知错误，请重试'
+  }
+  switch (error.kind) {
+    case 'config':
+      return error.message
+    case 'auth':
+      return `${error.status ?? '401'} 未授权：请检查 API Key 是否正确，向量端点请确认是否继承了对话 Key`
+    case 'http':
+      return `端点返回 ${error.status ?? '错误'}：请检查端点地址是否正确；5xx 可稍后重试`
+    case 'parse':
+      if (error.message === '端点返回了空回复') return error.message
+      return '响应不是 OpenAI 兼容格式：请确认该地址确实是对话/向量端点'
+    case 'network':
+      return error.message === '请求超时'
+        ? '请求超时：端点未在限定时间内响应，请检查端点是否可用'
+        : '请求没发出去：请检查端点地址与网络；浏览器直连时请确认端点已放行 B 站域名 CORS'
+  }
+}

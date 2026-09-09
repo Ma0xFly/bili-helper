@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AiError } from './error'
+import { AiError, errorInfoFrom } from './error'
 
 describe('AiError', () => {
   it('序列化包含 name/kind/message', () => {
@@ -50,5 +50,31 @@ describe('AiError', () => {
       expect(parsed).toMatchObject({ name: 'AiError', message: err.message })
       expect(parsed.cause).toBeUndefined()
     }
+  })
+})
+
+describe('errorInfoFrom（SSE end.error 载体）', () => {
+  it('AiError 直接投影 kind/message/status', () => {
+    expect(errorInfoFrom(new AiError('auth', '端点返回了 401', { status: 401 }))).toEqual({
+      kind: 'auth',
+      message: '端点返回了 401',
+      status: 401,
+    })
+  })
+
+  it('无 status 的 AiError 不携带 status 字段', () => {
+    expect(errorInfoFrom(new AiError('config', '还没配置端点'))).toEqual({
+      kind: 'config',
+      message: '还没配置端点',
+    })
+  })
+
+  it('普通 Error 收敛为 network', () => {
+    expect(errorInfoFrom(new Error('底层炸了'))).toEqual({ kind: 'network', message: '底层炸了' })
+  })
+
+  it('不可字符串化的值（null 原型对象）兜底「未知错误」而非抛 TypeError', () => {
+    const weird = Object.create(null) as object
+    expect(errorInfoFrom(weird)).toEqual({ kind: 'network', message: '未知错误' })
   })
 })

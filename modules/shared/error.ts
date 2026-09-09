@@ -59,3 +59,33 @@ export class AiError extends Error {
 function normalizeCause(cause: unknown): unknown {
   return cause instanceof Error ? { name: cause.name, message: cause.message } : cause
 }
+
+// SSE end.error 的载体：可跨事件/进程边界序列化的错误摘要（不含 cause）。
+export interface AiErrorInfo {
+  kind: AiErrorKind
+  message: string
+  status?: number
+}
+
+// 把任意抛出物归一为摘要：AiError 直接投影 kind/message/status，
+// 普通 Error 与未知值收敛为 network——能力层的边界统一出口。
+export function errorInfoFrom(error: unknown): AiErrorInfo {
+  if (error instanceof AiError) {
+    return {
+      kind: error.kind,
+      message: error.message,
+      ...(error.status === undefined ? {} : { status: error.status }),
+    }
+  }
+  if (error instanceof Error) {
+    return { kind: 'network', message: error.message || '未知错误' }
+  }
+  let message: string
+  try {
+    message = String(error)
+  } catch {
+    // null 原型对象等不可字符串化的值：兜底文案保证 end{error} 一定送得出去。
+    message = '未知错误'
+  }
+  return { kind: 'network', message }
+}
