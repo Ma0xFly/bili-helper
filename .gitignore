@@ -8,7 +8,7 @@ _bmad-output/
 
 # 其他本地工具目录
 .agents/
-.codegraph/
+.codegraph
 .omo/
 .opencode/
 
