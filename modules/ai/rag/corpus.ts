@@ -81,9 +81,9 @@ export const AD_SIGNAL_CORPUS: readonly CorpusSignal[] = Object.keys(rawCorpus)
     return meta ? parseCorpusSource(rawCorpus[file] ?? '', meta) : []
   })
 
-/** 语料文本（向量化的输入，词表/向量共用同一份解析结果）。 */
-export function corpusDocuments(): string[] {
-  return AD_SIGNAL_CORPUS.map((signal) => signal.text)
+/** 语料文本（向量化的输入，词表/向量共用同一份解析结果）；可传合并后的生效语料。 */
+export function corpusDocuments(corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS): string[] {
+  return corpus.map((signal) => signal.text)
 }
 
 /** 语料内容哈希（FNV-1a 32 位，同步纯函数）：语料内容变则哈希变，向量缓存随之全量失效。 */

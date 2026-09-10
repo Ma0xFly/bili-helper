@@ -13,7 +13,8 @@ import {
   windowVectorKey,
   writeVectors,
 } from './cache'
-import { corpusContentHash, corpusDocuments } from './corpus'
+import type { CorpusSignal } from './corpus'
+import { AD_SIGNAL_CORPUS, corpusContentHash, corpusDocuments } from './corpus'
 
 export const WINDOW_SECONDS = 30
 export const MAX_WINDOW_CHARS = 400
@@ -99,19 +100,24 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom
 }
 
-/** 语料向量（缓存感知）：键含模型/baseUrl/语料哈希，任一变化缓存不命中、全量重算。 */
+/**
+ * 语料向量（缓存感知）：键含模型/baseUrl/语料哈希，任一变化缓存不命中、全量重算。
+ * corpus 缺省为内置词库；传入「内置 + 用户补录」的生效语料时，哈希随之变化 → 自动重算，
+ * 用户加词不需要任何显式清缓存动作。
+ */
 export async function getCorpusVectors(
   endpoint: ChatEndpoint,
   signal?: AbortSignal,
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
 ): Promise<number[][]> {
   const key = corpusVectorKey({
     model: endpoint.model,
     baseUrl: endpoint.baseUrl,
-    corpusHash: corpusContentHash(),
+    corpusHash: corpusContentHash(corpus),
   })
   const cached = await readVectors(key)
   if (cached?.vectors && cached.vectors.length > 0) return cached.vectors
-  const documents = corpusDocuments()
+  const documents = corpusDocuments(corpus)
   const vectors = await embeddings({ endpoint, inputs: documents, signal })
   await writeVectors(key, { vectors })
   return vectors
@@ -157,12 +163,13 @@ export async function rankWindowsByVector(
   video: { bvid: string; cid: number | undefined },
   endpoint: ChatEndpoint,
   signal?: AbortSignal,
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
 ): Promise<VectorRankedWindow[]> {
   if (windows.length === 0) return []
   // 每个视频进来先清掉其他视频的窗口缓存键：旧视频字幕修正产生的新旧向量键不会无期限堆积。
   await pruneStaleWindowVectors(videoIdentityKey(video.bvid, video.cid))
   const [corpusVectors, windowVectors] = await Promise.all([
-    getCorpusVectors(endpoint, signal),
+    getCorpusVectors(endpoint, signal, corpus),
     getWindowVectors(windows, videoIdentityKey(video.bvid, video.cid), endpoint, signal),
   ])
   const normalizedCorpus = corpusVectors.map(normalize)

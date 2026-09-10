@@ -1,23 +1,29 @@
 <script setup lang="ts">
-// AI 助手组真实表单：对话/向量端点（继承态虚线提示）、运行模式单选（server 字段条件显示）、
-// 双端点独立拉取模型、测试连接红绿反馈条、保存。端点读写只经 modules/settings 助手。
-// 其余分组（服务器独立页签/过滤/净化/布局/增强）仍为占位，待后续故事落地。
+// AI 助手组真实表单：对话端点、服务器开关（含回退子开关）、一键体检、功能开关，
+// 向量端点折叠进「高级」（默认继承对话端点，绝大多数用户不需要展开）。
+// 运行模式不暴露 local/server/auto 术语：开关关=local，开关开=server，回退勾上=auto。
+// 端点读写只经 modules/settings 助手。其余分组（服务器独立页签/过滤/净化/布局/增强）仍为占位。
 
 import { computed, onMounted, reactive, ref } from 'vue'
 import { testChatEndpoint, testEmbeddingEndpoint } from '../../modules/ai/endpoint-test'
 import type { EndpointTestResult } from '../../modules/ai/endpoint-test'
 import { listModels } from '../../modules/ai/llm/client'
+import { probeServerEndpoint } from '../../modules/ai/server-probe'
+import { AD_SIGNAL_CORPUS } from '../../modules/ai/rag/corpus'
+import {
+  USER_CORPUS_CATEGORIES,
+  addUserCorpusEntry,
+  clearUserCorpus,
+  exportUserCorpusMarkdown,
+  readUserCorpus,
+  removeUserCorpusEntry,
+} from '../../modules/ai/rag/user-corpus'
+import type { UserCorpusEntry } from '../../modules/ai/rag/user-corpus'
 import { readAiSettings, resolveEmbeddingEndpoint, writeAiSettings } from '../../modules/settings'
 import type { AiMode } from '../../modules/settings'
 
 const groups = ['AI 助手', '服务器', '过滤', '净化', '布局', '增强']
 const active = ref<string>(groups[0] ?? 'AI 助手')
-
-const MODES: { value: AiMode; name: string; description: string }[] = [
-  { value: 'local', name: '本地直连', description: 'AI 流量从浏览器直发下面的自定义端点' },
-  { value: 'server', name: '自建服务', description: '请求统一转发到你的服务器端点' },
-  { value: 'auto', name: '智能首选', description: '先走服务器，失败自动回退本地直连' },
-]
 
 interface FormModel {
   apiUrl: string
@@ -59,6 +65,7 @@ onMounted(async () => {
     form.embedKey = settings.embedKey
     form.embedModel = settings.embedModel
     form.mode = settings.mode
+    fallbackWanted.value = settings.mode === 'auto'
     form.serverBaseUrl = settings.serverBaseUrl
     form.serverToken = settings.serverToken
     form.adSkipEnabled = settings.adSkipEnabled
@@ -69,8 +76,30 @@ onMounted(async () => {
   }
 })
 
-// server 字段只在 mode=server/auto 时展示，local 整块隐藏。
-const showServerFields = computed(() => form.mode === 'server' || form.mode === 'auto')
+// 运行模式的开关化表达：底层仍是 local/server/auto 三态，界面只问两个是非题。
+// fallbackWanted 记住「要回退」的意愿，服务器开关来回切时不丢这个选择。
+const fallbackWanted = ref(false)
+
+const useServer = computed({
+  get: () => form.mode !== 'local',
+  set: (on: boolean) => {
+    form.mode = on ? (fallbackWanted.value ? 'auto' : 'server') : 'local'
+  },
+})
+
+const useFallback = computed({
+  get: () => fallbackWanted.value,
+  set: (on: boolean) => {
+    fallbackWanted.value = on
+    if (form.mode !== 'local') form.mode = on ? 'auto' : 'server'
+  },
+})
+
+/** 本机直连端点在纯 server 模式下用不到，给一句说明而不是整块藏起来（切回即用）。 */
+const localEndpointsInUse = computed(() => form.mode !== 'server')
+
+// 向量端点默认折叠：留空即继承对话端点，展开才有输入框（高级用户才需要拆分）。
+const advancedOpen = ref(false)
 
 // 向量端点读侧解析：空字段继承对话端点（与 settings 模块同语义，仅展示、不回写）。
 const resolvedEmbed = computed(() => resolveEmbeddingEndpoint(form))
@@ -124,32 +153,53 @@ async function fetchEmbedModels(): Promise<void> {
   }
 }
 
-type Feedback = { kind: 'ok' | 'fail'; text: string }
+type Feedback = { kind: 'ok' | 'warn' | 'fail'; text: string }
 
 const testing = ref(false)
-const chatFeedback = ref<Feedback | null>(null)
-const embedFeedback = ref<Feedback | null>(null)
+const diagResults = ref<Feedback[]>([])
 
 function renderFeedback(label: string, result: EndpointTestResult): Feedback {
   if (result.ok) return { kind: 'ok', text: `${label}连接成功 · ${result.model} 响应 ${result.ms}ms` }
   return { kind: 'fail', text: `${label}连接失败 · ${result.reason}` }
 }
 
-async function runTests(): Promise<void> {
+/**
+ * 一键体检：按当前模式只测真正会被用到的通道，不测用不上的（纯 server 模式不测本机端点，
+ * 纯 local 模式不测服务器）。auto 两边都测——回退路径必须真的可用，否则「智能回退」是空话。
+ */
+async function runDiagnostics(): Promise<void> {
   testing.value = true
-  chatFeedback.value = null
-  embedFeedback.value = null
+  diagResults.value = []
   try {
-    // 向量端点按继承解析后的值探测；对话端点用表单原值——两端点独立出结果。
-    const embed = resolveEmbeddingEndpoint(form)
-    const [chatResult, embedResult] = await Promise.all([
-      testChatEndpoint({ baseUrl: form.apiUrl, model: form.model, apiKey: form.apiKey }),
-      testEmbeddingEndpoint({ baseUrl: embed.baseUrl, model: embed.model, apiKey: embed.apiKey }),
-    ])
-    chatFeedback.value = renderFeedback('对话端点', chatResult)
-    embedFeedback.value = renderFeedback('向量端点', embedResult)
+    const results: Feedback[] = []
+    if (form.mode !== 'local') {
+      const probe = await probeServerEndpoint({
+        baseUrl: form.serverBaseUrl,
+        token: form.serverToken,
+      })
+      if (!probe.ok) results.push({ kind: 'fail', text: `服务器连接失败 · ${probe.reason}` })
+      else if (probe.healthSupported) results.push({ kind: 'ok', text: `服务器连接成功 · 响应 ${probe.ms}ms` })
+      else results.push({ kind: 'warn', text: '服务器可达，但未提供体检接口（不影响转发）' })
+    }
+    if (form.mode !== 'server') {
+      const embed = resolveEmbeddingEndpoint(form)
+      const [chatResult, embedResult] = await Promise.all([
+        testChatEndpoint({ baseUrl: form.apiUrl, model: form.model, apiKey: form.apiKey }),
+        testEmbeddingEndpoint({ baseUrl: embed.baseUrl, model: embed.model, apiKey: embed.apiKey }),
+      ])
+      results.push(renderFeedback('对话端点', chatResult))
+      // 向量端点继承对话端点时不单独报绿（同一条链路，避免噪音）；拆开了或出问题才报，
+      // 出问题顺带展开高级区，让用户直接看到该改哪三个字段。
+      const embedConfiguredSeparately =
+        form.embedBaseUrl.trim() !== '' || form.embedModel.trim() !== '' || form.embedKey.trim() !== ''
+      if (!embedResult.ok) advancedOpen.value = true
+      if (embedConfiguredSeparately || !embedResult.ok) {
+        results.push(renderFeedback('向量端点', embedResult))
+      }
+    }
+    diagResults.value = results
   } finally {
-    // 无论探测结果如何，按钮都要从「测试中…」恢复。
+    // 无论探测结果如何，按钮都要从「体检中…」恢复。
     testing.value = false
   }
 }
@@ -171,6 +221,90 @@ async function save(): Promise<void> {
     saveTimer = undefined
   }, 2000)
 }
+
+// ---------- 广告词库（用户层补录）----------
+// 低频功能，收在设置页而不是播放器：漏检时用户自己最清楚关键词是什么，手动补一条即可。
+// 补录即时生效——词条进入生效语料 → 语料哈希变 → 向量缓存自动重算，无需手动清缓存。
+const builtinCorpusCount = AD_SIGNAL_CORPUS.length
+const userEntries = ref<UserCorpusEntry[]>([])
+const corpusText = ref('')
+const corpusCategory = ref<string>(USER_CORPUS_CATEGORIES[0] ?? 'scripts')
+const corpusNote = ref('')
+const corpusAdding = ref(false)
+const corpusHint = ref<Feedback | null>(null)
+const corpusPatch = ref('')
+const corpusCategories = USER_CORPUS_CATEGORIES
+
+async function loadUserCorpus(): Promise<void> {
+  userEntries.value = await readUserCorpus()
+}
+
+async function addCorpusEntry(): Promise<void> {
+  const text = corpusText.value.trim()
+  corpusAdding.value = true
+  corpusHint.value = null
+  try {
+    const result = await addUserCorpusEntry({
+      text,
+      category: corpusCategory.value,
+      note: corpusNote.value,
+    })
+    if (!result.ok) {
+      corpusHint.value = { kind: 'fail', text: result.reason }
+      return
+    }
+    userEntries.value = result.entries
+    corpusText.value = ''
+    corpusNote.value = ''
+    // 词条变了，已生成的导出 patch 立即过期（避免用户复制走旧内容）。
+    corpusPatch.value = ''
+    corpusHint.value = { kind: 'ok', text: `已补录「${text}」，下次识别即生效` }
+  } finally {
+    corpusAdding.value = false
+  }
+}
+
+async function removeCorpusEntry(text: string): Promise<void> {
+  corpusHint.value = null
+  try {
+    userEntries.value = await removeUserCorpusEntry(text)
+    corpusPatch.value = ''
+    corpusHint.value = { kind: 'ok', text: `已删除「${text}」` }
+  } catch {
+    // 写失败必须露出来：列表没变却说「已删除」会让用户以为生效了。
+    corpusHint.value = { kind: 'fail', text: '删除失败，请重试' }
+  }
+}
+
+async function clearCorpusEntries(): Promise<void> {
+  corpusHint.value = null
+  try {
+    userEntries.value = await clearUserCorpus()
+    corpusPatch.value = ''
+    corpusHint.value = { kind: 'ok', text: '已清空你补录的词条' }
+  } catch {
+    corpusHint.value = { kind: 'fail', text: '清空失败，请重试' }
+  }
+}
+
+async function exportCorpus(): Promise<void> {
+  corpusHint.value = null
+  const patch = exportUserCorpusMarkdown(userEntries.value)
+  if (patch === '') {
+    corpusHint.value = { kind: 'fail', text: '还没有补录的词条可导出' }
+    return
+  }
+  corpusPatch.value = patch
+  try {
+    await navigator.clipboard.writeText(patch)
+    corpusHint.value = { kind: 'ok', text: '已复制到剪贴板（也可在下方文本框手动全选复制）' }
+  } catch {
+    // 剪贴板不可用不是错误：文本框已经摆在那里，手动复制同样能完成入库。
+    corpusHint.value = { kind: 'warn', text: '已生成 patch，请在下方文本框手动全选复制' }
+  }
+}
+
+onMounted(loadUserCorpus)
 </script>
 
 <template>
@@ -194,13 +328,16 @@ async function save(): Promise<void> {
       <template v-if="active === 'AI 助手'">
         <header class="content-head">
           <h1>AI 助手</h1>
-          <p class="content-sub">模型端点与运行模式 · 直连 OpenAI 兼容端点</p>
+          <p class="content-sub">直连 OpenAI 兼容端点，或转发到你自己的服务器</p>
         </header>
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
         <section class="card" aria-labelledby="chat-endpoint-title">
           <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
+          <p v-if="!localEndpointsInUse" class="card-note">
+            当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
+          </p>
           <label class="field">
             <span class="field-label">Base URL</span>
             <input v-model.trim="form.apiUrl" type="url" placeholder="https://api.openai.com/v1" />
@@ -234,72 +371,81 @@ async function save(): Promise<void> {
           </div>
         </section>
 
-        <section class="card" aria-labelledby="embed-endpoint-title">
-          <h2 id="embed-endpoint-title" class="card-title">向量端点（语义分段检索）</h2>
-          <label class="field">
-            <span class="field-label">Base URL</span>
-            <input
-              v-model.trim="form.embedBaseUrl"
-              type="url"
-              placeholder="留空则继承对话端点"
-              :class="{ inheriting: embedBaseInherits }"
-            />
-            <span v-if="embedBaseInherits" class="field-hint">{{ embedBaseHint }}</span>
-          </label>
-          <label class="field">
-            <span class="field-label">API Key</span>
-            <input
-              v-model="form.embedKey"
-              type="password"
-              placeholder="留空则继承对话端点"
-              :class="{ inheriting: embedKeyInherits }"
-              autocomplete="off"
-            />
-            <span v-if="embedKeyInherits" class="field-hint">{{ embedKeyHint }}</span>
-          </label>
-          <div class="field">
-            <span class="field-label">嵌入模型</span>
-            <div class="combo-row">
-              <input
-                v-model.trim="form.embedModel"
-                list="embed-model-options"
-                placeholder="留空则继承对话端点"
-                class="grow"
-                :class="{ inheriting: embedModelInherits }"
-              />
-              <datalist id="embed-model-options">
-                <option v-for="id in embedModelOptions" :key="id" :value="id" />
-              </datalist>
-              <button
-                type="button"
-                class="ghost"
-                :disabled="embedModelsLoading"
-                @click="fetchEmbedModels"
-              >
-                {{ embedModelsLoading ? '拉取中…' : '拉取模型' }}
-              </button>
-            </div>
-            <span v-if="embedModelInherits && !embedModelsHint" class="field-hint">
-              {{ embedModelHint }}
+        <section class="card" aria-labelledby="server-title">
+          <h2 id="server-title" class="card-title">服务器转发</h2>
+          <label class="switch-row">
+            <span class="switch-info">
+              <span class="switch-name">我有自己的服务器</span>
+              <span class="field-hint">
+                开启后，AI 请求统一发到你的服务器，由服务端做检索与模型调用；关闭则由浏览器直连上方端点。
+              </span>
             </span>
-            <span v-if="embedModelsHint" class="field-hint">{{ embedModelsHint }}</span>
-          </div>
+            <span class="switch">
+              <input v-model="useServer" type="checkbox" aria-label="使用自己的服务器" />
+              <span class="switch-track" aria-hidden="true" />
+              <span class="switch-knob" aria-hidden="true" />
+            </span>
+          </label>
+
+          <template v-if="useServer">
+            <label class="field">
+              <span class="field-label">Server Base URL</span>
+              <input
+                v-model.trim="form.serverBaseUrl"
+                type="url"
+                placeholder="https://your-service.example.com"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Server Token</span>
+              <input
+                v-model="form.serverToken"
+                type="password"
+                placeholder="可留空"
+                autocomplete="off"
+              />
+              <span class="field-hint">非空时所有转发请求统一携带 Authorization: Bearer ⟨token⟩。</span>
+            </label>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">服务器失败时回退浏览器直连</span>
+                <span class="field-hint">
+                  服务器不可用时自动改用上方端点继续工作（需要上方端点也配好）。
+                </span>
+              </span>
+              <span class="switch">
+                <input v-model="useFallback" type="checkbox" aria-label="服务器失败时回退直连" />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
+          </template>
         </section>
 
-        <section class="card" aria-labelledby="mode-title">
-          <h2 id="mode-title" class="card-title">运行模式</h2>
-          <p class="card-note">决定 AI 请求走哪条通道，不影响总结的触发时机（一律手动触发）。</p>
-          <div class="mode-cards" role="radiogroup" aria-label="运行模式">
-            <label
-              v-for="mode in MODES"
-              :key="mode.value"
-              class="mode-card"
-              :class="{ active: form.mode === mode.value }"
+        <section class="card" aria-labelledby="test-title">
+          <h2 id="test-title" class="card-title">一键体检</h2>
+          <p class="card-note">
+            按当前配置实际探测会被用到的通道：{{
+              useServer
+                ? useFallback
+                  ? '服务器 + 浏览器直连的两个端点（回退路径也要可用）'
+                  : '只探服务器'
+                : '只探浏览器直连的端点'
+            }}。
+          </p>
+          <button type="button" class="ghost" :disabled="testing" @click="runDiagnostics">
+            {{ testing ? '体检中…' : '开始体检' }}
+          </button>
+          <div aria-live="polite">
+            <div
+              v-for="(item, index) in diagResults"
+              :key="index"
+              class="feedback"
+              :class="item.kind"
             >
-              <input v-model="form.mode" type="radio" name="mode" :value="mode.value" />
-              <span class="mode-name">{{ mode.name }}</span>
-              <span class="mode-desc">{{ mode.description }}</span>
-            </label>
+              <span class="dot" aria-hidden="true" />
+              <span>{{ item.text }}</span>
+            </div>
           </div>
         </section>
 
@@ -335,40 +481,143 @@ async function save(): Promise<void> {
           </label>
         </section>
 
-        <section v-if="showServerFields" class="card" aria-labelledby="server-fields-title">
-          <h2 id="server-fields-title" class="card-title">服务器转发</h2>
+        <section class="card" aria-labelledby="corpus-title">
+          <h2 id="corpus-title" class="card-title">广告词库</h2>
           <p class="card-note">
-            server 模式全部请求经此端点转发；auto 模式服务器失败时自动回退本地直连。
+            内置 {{ builtinCorpusCount }} 条（随版本更新，不可改）+ 你补录的
+            {{ userEntries.length }} 条。遇到没识别出来的广告，把它的关键词补在这里：保存即生效，
+            下次识别自动重算语料向量。
           </p>
-          <label class="field">
-            <span class="field-label">Server Base URL</span>
+
+          <div class="corpus-add">
             <input
-              v-model.trim="form.serverBaseUrl"
-              type="url"
-              placeholder="https://your-service.example.com"
+              v-model.trim="corpusText"
+              class="grow"
+              placeholder="漏掉的广告关键词，如「某某品牌」"
+              aria-label="补录词条"
+              @keydown.enter.prevent="addCorpusEntry"
             />
-          </label>
-          <label class="field">
-            <span class="field-label">Server Token</span>
-            <input v-model="form.serverToken" type="password" placeholder="可留空" autocomplete="off" />
-            <span class="field-hint">非空时所有转发请求统一携带 Authorization: Bearer ⟨token⟩。</span>
-          </label>
+            <select v-model="corpusCategory" aria-label="词条品类">
+              <option v-for="category in corpusCategories" :key="category" :value="category">
+                {{ category }}
+              </option>
+            </select>
+            <button type="button" class="ghost" :disabled="corpusAdding" @click="addCorpusEntry">
+              {{ corpusAdding ? '添加中…' : '补录' }}
+            </button>
+          </div>
+          <input
+            v-model.trim="corpusNote"
+            class="corpus-note-input"
+            placeholder="来源备注（可选），如 BV1xx 03:20 漏检"
+            aria-label="词条来源备注"
+          />
+
+          <ul v-if="userEntries.length > 0" class="corpus-list">
+            <li v-for="entry in userEntries" :key="entry.text" class="corpus-item">
+              <span class="corpus-word">{{ entry.text }}</span>
+              <span class="corpus-tag">{{ entry.category }}</span>
+              <span v-if="entry.note !== ''" class="corpus-note">{{ entry.note }}</span>
+              <button
+                type="button"
+                class="corpus-del"
+                :aria-label="`删除 ${entry.text}`"
+                @click="removeCorpusEntry(entry.text)"
+              >
+                删除
+              </button>
+            </li>
+          </ul>
+          <p v-else class="field-hint">你还没有补录词条。</p>
+
+          <div class="corpus-actions">
+            <button type="button" class="ghost" @click="exportCorpus">导出入库 patch</button>
+            <button
+              v-if="userEntries.length > 0"
+              type="button"
+              class="ghost danger"
+              @click="clearCorpusEntries"
+            >
+              清空补录
+            </button>
+          </div>
+          <textarea
+            v-if="corpusPatch !== ''"
+            v-model="corpusPatch"
+            class="corpus-patch"
+            rows="8"
+            readonly
+            aria-label="导出的词库 patch"
+          />
+
+          <div v-if="corpusHint" class="feedback" :class="corpusHint.kind" aria-live="polite">
+            <span class="dot" aria-hidden="true" />
+            <span>{{ corpusHint.text }}</span>
+          </div>
         </section>
 
-        <section class="card" aria-labelledby="test-title">
-          <h2 id="test-title" class="card-title">连接测试</h2>
-          <p class="card-note">用最小请求分别探测对话与向量端点，向量端点按继承后的值测试。</p>
-          <button type="button" class="ghost" :disabled="testing" @click="runTests">
-            {{ testing ? '测试中…' : '测试连接' }}
+        <section class="card" aria-labelledby="advanced-title">
+          <h2 id="advanced-title" class="card-title">高级</h2>
+          <button
+            type="button"
+            class="ghost"
+            :aria-expanded="advancedOpen ? 'true' : 'false'"
+            aria-controls="advanced-embed"
+            @click="advancedOpen = !advancedOpen"
+          >
+            {{ advancedOpen ? '收起向量端点' : '向量端点（语义分段检索）' }}
           </button>
-          <div aria-live="polite">
-            <div v-if="chatFeedback" class="feedback" :class="chatFeedback.kind">
-              <span class="dot" aria-hidden="true" />
-              <span>{{ chatFeedback.text }}</span>
-            </div>
-            <div v-if="embedFeedback" class="feedback" :class="embedFeedback.kind">
-              <span class="dot" aria-hidden="true" />
-              <span>{{ embedFeedback.text }}</span>
+          <p class="card-note">
+            三项全留空即继承上方对话端点——多数人不需要展开。只有对话与向量走不同服务商时才拆。
+          </p>
+          <div v-show="advancedOpen" id="advanced-embed">
+            <label class="field">
+              <span class="field-label">Base URL</span>
+              <input
+                v-model.trim="form.embedBaseUrl"
+                type="url"
+                placeholder="留空则继承对话端点"
+                :class="{ inheriting: embedBaseInherits }"
+              />
+              <span v-if="embedBaseInherits" class="field-hint">{{ embedBaseHint }}</span>
+            </label>
+            <label class="field">
+              <span class="field-label">API Key</span>
+              <input
+                v-model="form.embedKey"
+                type="password"
+                placeholder="留空则继承对话端点"
+                :class="{ inheriting: embedKeyInherits }"
+                autocomplete="off"
+              />
+              <span v-if="embedKeyInherits" class="field-hint">{{ embedKeyHint }}</span>
+            </label>
+            <div class="field">
+              <span class="field-label">嵌入模型</span>
+              <div class="combo-row">
+                <input
+                  v-model.trim="form.embedModel"
+                  list="embed-model-options"
+                  placeholder="留空则继承对话端点"
+                  class="grow"
+                  :class="{ inheriting: embedModelInherits }"
+                />
+                <datalist id="embed-model-options">
+                  <option v-for="id in embedModelOptions" :key="id" :value="id" />
+                </datalist>
+                <button
+                  type="button"
+                  class="ghost"
+                  :disabled="embedModelsLoading"
+                  @click="fetchEmbedModels"
+                >
+                  {{ embedModelsLoading ? '拉取中…' : '拉取模型' }}
+                </button>
+              </div>
+              <span v-if="embedModelInherits && !embedModelsHint" class="field-hint">
+                {{ embedModelHint }}
+              </span>
+              <span v-if="embedModelsHint" class="field-hint">{{ embedModelsHint }}</span>
             </div>
           </div>
         </section>
@@ -542,6 +791,133 @@ input.inheriting {
   flex: 1;
 }
 
+/* 广告词库：一行「词条 + 品类 + 补录」，下面挂可选备注与已补录列表。 */
+select {
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid #e3def0;
+  background: #ffffff;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: #2e2a3b;
+  cursor: pointer;
+}
+
+select:focus {
+  border-color: #7c5cfc;
+  box-shadow: 0 0 0 3px rgba(124, 92, 252, 0.12);
+}
+
+.corpus-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 560px;
+}
+
+.corpus-add .grow {
+  flex: 1;
+  max-width: none;
+}
+
+.corpus-note-input {
+  margin-top: 10px;
+  max-width: 560px;
+}
+
+.corpus-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.corpus-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #ece7f7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+}
+
+.corpus-word {
+  font-weight: 600;
+}
+
+.corpus-tag {
+  font-size: 11px;
+  color: #7c5cfc;
+  background: #f1edff;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.corpus-note {
+  font-size: 11.5px;
+  color: #8b84a0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.corpus-del {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: #a49cb8;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.corpus-del:hover {
+  color: #e5484d;
+  background: #fdecee;
+}
+
+.corpus-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.ghost.danger {
+  color: #e5484d;
+  border-color: rgba(255, 143, 163, 0.45);
+}
+
+.ghost.danger:hover:not(:disabled) {
+  background: #fdecee;
+}
+
+.corpus-patch {
+  width: 100%;
+  max-width: 560px;
+  box-sizing: border-box;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e3def0;
+  background: #fbfaff;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #4a4460;
+  resize: vertical;
+}
+
 .field-hint {
   display: block;
   font-size: 12px;
@@ -577,57 +953,6 @@ input:focus-visible {
 .ghost:disabled {
   opacity: 0.6;
   cursor: default;
-}
-
-.mode-cards {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-.mode-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px;
-  border: 1px solid #e3def0;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.55);
-  cursor: pointer;
-}
-
-.mode-card:hover {
-  border-color: #b47cf5;
-}
-
-.mode-card.active {
-  border-color: #7c5cfc;
-  background: #f1edff;
-  box-shadow: 0 4px 14px rgba(124, 92, 252, 0.16);
-}
-
-.mode-card:focus-within {
-  outline: 2px solid #7c5cfc;
-  outline-offset: 2px;
-}
-
-.mode-card input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.mode-name {
-  font-weight: 700;
-  font-size: 13.5px;
-}
-
-.mode-desc {
-  font-size: 12px;
-  color: #736b8a;
-  line-height: 1.6;
 }
 
 /* 总开关：track 36×20 胶囊 + 16px 白圆 knob，开态渐变（与 popup 快开关同源视觉）。 */
@@ -725,6 +1050,13 @@ input:focus-visible {
   background: #fdecee;
   color: #e5484d;
   border: 1px solid rgba(255, 143, 163, 0.35);
+}
+
+/* 黄灯：可达但没体检到底（第三方服务未提供体检接口），不是错误，别用红色吓人。 */
+.feedback.warn {
+  background: #fdf5e6;
+  color: #b5822a;
+  border: 1px solid rgba(240, 196, 120, 0.4);
 }
 
 .dot {

@@ -2,6 +2,7 @@
 // 检索方向 = 内置语料信号为查询、候选窗口为文档；idf 取自窗口集合自身，
 // 词表命中加语料信号权重（恰饭话术类权重高于普通品牌词）。
 
+import type { CorpusSignal } from './corpus'
 import { AD_SIGNAL_CORPUS } from './corpus'
 
 export interface LexicalRankedWindow {
@@ -41,18 +42,24 @@ export function cjkBigrams(text: string): string[] {
 }
 
 /** 词表精确匹配：语料短语原样出现在文本里即命中（返回命中短语集合）。 */
-export function exactSignalMatches(text: string): Set<string> {
+export function exactSignalMatches(
+  text: string,
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
+): Set<string> {
   const hits = new Set<string>()
-  for (const signal of AD_SIGNAL_CORPUS) {
+  for (const signal of corpus) {
     if (text.includes(signal.text)) hits.add(signal.text)
   }
   return hits
 }
 
 /** 精确命中的加权分：命中短语的语料权重求和。 */
-export function exactSignalScore(text: string): number {
+export function exactSignalScore(
+  text: string,
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
+): number {
   let score = 0
-  for (const signal of AD_SIGNAL_CORPUS) {
+  for (const signal of corpus) {
     if (text.includes(signal.text)) score += signal.weight
   }
   return score
@@ -94,9 +101,9 @@ function buildDocStats(documents: string[]): DocStats {
 }
 
 /** 语料查询词（去重）：词表精确匹配的天然候选词集合。 */
-function corpusQueryTerms(): string[] {
+function corpusQueryTerms(corpus: readonly CorpusSignal[]): string[] {
   const terms = new Set<string>()
-  for (const signal of AD_SIGNAL_CORPUS) {
+  for (const signal of corpus) {
     for (const token of tokenize(signal.text)) terms.add(token)
   }
   return [...terms]
@@ -105,12 +112,16 @@ function corpusQueryTerms(): string[] {
 /**
  * 对窗口集跑词表召回：BM25 与精确命中加权之和为窗口得分，0 分（无任何语料痕迹）不进入结果。
  * 输入是字幕切出的窗口（约 30 秒），输出按得分降序的命中窗口下标。
+ * corpus 缺省为内置词库；编排层会传入「内置 + 用户补录」的生效语料。
  */
-export function rankWindowsByLexical(windows: { text: string }[]): LexicalRankedWindow[] {
+export function rankWindowsByLexical(
+  windows: { text: string }[],
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
+): LexicalRankedWindow[] {
   if (windows.length === 0) return []
   const documents = windows.map((window) => window.text)
   const stats = buildDocStats(documents)
-  const queryTerms = corpusQueryTerms()
+  const queryTerms = corpusQueryTerms(corpus)
   const ranked: LexicalRankedWindow[] = []
   for (let index = 0; index < windows.length; index += 1) {
     const freq = stats.termFreqs[index]
@@ -124,7 +135,7 @@ export function rankWindowsByLexical(windows: { text: string }[]): LexicalRanked
       const norm = docLength / Math.max(stats.avgLength, 1)
       bm25 += (idf * tf * (K1 + 1)) / (tf + K1 * (1 - B + B * norm))
     }
-    const score = bm25 + exactSignalScore(documents[index] ?? '')
+    const score = bm25 + exactSignalScore(documents[index] ?? '', corpus)
     if (score > 0) ranked.push({ index, score })
   }
   ranked.sort((a, b) => b.score - a.score || a.index - b.index)

@@ -18,6 +18,7 @@ import { rankWindowsByLexical } from './bm25'
 import { chunkSubtitleWindows } from './vector'
 import type { SubtitleWindow } from './vector'
 import { rankWindowsByVector } from './vector'
+import { effectiveCorpus } from './user-corpus'
 import { rrfFuse } from './rrf'
 
 export interface DetectHooks {
@@ -213,11 +214,13 @@ export async function runRagDetect(
   const { video, subtitles } = input
   const duration = video.duration
   const windows = chunkSubtitleWindows(subtitles)
+  // 生效语料 = 内置词库 + 用户补录（一次读取，两路召回共用同一份，避免两路口径不一致）。
+  const corpus = await effectiveCorpus()
 
   // 召回第一路：词表/BM25（纯计算，内部已防御，再兜一层保证永不抛错）。
   let lexicalRanked: LexicalRankedWindow[] = []
   try {
-    lexicalRanked = rankWindowsByLexical(windows)
+    lexicalRanked = rankWindowsByLexical(windows, corpus)
   } catch {
     lexicalRanked = []
   }
@@ -227,7 +230,7 @@ export async function runRagDetect(
   let vectorHintFired = false
   if (!input.signal?.aborted && windows.length > 0) {
     try {
-      const ranked = await rankWindowsByVector(windows, video, embedEndpoint, input.signal)
+      const ranked = await rankWindowsByVector(windows, video, embedEndpoint, input.signal, corpus)
       vectorRankedIndexes = ranked.map((item) => item.index)
     } catch (error) {
       if (isAbortError(error) || input.signal?.aborted) throw error
