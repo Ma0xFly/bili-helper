@@ -9,6 +9,8 @@
     "zip": "wxt zip",
     "test": "vitest run",
     "typecheck": "vue-tsc --noEmit",
+    "server:build": "vite build --config server/vite.config.ts",
+    "server:start": "node server/dist/server.mjs",
     "prepare": "wxt prepare"
   },
   "dependencies": {

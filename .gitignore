@@ -29,6 +29,9 @@ _bmad-output/
 .output/
 .wxt/
 
+# 转发服务端构建产物（源码在 server/，产物由 pnpm server:build 生成）
+server/dist/
+
 # 系统 / 编辑器
 .DS_Store
 *.log

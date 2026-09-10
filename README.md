@@ -133,6 +133,17 @@
 
 「一键体检」会按当前配置只探测真正会被用到的通道（直连端点 / 服务器 / 两者），红绿灯直接告出可用性与原因。
 
+### 转发服务端（可选部署）
+
+仓库自带一份服务端参考实现 `server/`，让「我有自己的服务器」开箱可用：
+
+```bash
+pnpm server:build                      # → server/dist/server.mjs（单文件、零运行时依赖）
+AI_API_URL=… AI_MODEL=… AI_SERVER_TOKEN=… node server/dist/server.mjs
+```
+
+它**直接复用 `modules/ai` 里的同一套混合检索 RAG 与提示词**（不是另写一份），因此两种模式的识别口径一致；相比浏览器直连，它不受端点 CORS 限制、Key 不出服务器、向量缓存集中一份。契约、环境变量、反代与公网暴露注意事项见 [server/README.md](server/README.md)。
+
 ---
 
 ## 📄 安装与使用
@@ -143,7 +154,7 @@
 4. 选择「加载已解压的扩展程序」，指向 `.output/chrome-mv3` 目录；
 5. 打开 bilibili.com，在扩展设置页按需开启功能、配置 AI 端点。
 
-补充：`pnpm dev` 会在开发模式下热更新产物，改完代码重载扩展即可；`pnpm test` 跑单元测试。
+补充：`pnpm dev` 会在开发模式下热更新产物，改完代码重载扩展即可；`pnpm test` 跑单元测试；`pnpm server:build` + `pnpm server:start` 构建并启动可选的转发服务端（见 [server/README.md](server/README.md)）。
 
 ## 📜 许可
 
