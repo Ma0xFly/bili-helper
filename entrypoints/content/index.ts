@@ -18,12 +18,22 @@ import {
   collectVideoMeta,
 } from '../../modules/video'
 import { recordSkipped } from '../../modules/content/stats'
+import { panel, panelActions, panelBackoffMs, panelVisibleNow } from '../../modules/content/panel-state'
 import {
   MSG_AD_SKIP_PAGE_STATE,
   MSG_AD_SKIP_PAGE_TOGGLE,
+  MSG_PANEL_PAGE_STATE,
+  MSG_PANEL_PAGE_TOGGLE,
   isKnownMessage,
+  isPanelMessage,
 } from '../../modules/content/protocol'
-import type { AdSkipToggleRequest } from '../../modules/content/protocol'
+import type {
+  AdSkipToggleRequest,
+  PanelPageState,
+  PanelToggleRequest,
+  PanelToggleResponse,
+} from '../../modules/content/protocol'
+import { extractBvidFromUrl } from '../../modules/video/collectors'
 
 // 一切注入 UI 寄居 Shadow DOM。cssInjectionMode:"ui" 让引入的 overlay.css/uno.css
 // 经 createShadowRootUi 注入 shadow root，与 B 站页面样式完全隔离。
@@ -33,13 +43,16 @@ export default defineContentScript({
   cssInjectionMode: 'ui',
   async main(ctx) {
     let uiMount: Awaited<ReturnType<typeof createShadowRootUi<HTMLElement>>> | null = null
+    // 面板测量用：onMount 时捕获 shadow root，避免依赖 uiMount 的内部形状。
+    let panelShadowRoot: ShadowRoot | null = null
     try {
       uiMount = await createShadowRootUi<HTMLElement>(ctx, {
         name: 'bili-helper-anchor',
         position: 'inline',
         anchor: 'body',
         append: 'last',
-        onMount(container, _shadow, shadowHost) {
+        onMount(container, shadow, shadowHost) {
+          panelShadowRoot = shadow
           // 宿主铺满视口但指针事件穿透；浮层内容（提示条/标记/chip）各自开启事件。
           Object.assign(shadowHost.style, {
             position: 'fixed',
@@ -158,7 +171,181 @@ export default defineContentScript({
     })
 
     // ---------- 消息接线 ----------
+    // 面板动作注入：跳播/打开设置/端口调用（always 经 resolveBackend 唯一分派）。
+    panelActions.seek = (seconds) => {
+      const video = findVideo()
+      if (!video) return // 无播放器 → 忽略
+      try {
+        video.currentTime = seconds
+      } catch {
+        // 播放器拒绝 seek：静默忽略。
+      }
+    }
+    panelActions.openSettings = () => {
+      void browser.runtime.openOptionsPage().catch(() => {
+        // 设置页不可打开时静默。
+      })
+    }
+    panelActions.summarize = async (input) => {
+      const settings = await readAiSettings()
+      return resolveBackend(settings).summarize(input)
+    }
+    panelActions.chat = async (input, handlers) => {
+      const settings = await readAiSettings()
+      return resolveBackend(settings).chat(input, handlers)
+    }
+
+    // ---------- 面板会话：懒采集上下文（视频/字幕/弹幕/评论）供总结/提问使用 ----------
+    // 只在面板实际可见（设置读回 + 总开关/页内开关 + 非全屏）且页面可见（非后台标签）时采集；
+    // 退避按 bvid 记忆（导航即重置，SPA 快切不困在旧冷却里），失败指数退避带封顶。
+    const PANEL_TIME_POLL_MS = 500
+    let panelCollectFailures = 0
+    let panelNextCollectAt = 0
+    let panelCollectBvid: string | null = null
+    let panelCollecting = false
+
+    function panelShownNow(): boolean {
+      return panelVisibleNow(panel, window.document.visibilityState === 'visible')
+    }
+
+    /** 换视频/离开视频页：复位会话与 ui 镜像（旧视频广告不得并入新视频时间线）。 */
+    function resetPanelSession(): void {
+      panel.session = null
+      panel.collectError = false
+      ui.currentTime = 0
+      ui.ads = []
+    }
+
+    async function syncPanelSession(): Promise<void> {
+      if (!panelShownNow()) return
+      const bvid = extractBvidFromUrl(window.location.href)
+      if (!bvid) {
+        if (panel.session !== null) resetPanelSession()
+        return
+      }
+      const sessionBvid = panel.session?.bvid
+      if (sessionBvid === bvid) return
+      // SPA 换视频：旧会话立即失效（tab 按 bvid 键控重建）；退避换 bvid 立即重置。
+      if (sessionBvid !== undefined && sessionBvid !== null) resetPanelSession()
+      if (panelCollectBvid !== bvid) {
+        panelCollectBvid = bvid
+        panelCollectFailures = 0
+        panelNextCollectAt = 0
+        panel.collectError = false
+      }
+      if (panelCollecting) return
+      const nowMs = Date.now()
+      if (nowMs < panelNextCollectAt) return
+      panelNextCollectAt = nowMs + panelBackoffMs(panelCollectFailures)
+      panelCollecting = true
+      try {
+        const meta = await collectVideoMeta()
+        const currentBvid = extractBvidFromUrl(window.location.href)
+        if (currentBvid !== bvid) return // 过时回调：导航已变，丢弃（新导航会重新采集）。
+        if (!meta || meta.bvid !== bvid) {
+          // 视频元数据失败 = 硬失败：面板错误态 + 重试按钮，退避后自动重试。
+          panelCollectFailures += 1
+          panel.collectError = true
+          return
+        }
+        // 单源失败不硬失败：allSettled 拼部分上下文（字幕/弹幕/评论各自独立降级为空）。
+        const [subtitles, danmaku, comments] = await Promise.allSettled([
+          collectSubtitles(meta),
+          collectDanmaku(meta),
+          collectComments(meta),
+        ])
+        const finalBvid = extractBvidFromUrl(window.location.href)
+        if (finalBvid !== bvid) return // 过时采集回调：不覆盖新会话。
+        panel.collectError = false
+        panelCollectFailures = 0
+        panel.session = {
+          bvid: meta.bvid,
+          title: meta.title,
+          context: {
+            video: meta,
+            subtitles: subtitles.status === 'fulfilled' ? subtitles.value : [],
+            danmaku: danmaku.status === 'fulfilled' ? danmaku.value : [],
+            comments: comments.status === 'fulfilled' ? comments.value : [],
+          },
+        }
+      } catch {
+        // 元数据读取抛错等意外：按硬失败对待（退避重试）。
+        panelCollectFailures += 1
+        panel.collectError = true
+      } finally {
+        panelCollecting = false
+      }
+    }
+
+    // 重试按钮：清退避后立即再采（per-bvid 冷却一并清零）。
+    panelActions.retryCollection = () => {
+      panel.collectError = false
+      panelCollectFailures = 0
+      panelNextCollectAt = 0
+      void syncPanelSession()
+    }
+
+    /** 面板定位：漂浮于播放器右侧下方；按面板实际高度钳制，不溢出视口底部。 */
+    function measurePanelPosition(): void {
+      const video = findVideo()
+      const playerRect =
+        (video?.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null)?.getBoundingClientRect() ??
+        video?.getBoundingClientRect()
+      // 面板实际高度（隐藏/折叠时测不到则用保守估计）。
+      let panelHeight = 480
+      try {
+        const rect = panelShadowRoot
+          ?.querySelector<HTMLElement>('.bh-panel')
+          ?.getBoundingClientRect()
+        if (rect && rect.height > 0) panelHeight = rect.height
+      } catch {
+        // 测量失败沿用估计值。
+      }
+      const viewportHeight = window.innerHeight
+      const minTop = 16
+      const maxTop = Math.max(minTop, viewportHeight - panelHeight - 24)
+      if (playerRect && playerRect.width > 0 && playerRect.height > 0) {
+        panel.top = Math.min(Math.max(minTop, playerRect.bottom + 16), maxTop)
+        const roomRight = window.innerWidth - playerRect.right
+        panel.right = roomRight >= 220 ? Math.max(16, roomRight - 4) : 20
+      } else {
+        panel.top = Math.min(96, maxTop)
+        panel.right = 20
+      }
+    }
+
+    // 窗口变化即时重定位（防抖，避免走 1.5s 周期检查的滞后又不过度触发）。
+    let resizeTimer: number | undefined
+    window.addEventListener('resize', () => {
+      if (resizeTimer !== undefined) window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = undefined
+        measurePanelPosition()
+      }, 150)
+    })
+
+    // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
+    window.document.addEventListener('visibilitychange', () => {
+      if (window.document.visibilityState === 'visible') void syncPanelSession()
+    })
+
+    function getPanelPageState(): PanelPageState {
+      return { available: true, pageEnabled: panel.pageEnabled, masterEnabled: panel.masterEnabled }
+    }
+
+    function handlePanelToggleMessage(enabled: unknown): PanelToggleResponse {
+      if (typeof enabled === 'boolean') {
+        panel.pageEnabled = enabled
+        if (panel.pageEnabled) void syncPanelSession()
+      }
+      return { ok: typeof enabled === 'boolean', state: getPanelPageState() }
+    }
+
     browser.runtime.onMessage.addListener((message: unknown) => {
+      if (isPanelMessage(message)) {
+        if (message.type === MSG_PANEL_PAGE_STATE) return Promise.resolve(getPanelPageState())
+        return Promise.resolve(handlePanelToggleMessage((message as PanelToggleRequest).enabled))
+      }
       if (!isKnownMessage(message)) return undefined
       if (message.type === MSG_AD_SKIP_PAGE_STATE) {
         return Promise.resolve(controller.getState())
@@ -175,6 +362,10 @@ export default defineContentScript({
       if (next && typeof next.adSkipEnabled === 'boolean') {
         controller.syncMasterEnabled(next.adSkipEnabled)
       }
+      if (next && typeof next.panelEnabled === 'boolean') {
+        panel.masterEnabled = next.panelEnabled
+        if (panel.masterEnabled) void syncPanelSession()
+      }
     })
 
     // ---------- 导航 / 亮暗观测 ----------
@@ -183,6 +374,8 @@ export default defineContentScript({
     window.setInterval(() => {
       controller.retryIfNeeded()
       controller.checkNavigation()
+      void syncPanelSession()
+      measurePanelPosition()
     }, NAV_CHECK_INTERVAL_MS)
     try {
       new MutationObserver(() => {
@@ -197,8 +390,10 @@ export default defineContentScript({
       // MutationObserver 错过时由周期检查兜底。
     }
 
-    // 全屏：把 shadow host 移进全屏元素（保证浮层在顶层），并重做标。
+    // 全屏：把 shadow host 移进全屏元素（保证浮层在顶层），并重做标；
+    // 面板随全屏隐藏（提示条/标记不受影响）。
     const onFullscreenChange = (): void => {
+      panel.fullscreen = window.document.fullscreenElement !== null
       const host = uiMount?.shadowHost
       if (host) {
         const fullscreen = window.document.fullscreenElement
@@ -215,6 +410,24 @@ export default defineContentScript({
       controller.requestRemesh()
     }
     window.document.addEventListener('fullscreenchange', onFullscreenChange)
+
+    // 播放进度轮询：AI 面板「当前播放段高亮」数据源（面板隐藏时停表省电）。
+    window.setInterval(() => {
+      if (!panel.masterEnabled || !panel.pageEnabled) return
+      const video = findVideo()
+      if (video) ui.currentTime = video.currentTime
+    }, PANEL_TIME_POLL_MS)
+
+    // ---------- 面板启动：设置读回前保持隐藏（panelEnabled=false 不闪现），再读开关并首采 ----------
+    try {
+      const initialSettings = await readAiSettings()
+      panel.masterEnabled = initialSettings.panelEnabled
+    } catch {
+      // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
+    }
+    panel.ready = true
+    measurePanelPosition()
+    void syncPanelSession()
 
     void controller.start()
   },

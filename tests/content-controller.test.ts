@@ -90,6 +90,7 @@ beforeEach(() => {
   ui.chip.visible = false
   ui.vectorHint.visible = false
   ui.marks = []
+  ui.ads = []
   ui.dark = false
 })
 
@@ -105,6 +106,8 @@ describe('AdSkipController 状态机', () => {
     expect(detectAds).toHaveBeenCalledWith(
       expect.objectContaining({ strategy: 'smart', danmaku: [{ time: 500, text: '恰饭' }] }),
     )
+    // 生产侧唯一写入点：检测结果镜像进 ui.ads（AI 面板合并打标的数据源）。
+    expect(ui.ads).toEqual([AD])
 
     // 播放到 ad.start−3 秒：提示条出现，倒计时 3 起步。
     video.currentTime = 96.5
@@ -150,6 +153,7 @@ describe('AdSkipController 状态机', () => {
 
     controller.syncMasterEnabled(false)
     expect(ui.marks).toEqual([])
+    expect(ui.ads).toEqual([]) // 总开关关：广告镜像清空（不外露给 AI 面板）
     video.currentTime = 97.5
     controller.onTimeUpdate()
     expect(ui.banner.visible).toBe(false)
@@ -173,6 +177,7 @@ describe('AdSkipController 状态机', () => {
     expect(
       controller.handleToggleMessage(false),
     ).toMatchObject({ ok: true, state: { pageEnabled: false } })
+    expect(ui.ads).toEqual([]) // 页内开关关：广告镜像清空
     video.currentTime = 97.5
     controller.onTimeUpdate()
     expect(ui.banner.visible).toBe(false)
@@ -221,8 +226,10 @@ describe('AdSkipController 状态机', () => {
     controller.checkNavigation()
     expect(ui.banner.visible).toBe(false)
     expect(ui.marks).toEqual([])
+    expect(ui.ads).toEqual([]) // SPA 复位：旧视频广告清空（不并入新视频时间线）
     await flushMicrotasks()
     expect(detectAds).toHaveBeenCalledTimes(2)
+    expect(ui.ads).toEqual([AD]) // 新视频管线重跑后重新镜像
 
     // 新视频的同一时间点重新可弹（旧页内状态已复位）。
     video.currentTime = 97.5

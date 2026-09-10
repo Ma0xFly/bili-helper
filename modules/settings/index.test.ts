@@ -41,6 +41,22 @@ describe('readAiSettings', () => {
     await writeAiSettings({ adSkipEnabled: false })
     expect((await readAiSettings()).adSkipEnabled).toBe(false)
   })
+
+  it('panelEnabled 默认 true（面板是被动 UI）', async () => {
+    expect((await readAiSettings()).panelEnabled).toBe(true)
+  })
+
+  it('panelEnabled 非布尔值收敛到默认 true', async () => {
+    await chrome.storage.sync.set({ aiAssistantSettings: { panelEnabled: 'yes' } })
+    expect((await readAiSettings()).panelEnabled).toBe(true)
+  })
+
+  it('panelEnabled 持久化开合', async () => {
+    await writeAiSettings({ panelEnabled: false })
+    expect((await readAiSettings()).panelEnabled).toBe(false)
+    await writeAiSettings({ panelEnabled: true })
+    expect((await readAiSettings()).panelEnabled).toBe(true)
+  })
 })
 
 describe('writeAiSettings', () => {

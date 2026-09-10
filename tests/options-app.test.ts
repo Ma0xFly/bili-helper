@@ -47,7 +47,8 @@ describe('options AI 助手表单', () => {
     await wrapper.find('input[name="mode"][value="local"]').setValue()
     expect(wrapper.find('input[placeholder="https://your-service.example.com"]').exists()).toBe(false)
 
-    // 点保存：storage 写入完整表单值（含改动后的 mode 与默认关的 adSkipEnabled）。
+    // 点保存：storage 写入完整表单值（含改动后的 mode、默认关的 adSkipEnabled、
+    // 默认开的 panelEnabled）。
     await wrapper.find('button.primary').trigger('click')
     await flushPromises()
     const stored = await storedSettings()
@@ -62,6 +63,7 @@ describe('options AI 助手表单', () => {
       serverBaseUrl: 'https://srv.example',
       serverToken: 'tok',
       adSkipEnabled: false,
+      panelEnabled: true,
     })
   })
 
@@ -73,12 +75,37 @@ describe('options AI 助手表单', () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    const checkbox = wrapper.find('input[type="checkbox"]')
+    const checkbox = wrapper.find('input[aria-label="AI 去广告总开关"]')
     expect((checkbox.element as HTMLInputElement).checked).toBe(true)
 
     await checkbox.setValue(false)
     await wrapper.find('button.primary').trigger('click')
     await flushPromises()
     expect((await storedSettings()).adSkipEnabled).toBe(false)
+  })
+
+  it('AI 面板显示开关默认开、回填并写回 schema', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const checkbox = wrapper.find('input[aria-label="AI 面板显示总开关"]')
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+
+    await checkbox.setValue(false)
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).panelEnabled).toBe(false)
+  })
+
+  it('存储的 panelEnabled=false 回填为关', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { panelEnabled: false },
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const checkbox = wrapper.find('input[aria-label="AI 面板显示总开关"]')
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false)
   })
 })

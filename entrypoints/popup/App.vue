@@ -1,29 +1,59 @@
 <script setup lang="ts">
-// popup：极简弹窗——当前页「AI 去广告」快开关（页内开关，经 background 转发给内容脚本，
-// 不跨页持久化）+ 成就行（今日累计节省）+ 打开设置页。无官方入口、无每日一言。
+// popup：极简弹窗——当前页「AI 去广告」「总结面板」两条快开关（页内开关，经 background 转发给
+// 内容脚本，不跨页持久化）+ 成就行（今日累计节省）+ 打开设置页。无官方入口、无每日一言。
 import { onMounted, ref } from 'vue'
 import { browser } from 'wxt/browser'
 import {
   MSG_AD_SKIP_PAGE_STATE,
   MSG_AD_SKIP_PAGE_TOGGLE,
+  MSG_PANEL_PAGE_STATE,
+  MSG_PANEL_PAGE_TOGGLE,
+  UNAVAILABLE_PANEL_STATE,
   UNAVAILABLE_STATE,
   isPageState,
+  isPanelPageState,
+  isPanelToggleResponse,
   isToggleResponse,
 } from '../../modules/content/protocol'
-import type { AdSkipPageState } from '../../modules/content/protocol'
+import type { AdSkipPageState, PanelPageState } from '../../modules/content/protocol'
 import { readDailyStats } from '../../modules/content/stats'
 import { savedChipText, todayString } from '../../modules/content/logic'
 
 const pageState = ref<AdSkipPageState | null>(null)
+const panelPageState = ref<PanelPageState | null>(null)
 const savedText = ref('')
 const busy = ref(false)
+
+function refreshStateFrom(response: unknown, panelMessage: boolean): void {
+  if (panelMessage) {
+    panelPageState.value = isPanelPageState(response)
+      ? response
+      : UNAVAILABLE_PANEL_STATE
+    return
+  }
+  pageState.value = isPageState(response) ? response : UNAVAILABLE_STATE
+}
+
+function unavailableNow(panelMessage: boolean): void {
+  if (panelMessage) panelPageState.value = UNAVAILABLE_PANEL_STATE
+  else pageState.value = UNAVAILABLE_STATE
+}
 
 async function refreshPageState(): Promise<void> {
   try {
     const response: unknown = await browser.runtime.sendMessage({ type: MSG_AD_SKIP_PAGE_STATE })
-    pageState.value = isPageState(response) ? response : UNAVAILABLE_STATE
+    refreshStateFrom(response, false)
   } catch {
-    pageState.value = UNAVAILABLE_STATE
+    unavailableNow(false)
+  }
+}
+
+async function refreshPanelState(): Promise<void> {
+  try {
+    const response: unknown = await browser.runtime.sendMessage({ type: MSG_PANEL_PAGE_STATE })
+    refreshStateFrom(response, true)
+  } catch {
+    unavailableNow(true)
   }
 }
 
@@ -34,11 +64,8 @@ async function togglePageSkip(enabled: boolean): Promise<void> {
       type: MSG_AD_SKIP_PAGE_TOGGLE,
       enabled,
     })
-    if (isToggleResponse(response)) {
-      pageState.value = response.state
-    } else {
-      pageState.value = UNAVAILABLE_STATE
-    }
+    if (isToggleResponse(response)) pageState.value = response.state
+    else pageState.value = UNAVAILABLE_STATE
   } catch {
     pageState.value = UNAVAILABLE_STATE
   } finally {
@@ -46,9 +73,30 @@ async function togglePageSkip(enabled: boolean): Promise<void> {
   }
 }
 
-const switchDisabled = () => {
+async function togglePagePanel(enabled: boolean): Promise<void> {
+  busy.value = true
+  try {
+    const response: unknown = await browser.runtime.sendMessage({
+      type: MSG_PANEL_PAGE_TOGGLE,
+      enabled,
+    })
+    if (isPanelToggleResponse(response)) panelPageState.value = response.state
+    else panelPageState.value = UNAVAILABLE_PANEL_STATE
+  } catch {
+    panelPageState.value = UNAVAILABLE_PANEL_STATE
+  } finally {
+    busy.value = false
+  }
+}
+
+const skipSwitchDisabled = () => {
   if (busy.value || !pageState.value) return true
   return !pageState.value.available || !pageState.value.masterEnabled
+}
+
+const panelSwitchDisabled = () => {
+  if (busy.value || !panelPageState.value) return true
+  return !panelPageState.value.available || !panelPageState.value.masterEnabled
 }
 
 async function openOptions() {
@@ -59,10 +107,14 @@ async function openOptions() {
 
 onMounted(async () => {
   await refreshPageState()
-  if (!pageState.value?.available) {
+  await refreshPanelState()
+  const retryDue =
+    !pageState.value?.available || !panelPageState.value?.available
+  if (retryDue) {
     // 内容脚本可能还没注入完：不可用时稍候重试一次，避免永久卡在「不是视频页」。
     window.setTimeout(() => {
       void refreshPageState()
+      void refreshPanelState()
     }, 800)
   }
   const stats = await readDailyStats()
@@ -76,11 +128,11 @@ onMounted(async () => {
   <div class="popup-shell">
     <div class="popup-row">
       <span class="row-label">AI 去广告</span>
-      <label class="switch" :class="{ disabled: switchDisabled() }">
+      <label class="switch" :class="{ disabled: skipSwitchDisabled() }">
         <input
           type="checkbox"
           :checked="pageState?.pageEnabled === true"
-          :disabled="switchDisabled()"
+          :disabled="skipSwitchDisabled()"
           @change="togglePageSkip(($event.target as HTMLInputElement).checked)"
         />
         <span class="switch-track" aria-hidden="true" />
@@ -100,6 +152,34 @@ onMounted(async () => {
                 : '本页已关闭 · 仅对当前页生效'
       }}
     </p>
+
+    <div class="popup-row">
+      <span class="row-label">总结面板</span>
+      <label class="switch" :class="{ disabled: panelSwitchDisabled() }">
+        <input
+          type="checkbox"
+          :checked="panelPageState?.pageEnabled === true"
+          :disabled="panelSwitchDisabled()"
+          @change="togglePagePanel(($event.target as HTMLInputElement).checked)"
+        />
+        <span class="switch-track" aria-hidden="true" />
+        <span class="switch-knob" aria-hidden="true" />
+      </label>
+    </div>
+    <p class="hint">
+      {{
+        !panelPageState
+          ? '正在读取当前页状态…'
+          : !panelPageState.available
+            ? '当前页不是 B 站视频页'
+            : !panelPageState.masterEnabled
+              ? '未在设置页开启 AI 面板'
+              : panelPageState.pageEnabled
+                ? '本页显示总结 / 提问面板'
+                : '本页已隐藏 · 仅对当前页生效'
+      }}
+    </p>
+
     <div v-if="savedText" class="achievement-row">
       <span class="ach-orb" aria-hidden="true" />
       <span>{{ savedText }}</span>
@@ -123,6 +203,10 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.popup-row + .hint {
+  margin-top: -8px;
 }
 
 .row-label {

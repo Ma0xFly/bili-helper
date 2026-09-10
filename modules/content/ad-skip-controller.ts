@@ -145,6 +145,7 @@ export class AdSkipController {
     }
     ui.banner.visible = false
     ui.chip.visible = false
+    ui.ads = []
   }
 
   // ---------- 设置 / 消息入口 ----------
@@ -258,6 +259,7 @@ export class AdSkipController {
       }
       if (!this.pageEnabled || !this.masterEnabled) return
       this.ads = sortedAds(result.ads)
+      ui.ads = [...this.ads]
       if (this.ads.length === 0) {
         this.pipelineStarted = true // 无广告 = 链路成功走完，静默既是终点。
         return
@@ -533,6 +535,7 @@ export class AdSkipController {
     if (!this.pageEnabled || !this.masterEnabled) {
       this.hideBanner()
       ui.marks = []
+      ui.ads = []
       ui.chip.visible = false
     } else {
       this.requestRemesh()
@@ -548,6 +551,7 @@ export class AdSkipController {
     this.activeBvid = null
     this.ads = []
     ui.marks = []
+    ui.ads = []
     this.hideBanner()
     ui.chip.visible = false
     this.vectorHintShown = false

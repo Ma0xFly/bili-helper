@@ -6,6 +6,7 @@ import SkipBanner from './SkipBanner.vue'
 import SavedChip from './SavedChip.vue'
 import VectorHint from './VectorHint.vue'
 import ProgressMarks from './ProgressMarks.vue'
+import PanelApp from './panel/PanelApp.vue'
 import { ui } from '../../../modules/content/ui-state'
 
 const overlayStyle = computed(() => {
@@ -28,5 +29,6 @@ const overlayStyle = computed(() => {
       <SavedChip />
       <VectorHint />
     </div>
+    <PanelApp />
   </div>
 </template>

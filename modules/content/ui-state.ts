@@ -3,6 +3,7 @@
 // 组件不直接触碰 B 站 DOM。
 
 import { reactive } from 'vue'
+import type { AdSegment } from '../ai/port'
 
 export interface BannerState {
   visible: boolean
@@ -53,5 +54,12 @@ export const ui = reactive({
   chip: { visible: false, text: '' } as SavedChipState,
   vectorHint: { visible: false },
   marks: [] as AdMarkState[],
+  /**
+   * 去广告检测结果镜像（控制器维护）：AI 面板分段时间线与广告区间合并打标用。
+   * adSkipEnabled 关/无广告时为空数组 → 面板纯分段。
+   */
+  ads: [] as AdSegment[],
+  /** 播放进度（秒），面板当前分段高亮用（由面板接线层轮询驱动）。 */
+  currentTime: 0,
   actions: { onSkipNow: () => {}, onStay: () => {}, onOpenSettings: () => {} } as UiActions,
 })

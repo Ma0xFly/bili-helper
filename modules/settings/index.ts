@@ -24,6 +24,11 @@ export interface AiSettings {
    * popup 的「AI 去广告」快开关是页内临时开关，与此总开关正交。
    */
   adSkipEnabled: boolean
+  /**
+   * AI 面板（总结/提问）显隐总开关：默认 true——面板是被动 UI，无惊扰。
+   * popup 的「总结面板」快开关是页内临时开关，与此总开关正交。
+   */
+  panelEnabled: boolean
 }
 
 export interface EmbeddingEndpoint {
@@ -43,6 +48,7 @@ export const DEFAULT_SETTINGS: AiSettings = {
   serverBaseUrl: '',
   serverToken: '',
   adSkipEnabled: false,
+  panelEnabled: true,
 }
 
 function isAiMode(value: unknown): value is AiMode {
@@ -70,6 +76,8 @@ function normalizeSettings(raw: unknown): AiSettings {
       typeof source.adSkipEnabled === 'boolean'
         ? source.adSkipEnabled
         : DEFAULT_SETTINGS.adSkipEnabled,
+    panelEnabled:
+      typeof source.panelEnabled === 'boolean' ? source.panelEnabled : DEFAULT_SETTINGS.panelEnabled,
   }
 }
 

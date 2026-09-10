@@ -30,6 +30,7 @@ interface FormModel {
   serverBaseUrl: string
   serverToken: string
   adSkipEnabled: boolean
+  panelEnabled: boolean
 }
 
 const form = reactive<FormModel>({
@@ -43,6 +44,7 @@ const form = reactive<FormModel>({
   serverBaseUrl: '',
   serverToken: '',
   adSkipEnabled: false,
+  panelEnabled: true,
 })
 
 const loadError = ref('')
@@ -60,6 +62,7 @@ onMounted(async () => {
     form.serverBaseUrl = settings.serverBaseUrl
     form.serverToken = settings.serverToken
     form.adSkipEnabled = settings.adSkipEnabled
+    form.panelEnabled = settings.panelEnabled
   } catch {
     // 读取失败要给可见提示，而不是静默留下空表单。
     loadError.value = '设置加载失败，请刷新重试'
@@ -311,7 +314,21 @@ async function save(): Promise<void> {
               </span>
             </span>
             <span class="switch">
-              <input v-model="form.adSkipEnabled" type="checkbox" />
+              <input v-model="form.adSkipEnabled" type="checkbox" aria-label="AI 去广告总开关" />
+              <span class="switch-track" aria-hidden="true" />
+              <span class="switch-knob" aria-hidden="true" />
+            </span>
+          </label>
+          <label class="switch-row">
+            <span class="switch-info">
+              <span class="switch-name">AI 面板显示</span>
+              <span class="field-hint">
+                在视频页右侧显示「总结 / 提问」面板（被动 UI，默认开启）。popup
+                里的「总结面板」开关只对当前页临时生效，这里的总开关控制所有页。
+              </span>
+            </span>
+            <span class="switch">
+              <input v-model="form.panelEnabled" type="checkbox" aria-label="AI 面板显示总开关" />
               <span class="switch-track" aria-hidden="true" />
               <span class="switch-knob" aria-hidden="true" />
             </span>
@@ -620,6 +637,10 @@ input:focus-visible {
   justify-content: space-between;
   gap: 16px;
   cursor: pointer;
+}
+
+.switch-row + .switch-row {
+  margin-top: 14px;
 }
 
 .switch-info {

@@ -33,6 +33,22 @@
   --bh-shadow-accent-tab: rgba(124, 92, 252, 0.35);
   --bh-glow-pink: rgba(255, 143, 177, 0.5);
   --bh-tip-arrow: rgba(255, 255, 255, 0.85);
+  /* AI 面板族 token（DESIGN.md 亮色；panel.css 消费，两套共用同一登记处不散落 hex） */
+  --bh-text-muted: #736b8a;
+  --bh-text-on-accent: #ffffff;
+  --bh-surface-tabs: rgba(255, 255, 255, 0.55);
+  --bh-surface-input: #ffffff;
+  --bh-surface-ghost: rgba(255, 255, 255, 0.7);
+  --bh-surface-glass-card: rgba(255, 255, 255, 0.55);
+  --bh-glass-border-faint: rgba(255, 255, 255, 0.8);
+  --bh-border-pink-glow: rgba(255, 143, 177, 0.5);
+  --bh-skeleton-base: #f1edff;
+  --bh-skeleton-shine: #ffffff;
+  --bh-danger: #e5484d;
+  --bh-danger-soft: #fdecee;
+  --bh-shadow-card: rgba(124, 92, 252, 0.06);
+  --bh-glow-purple: rgba(156, 133, 255, 0);
+  --bh-glow-pink-soft: rgba(255, 160, 189, 0.2);
 }
 
 .bh-root[data-dark] {
@@ -59,6 +75,23 @@
   --bh-shadow-accent-tab: rgba(156, 133, 255, 0.45);
   --bh-glow-pink: rgba(255, 160, 189, 0.5);
   --bh-tip-arrow: rgba(41, 34, 58, 0.9);
+  /* AI 面板族 token（DESIGN.md 暗色，与亮色同键位成对；面板样式与浮层族共用登记处） */
+  --bh-text-muted: #8e86a5;
+  --bh-text-on-accent: #191426;
+  --bh-surface-tabs: rgba(255, 255, 255, 0.06);
+  --bh-surface-input: rgba(20, 17, 32, 0.7);
+  --bh-surface-ghost: rgba(43, 36, 66, 0.8);
+  --bh-surface-glass-card: rgba(41, 34, 58, 0.55);
+  --bh-glass-border-faint: rgba(255, 255, 255, 0.08);
+  --bh-border-pink-glow: rgba(255, 160, 189, 0.25);
+  --bh-skeleton-base: #2b2442;
+  --bh-skeleton-shine: #3a3252;
+  --bh-danger: #ff8fa3;
+  --bh-danger-soft: #3a2130;
+  --bh-shadow-card: rgba(0, 0, 0, 0.35);
+  --bh-glow-purple: rgba(156, 133, 255, 0.14);
+  --bh-glow-pink-soft: rgba(255, 160, 189, 0.2);
+  --bh-inset-shadow-dark: rgba(0, 0, 0, 0.3);
 }
 
 .bh-overlay {
