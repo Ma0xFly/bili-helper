@@ -155,6 +155,73 @@ describe('addUserCorpusEntry', () => {
     const entries = await readUserCorpus()
     expect(entries.map((entry) => entry.text).sort()).toEqual(['词A', '词B'])
   })
+
+  it('并发添加同一个词：只有一条成功，另一条被拒（校验在串行链内复核）', async () => {
+    const [first, second] = await Promise.all([
+      addUserCorpusEntry({ text: '词A', category: 'scripts' }),
+      addUserCorpusEntry({ text: '词A', category: 'scripts' }),
+    ])
+    expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1)
+    const rejected = first.ok ? second : first
+    if (!rejected.ok) expect(rejected.reason).toContain('已经在你的词库里')
+    // 持久层也不能被污染：读侧去重只是遮羞布，存储里就该只有一条。
+    const raw = (await chrome.storage.local.get(USER_CORPUS_KEY))[USER_CORPUS_KEY] as unknown[]
+    expect(raw).toHaveLength(1)
+  })
+
+  it('并发越过上限：链内复核挡住，不击穿 MAX_USER_ENTRIES', async () => {
+    const almostFull = Array.from({ length: MAX_USER_ENTRIES - 1 }, (_, index) => ({
+      text: `词${index}`,
+      category: 'scripts',
+      kind: 'script' as const,
+      weight: 2,
+      note: '',
+      createdAt: new Date().toISOString(),
+    }))
+    await chrome.storage.local.set({ [USER_CORPUS_KEY]: almostFull })
+
+    const results = await Promise.all(
+      ['甲', '乙', '丙', '丁', '戊'].map((text) => addUserCorpusEntry({ text, category: 'scripts' })),
+    )
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(await readUserCorpus()).toHaveLength(MAX_USER_ENTRIES)
+  })
+
+  it('拒绝以 # 开头的词（导出 patch 合入 md 时会被当注释吞掉）', async () => {
+    const result = await addUserCorpusEntry({ text: '#某品牌话题#', category: 'scripts' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('#')
+    expect(await readUserCorpus()).toEqual([])
+  })
+
+  it('品类白名单：未知分组拒绝（建了 md 也不会被构建采纳），brands- 前缀新建放行', async () => {
+    const rejected = await addUserCorpusEntry({ text: '某词', category: 'misc' })
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.reason).toContain('品类不合法')
+
+    const accepted = await addUserCorpusEntry({ text: '某新茶饮', category: 'brands-tea' })
+    expect(accepted.ok).toBe(true)
+    if (accepted.ok) expect(accepted.entries[0]).toMatchObject({ kind: 'brand', weight: 1 })
+  })
+
+  it('note 换行被剥掉（写侧与读侧都防），导出 patch 不出现脱离注释的注入行', async () => {
+    const result = await addUserCorpusEntry({
+      text: '某新品牌',
+      category: 'brands-digital',
+      note: 'BV1xx\n恰饭 恶意换行注入',
+    })
+    expect(result.ok).toBe(true)
+    const [entry] = await readUserCorpus()
+    expect(entry?.note).toBe('BV1xx 恰饭 恶意换行注入')
+    expect(exportUserCorpusMarkdown([entry!]).split('\n').filter((line) => line === '恰饭')).toEqual([])
+
+    // 读侧同样防御：手改 storage 塞进带换行的 note，归一化后不留换行。
+    await chrome.storage.local.set({
+      [USER_CORPUS_KEY]: [{ text: '脏数据词', category: 'scripts', note: 'a\n injected' }],
+    })
+    const dirty = await readUserCorpus()
+    expect(dirty[0]?.note).toBe('a injected')
+  })
 })
 
 describe('removeUserCorpusEntry / clearUserCorpus', () => {

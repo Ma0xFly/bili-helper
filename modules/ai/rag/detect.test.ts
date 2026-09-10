@@ -252,3 +252,49 @@ describe('AiError 边界', () => {
     expect(onVectorFallback).toHaveBeenCalledTimes(1)
   })
 })
+describe('用户补录词条进入全链路（detect 用的是合并后的生效语料）', () => {
+  // 这段字幕刻意避开内置词库与 EMBED_VOCAB：补录前词表路不命中、向量路零分。
+  const USER_WORD_SUBTITLES: Subtitle[] = [
+    { start: 0, end: 10, text: '大家好，今天讲讲续航' },
+    { start: 300, end: 330, text: '然后说说某新品牌的日常表现' },
+  ]
+  const USER_WORD_AD_BODY = JSON.stringify({
+    ads: [{ start: 300, end: 330, product_name: '某新品牌', ad_content: '口播', confidence: 0.8 }],
+  })
+
+  function corpusEmbeddingInputs(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    // 语料那批请求的特征：input 里含内置词条「恰饭」；窗口那批只含字幕文本。
+    // 取最后一次：本用例跑了两轮检测，要看的始终是最新那份生效语料。
+    const corpusCall = fetchMock.mock.calls
+      .filter((call) => String(call[0]).includes('/embeddings'))
+      .map((call) => (JSON.parse(String(call[1]?.body)) as { input: string[] }).input)
+      .findLast((inputs) => inputs.includes('恰饭'))
+    return corpusCall ?? []
+  }
+
+  it('补录前走全文兜底（source:llm），补录后词表路召回并定界（source:rag）', async () => {
+    const fetchMock = pipeFetch({
+      embeddings: (inputs) => tokenEmbeddingResponse(inputs),
+      chat: () => completionResponse(USER_WORD_AD_BODY),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    // 基线：用户层为空 → 两路都召回不到 → 降级到 LLM 全文兜底。
+    const baseline = await runRagDetect(makeInput(USER_WORD_SUBTITLES), makeSettings(), {})
+    expect(baseline.source).toBe('llm')
+    expect(corpusEmbeddingInputs(fetchMock)).not.toContain('某新品牌')
+
+    // 补录同一个词 → 生效语料含它 → 词表路召回，走完整 RAG 定界。
+    await chrome.storage.local.set({
+      biliHelperUserCorpus: [{ text: '某新品牌', category: 'brands-digital' }],
+    })
+    const after = await runRagDetect(makeInput(USER_WORD_SUBTITLES), makeSettings(), {})
+    expect(after.source).toBe('rag')
+    expect(after.ads).toEqual([
+      { start: 300, end: 330, product_name: '某新品牌', ad_content: '口播', confidence: 0.8 },
+    ])
+
+    // 两路共用同一份合并语料：向量路请求的语料里也必须有用户词（否则只是词表路生效）。
+    expect(corpusEmbeddingInputs(fetchMock)).toContain('某新品牌')
+  })
+})

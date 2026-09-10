@@ -92,6 +92,25 @@ describe('probeServerEndpoint', () => {
     expect(result).toEqual({ ok: false, reason: '先填写服务器地址' })
     expect(spy).not.toHaveBeenCalled()
   })
+
+  it('外部取消 → 「体检已取消」，不伪装成网络故障', async () => {
+    const controller = new AbortController()
+    stubFetch(
+      async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+          })
+        }),
+    )
+    const pending = probeServerEndpoint({
+      baseUrl: 'https://srv.example',
+      token: '',
+      signal: controller.signal,
+    })
+    controller.abort()
+    expect(await pending).toEqual({ ok: false, reason: '体检已取消' })
+  })
 })
 
 describe('describeServerFailure', () => {

@@ -392,4 +392,197 @@ describe('options AI 助手表单', () => {
     const checkbox = wrapper.find('input[aria-label="AI 面板显示总开关"]')
     expect((checkbox.element as HTMLInputElement).checked).toBe(false)
   })
+
+  it('一键体检：对话端点红灯 + 按钮从「体检中…」恢复', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1', apiKey: 'bad' },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"nope"}', { status: 401 })))
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+
+    const feedback = wrapper.findAll('.feedback')
+    expect(feedback.some((item) => item.classes().includes('fail'))).toBe(true)
+    expect(wrapper.text()).toContain('未授权')
+    // 探测失败也必须解锁按钮，否则配置台卡在「体检中…」。
+    expect(findButton(wrapper, '开始体检').text()).toBe('开始体检')
+    expect((findButton(wrapper, '开始体检').element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('一键体检：继承态向量端点失败要单独报红并自动展开高级区', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1', apiKey: 'k' },
+    })
+    // 对话成功、向量失败：这正是「继承态不报绿」规则的反面——出问题必须报，还得指到该改的字段。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) =>
+        String(url).includes('/embeddings')
+          ? new Response('{"error":"boom"}', { status: 500 })
+          : new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: 200 }),
+      ),
+    )
+
+    const wrapper = mount(App)
+    await flushPromises()
+    expect((wrapper.find('#advanced-embed').element as HTMLElement).style.display).toBe('none')
+
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+
+    const feedback = wrapper.findAll('.feedback')
+    expect(feedback.some((item) => item.classes().includes('ok'))).toBe(true)
+    const failure = feedback.find((item) => item.classes().includes('fail'))
+    expect(failure?.text()).toContain('向量端点连接失败')
+    expect((wrapper.find('#advanced-embed').element as HTMLElement).style.display).not.toBe('none')
+  })
+
+  it('一键体检：向量端点拆开配置且通过时报两条绿灯', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: {
+        mode: 'local',
+        apiUrl: 'https://chat.example/v1',
+        model: 'm-1',
+        apiKey: 'k',
+        embedBaseUrl: 'https://emb.example',
+        embedModel: 'bge-m3',
+      },
+    })
+    const calls = stubProbeFetch()
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+
+    expect(calls).toContain('https://emb.example/embeddings')
+    const feedback = wrapper.findAll('.feedback')
+    expect(feedback).toHaveLength(2)
+    expect(feedback.every((item) => item.classes().includes('ok'))).toBe(true)
+    expect(feedback[1]?.text()).toContain('向量端点连接成功')
+  })
+
+  it('一键体检：服务器红灯给出可执行原因', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example', serverToken: 'bad' },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+
+    const feedback = wrapper.findAll('.feedback')
+    expect(feedback[0]?.classes()).toContain('fail')
+    expect(feedback[0]?.text()).toContain('服务器连接失败')
+    expect(feedback[0]?.text()).toContain('Server Token')
+  })
+
+  it('一键体检用表单当前值：改了地址没保存也测新地址', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://old.example/v1', model: 'm-1', apiKey: 'k' },
+    })
+    const calls = stubProbeFetch()
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.find('input[type="url"]').setValue('https://new.example/v1')
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+
+    expect(calls).toContain('https://new.example/v1/chat/completions')
+    expect(calls.some((url) => url.includes('old.example'))).toBe(false)
+  })
+
+  it('导出成功路径：写入剪贴板并报绿灯', async () => {
+    await chrome.storage.local.set({
+      biliHelperUserCorpus: [
+        { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: '', createdAt: 'x' },
+      ],
+    })
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '导出入库 patch').trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(String(writeText.mock.calls[0]?.[0])).toContain('某新品牌')
+    expect(wrapper.find('.feedback.ok')?.text()).toContain('已复制到剪贴板')
+    expect(wrapper.find('textarea[aria-label="导出的词库 patch"]').exists()).toBe(true)
+  })
+
+  it('补录成功后已生成的 patch 立即失效（不能让用户复制走旧内容）', async () => {
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText: vi.fn(async () => undefined) },
+      configurable: true,
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.find('input[aria-label="补录词条"]').setValue('词A')
+    await findButton(wrapper, '补录').trigger('click')
+    await flushPromises()
+    await findButton(wrapper, '导出入库 patch').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('textarea[aria-label="导出的词库 patch"]').exists()).toBe(true)
+
+    await wrapper.find('input[aria-label="补录词条"]').setValue('词B')
+    await findButton(wrapper, '补录').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('textarea[aria-label="导出的词库 patch"]').exists()).toBe(false)
+  })
+
+  it('删除/清空写失败：红灯报错且列表不假装变了', async () => {
+    await chrome.storage.local.set({
+      biliHelperUserCorpus: [
+        { text: '词A', category: 'scripts', kind: 'script', weight: 2, note: '', createdAt: 'x' },
+      ],
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const setMock = chrome.storage.local.set as unknown as ReturnType<typeof vi.fn>
+    setMock.mockRejectedValueOnce(new Error('quota exceeded'))
+    await wrapper.find('button[aria-label="删除 词A"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.feedback.fail')?.text()).toContain('删除失败')
+    expect(wrapper.findAll('.corpus-item')).toHaveLength(1)
+
+    setMock.mockRejectedValueOnce(new Error('quota exceeded'))
+    await findButton(wrapper, '清空补录').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.feedback.fail')?.text()).toContain('清空失败')
+    expect(wrapper.findAll('.corpus-item')).toHaveLength(1)
+  })
+
+  it('server 模式：词库卡明说补录不参与服务器识别，补录成功只给黄灯', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example' },
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(wrapper.text()).toContain('当前识别在服务器上做')
+
+    await wrapper.find('input[aria-label="补录词条"]').setValue('某新品牌')
+    await findButton(wrapper, '补录').trigger('click')
+    await flushPromises()
+
+    const hint = wrapper.find('.feedback.warn')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toContain('只在浏览器直连时生效')
+    expect(hint.text()).toContain('导出入库 patch')
+    // 词确实存下了（回退直连时要用），只是不承诺服务器侧生效。
+    expect(await readUserCorpus()).toHaveLength(1)
+  })
 })

@@ -66,7 +66,8 @@ export function normalizeUserEntry(value: unknown): UserCorpusEntry | null {
     category,
     kind,
     weight,
-    note: typeof value.note === 'string' ? value.note.slice(0, 200) : '',
+    // note 压成单行：手改/旧版本的脏数据里带换行，会让导出 patch 出现脱离注释的注入行。
+    note: typeof value.note === 'string' ? value.note.replace(/\s+/gu, ' ').trim().slice(0, 200) : '',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
   }
 }
@@ -93,17 +94,24 @@ export async function readUserCorpus(): Promise<UserCorpusEntry[]> {
 }
 
 // 写操作串行化：读改写在并发下会互相覆盖（设置页连点两次「添加」就要丢一条）。
-// 写失败必须让调用方知道——静默返回旧列表会让界面报「已补录」而实际什么都没存下。
+// 校验也必须在链内做——链外校验下，并发的同词添加会双双通过校验而重复入库，
+// 并发越过上限同样会击穿 MAX_USER_ENTRIES。
+// 写失败必须让调用方知道：静默返回旧列表会让界面报「已补录」而实际什么都没存下。
 let writeChain: Promise<unknown> = Promise.resolve()
 
-async function mutate(
-  fn: (entries: UserCorpusEntry[]) => Promise<UserCorpusEntry[]> | UserCorpusEntry[],
-): Promise<UserCorpusEntry[]> {
+/** persist 为 null = 校验未过，不写入；value 原样带回调用方（含拒绝原因）。 */
+type MutateOutcome<T> = { persist: UserCorpusEntry[] | null; value: T }
+
+async function mutate<T>(
+  fn: (entries: UserCorpusEntry[]) => MutateOutcome<T> | Promise<MutateOutcome<T>>,
+): Promise<T> {
   const next = writeChain.then(async () => {
     const entries = await readUserCorpus()
-    const updated = await fn(entries)
-    await chrome.storage.local.set({ [USER_CORPUS_KEY]: updated })
-    return updated
+    const outcome = await fn(entries)
+    if (outcome.persist !== null) {
+      await chrome.storage.local.set({ [USER_CORPUS_KEY]: outcome.persist })
+    }
+    return outcome.value
   })
   // 链条本身永不 reject，避免一次失败把后续写入全卡死。
   writeChain = next.catch(() => undefined)
@@ -121,7 +129,7 @@ export function builtinCorpusTexts(): Set<string> {
   return builtinTexts
 }
 
-/** 词条校验：短语形态、不含 md 分隔符、不与内置/用户层重复、未超上限。 */
+/** 词条校验：短语形态、不破坏 md 格式、不与内置/用户层重复、未超上限。 */
 export function validateUserEntryText(
   text: string,
   existing: readonly UserCorpusEntry[],
@@ -129,8 +137,10 @@ export function validateUserEntryText(
   const trimmed = text.trim()
   if (trimmed === '') return '先填一个词或短语'
   if (trimmed.length > MAX_ENTRY_LENGTH) return `太长了（最多 ${MAX_ENTRY_LENGTH} 字），信号应是短语而不是整句`
-  // md 词库用「词|N」表达权重，词条里带 | 会让导出的 patch 解析错乱。
+  // md 词库用「词|N」表达权重、用「#」表达注释：这两个字符进了词条，导出的 patch 合入 md 时
+  // 会被解析器当权重覆盖或注释吞掉（本地能召回、入库却丢词，且双方都看不到报错）。
   if (trimmed.includes('|')) return '不能包含「|」字符（词库用它分隔权重）'
+  if (trimmed.startsWith('#')) return '不能以「#」开头（词库把它当注释）'
   if (/[\r\n]/.test(trimmed)) return '不能包含换行'
   if (builtinCorpusTexts().has(trimmed)) return '内置词库已经有这个词了'
   if (existing.some((entry) => entry.text === trimmed)) return '这个词已经在你的词库里了'
@@ -144,27 +154,34 @@ export async function addUserCorpusEntry(input: {
   note?: string
 }): Promise<AddUserCorpusResult> {
   const category = input.category.trim()
-  if (category === '' || !/^[a-z0-9-]+$/u.test(category)) {
-    return { ok: false, reason: '品类不合法（只允许小写字母、数字与连字符）' }
+  // 品类必须是构建期真的会采纳的分组：corpusFileMeta 认不出的名字（如 misc）建了 md 也不进词库，
+  // 导出的 patch 会让维护者白忙一场。已知分组与新建 brands-* 都放行。
+  if (category === '' || corpusFileMeta(`${category}.md`) === null) {
+    return { ok: false, reason: '品类不合法：请从下拉里选，或用 brands- 前缀新建分组' }
   }
   const text = input.text.trim()
-  const current = await readUserCorpus()
-  const invalid = validateUserEntryText(text, current)
-  if (invalid) return { ok: false, reason: invalid }
+  // note 压成单行：脏数据里的换行会让导出 patch 出现非注释行（注入词条）。
+  const note = (input.note ?? '').replace(/\s+/gu, ' ').trim().slice(0, 200)
   const defaults = categoryDefaults(category)
   try {
-    const entries = await mutate((existing) => [
-      ...existing,
-      {
-        text,
-        category,
-        kind: defaults.kind,
-        weight: defaults.weight,
-        note: (input.note ?? '').trim().slice(0, 200),
-        createdAt: new Date().toISOString(),
-      },
-    ])
-    return { ok: true, entries }
+    // 校验与写入在同一条串行链里：并发同词添加只有一条能落库，另一条拿到「已存在」的拒绝原因；
+    // 并发越过上限也会被链内的上限校验挡住（链外校验做不到这两点）。
+    return await mutate<AddUserCorpusResult>((existing) => {
+      const invalid = validateUserEntryText(text, existing)
+      if (invalid !== null) return { persist: null, value: { ok: false, reason: invalid } }
+      const persist = [
+        ...existing,
+        {
+          text,
+          category,
+          kind: defaults.kind,
+          weight: defaults.weight,
+          note,
+          createdAt: new Date().toISOString(),
+        },
+      ]
+      return { persist, value: { ok: true, entries: persist } }
+    })
   } catch {
     return { ok: false, reason: '保存失败，请重试' }
   }
@@ -172,11 +189,14 @@ export async function addUserCorpusEntry(input: {
 
 export async function removeUserCorpusEntry(text: string): Promise<UserCorpusEntry[]> {
   const target = text.trim()
-  return mutate((entries) => entries.filter((entry) => entry.text !== target))
+  return mutate<UserCorpusEntry[]>((entries) => {
+    const persist = entries.filter((entry) => entry.text !== target)
+    return { persist, value: persist }
+  })
 }
 
 export async function clearUserCorpus(): Promise<UserCorpusEntry[]> {
-  return mutate(() => [])
+  return mutate<UserCorpusEntry[]>(() => ({ persist: [], value: [] }))
 }
 
 /** 按品类分组（品类名排序），导出与合并共用同一份分组结果。 */

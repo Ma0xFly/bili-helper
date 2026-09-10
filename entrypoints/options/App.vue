@@ -239,7 +239,16 @@ async function loadUserCorpus(): Promise<void> {
   userEntries.value = await readUserCorpus()
 }
 
+/**
+ * 补录词条是否真的会参与识别：识别跑在端上（local）才生效。
+ * server/auto 模式下检索发生在服务端，用的是服务端自己的词库——这时候不能承诺「即生效」，
+ * 得说清楚补录只在浏览器直连时管用，并指向「导出 patch 交服务端合入」这条路。
+ */
+const corpusTakesEffect = computed(() => form.mode === 'local')
+
 async function addCorpusEntry(): Promise<void> {
+  // Enter 连按不受按钮 disabled 约束：这里再挡一道，避免同一 tick 触发两次写入。
+  if (corpusAdding.value) return
   const text = corpusText.value.trim()
   corpusAdding.value = true
   corpusHint.value = null
@@ -253,12 +262,18 @@ async function addCorpusEntry(): Promise<void> {
       corpusHint.value = { kind: 'fail', text: result.reason }
       return
     }
-    userEntries.value = result.entries
+    // 回读真实存储态而不是用返回值渲染：并发写入下返回值可能只是当次快照。
+    await loadUserCorpus()
     corpusText.value = ''
     corpusNote.value = ''
     // 词条变了，已生成的导出 patch 立即过期（避免用户复制走旧内容）。
     corpusPatch.value = ''
-    corpusHint.value = { kind: 'ok', text: `已补录「${text}」，下次识别即生效` }
+    corpusHint.value = {
+      kind: corpusTakesEffect.value ? 'ok' : 'warn',
+      text: corpusTakesEffect.value
+        ? `已补录「${text}」，下次识别即生效`
+        : `已补录「${text}」，但当前识别走服务器：只在浏览器直连时生效，要交给服务器请用「导出入库 patch」`,
+    }
   } finally {
     corpusAdding.value = false
   }
@@ -485,8 +500,14 @@ onMounted(loadUserCorpus)
           <h2 id="corpus-title" class="card-title">广告词库</h2>
           <p class="card-note">
             内置 {{ builtinCorpusCount }} 条（随版本更新，不可改）+ 你补录的
-            {{ userEntries.length }} 条。遇到没识别出来的广告，把它的关键词补在这里：保存即生效，
-            下次识别自动重算语料向量。
+            {{ userEntries.length }} 条。
+            <template v-if="corpusTakesEffect">
+              遇到没识别出来的广告，把它的关键词补在这里：保存即生效，下次识别自动重算语料向量。
+            </template>
+            <template v-else>
+              当前识别在服务器上做，补录的词条只在浏览器直连时生效（关掉服务器开关，或服务器失败回退时）；
+              要让服务器也认识它，请用下面的「导出入库 patch」交给服务端词库合入。
+            </template>
           </p>
 
           <div class="corpus-add">
