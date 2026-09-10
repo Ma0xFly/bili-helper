@@ -431,6 +431,7 @@ onMounted(loadUserCorpus)
                 <span class="switch-name">服务器失败时回退浏览器直连</span>
                 <span class="field-hint">
                   服务器不可用时自动改用上方端点继续工作（需要上方端点也配好）。
+                  回退只发生在请求还没出结果时——已经开始输出的回答不会中途换源。
                 </span>
               </span>
               <span class="switch">
