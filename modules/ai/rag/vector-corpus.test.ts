@@ -77,3 +77,42 @@ describe('rankWindowsByVector 把语料透传到向量路', () => {
     expect(calls.some((inputs) => inputs.includes('某新品牌'))).toBe(true)
   })
 })
+
+describe('旧语料向量键清理（配额只增不减会反噬写入）', () => {
+  const CACHE_PREFIX = 'biliHelperRagVectorCache:'
+
+  it('换语料重算后清掉别的端点/模型留下的旧键，保留同前缀与窗口键', async () => {
+    stubEmbeddings()
+    await chrome.storage.local.set({
+      // 别的模型/端点留下的旧语料键：必须清掉（用户补录会让哈希高频变化，不清必然打满配额）。
+      [`${CACHE_PREFIX}corpus:other-model:https://other:deadbeef`]: { vectors: [[1]] },
+      [`${CACHE_PREFIX}corpus:emb-m:https://emb.example:oldhash0`]: { vectors: [[2]] },
+      [`${CACHE_PREFIX}windows:BV1x:1:emb-m:https://emb.example`]: { vectors: [[3]], textHash: 'h' },
+      unrelatedKey: 'keep-me',
+    })
+
+    await getCorpusVectors(ENDPOINT, undefined, CORPUS_WITH_USER)
+
+    const keys = Object.keys(await chrome.storage.local.get(null)).sort()
+    // 新键 + 同 model:baseUrl 前缀的旧哈希 + 窗口键 + 无关键；别的端点那条被清掉。
+    expect(keys).toHaveLength(4)
+    expect(keys.filter((key) => key.startsWith(`${CACHE_PREFIX}corpus:`))).toHaveLength(2)
+    expect(keys).toContain(`${CACHE_PREFIX}corpus:emb-m:https://emb.example:oldhash0`)
+    expect(keys).toContain(`${CACHE_PREFIX}windows:BV1x:1:emb-m:https://emb.example`)
+    expect(keys).toContain('unrelatedKey')
+    expect(keys.some((key) => key.includes('other-model'))).toBe(false)
+  })
+
+  it('缓存命中时不触发清理（没有新键写入就不动别人的缓存）', async () => {
+    stubEmbeddings()
+    await getCorpusVectors(ENDPOINT, undefined, AD_SIGNAL_CORPUS)
+    await chrome.storage.local.set({
+      [`${CACHE_PREFIX}corpus:other-model:https://other:deadbeef`]: { vectors: [[1]] },
+    })
+
+    await getCorpusVectors(ENDPOINT, undefined, AD_SIGNAL_CORPUS) // 命中缓存
+
+    const all = await chrome.storage.local.get(null)
+    expect(`${CACHE_PREFIX}corpus:other-model:https://other:deadbeef` in all).toBe(true)
+  })
+})

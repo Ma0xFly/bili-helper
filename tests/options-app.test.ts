@@ -351,6 +351,43 @@ describe('options AI 助手表单', () => {
     expect(feedback[0]?.text()).toContain('未提供体检接口')
   })
 
+  it('体检运行中按钮禁用；结果只反映最新一轮，不累积', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example' },
+    })
+    let releaseFirst: ((response: Response) => void) | undefined
+    let invocation = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        invocation += 1
+        // 第一轮挂住，验证按钮进入禁用态（防重入，也就防住了迟到结果覆盖新一轮）。
+        if (invocation === 1) return new Promise<Response>((resolve) => { releaseFirst = resolve })
+        return new Response('', { status: 404 })
+      }),
+    )
+
+    const wrapper = mount(App)
+    await flushPromises()
+    const button = findButton(wrapper, '开始体检')
+    await button.trigger('click')
+    expect(button.text()).toContain('体检中')
+    expect((button.element as HTMLButtonElement).disabled).toBe(true)
+
+    releaseFirst?.(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    await flushPromises()
+    expect(wrapper.findAll('.feedback')).toHaveLength(1)
+    expect(wrapper.find('.feedback.ok')?.text()).toContain('服务器连接成功')
+    expect((findButton(wrapper, '开始体检').element as HTMLButtonElement).disabled).toBe(false)
+
+    // 第二轮（404 → 黄灯）：旧绿灯必须被替换，而不是两条并排堆着。
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+    const feedback = wrapper.findAll('.feedback')
+    expect(feedback).toHaveLength(1)
+    expect(feedback[0]?.classes()).toContain('warn')
+  })
+
   it('AI 去广告总开关回填并写回 schema', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: { adSkipEnabled: true },

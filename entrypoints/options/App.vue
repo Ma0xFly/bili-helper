@@ -157,6 +157,8 @@ type Feedback = { kind: 'ok' | 'warn' | 'fail'; text: string }
 
 const testing = ref(false)
 const diagResults = ref<Feedback[]>([])
+/** 自增运行号：只有最后一次体检的结果允许写回界面（迟到结果不得覆盖新状态）。 */
+let diagnosticsRunId = 0
 
 function renderFeedback(label: string, result: EndpointTestResult): Feedback {
   if (result.ok) return { kind: 'ok', text: `${label}连接成功 · ${result.model} 响应 ${result.ms}ms` }
@@ -168,6 +170,9 @@ function renderFeedback(label: string, result: EndpointTestResult): Feedback {
  * 纯 local 模式不测服务器）。auto 两边都测——回退路径必须真的可用，否则「智能回退」是空话。
  */
 async function runDiagnostics(): Promise<void> {
+  // 迟到结果守卫：体检要几秒，期间用户可能切走侧栏分组或再点一次体检；
+  // 只有最后一次运行的结果才允许写回界面，否则上一轮的结果会突然盖到新页面上。
+  const runId = (diagnosticsRunId += 1)
   testing.value = true
   diagResults.value = []
   try {
@@ -197,10 +202,10 @@ async function runDiagnostics(): Promise<void> {
         results.push(renderFeedback('向量端点', embedResult))
       }
     }
-    diagResults.value = results
+    if (runId === diagnosticsRunId) diagResults.value = results
   } finally {
-    // 无论探测结果如何，按钮都要从「体检中…」恢复。
-    testing.value = false
+    // 无论探测结果如何，按钮都要从「体检中…」恢复（且只由最后一次运行恢复）。
+    if (runId === diagnosticsRunId) testing.value = false
   }
 }
 

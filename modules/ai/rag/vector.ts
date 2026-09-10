@@ -7,6 +7,7 @@ import { embeddings } from '../llm/client'
 import type { ChatEndpoint } from '../llm/client'
 import {
   corpusVectorKey,
+  pruneStaleCorpusVectors,
   pruneStaleWindowVectors,
   readVectors,
   videoIdentityKey,
@@ -120,6 +121,9 @@ export async function getCorpusVectors(
   const documents = corpusDocuments(corpus)
   const vectors = await embeddings({ endpoint, inputs: documents, signal })
   await writeVectors(key, { vectors })
+  // 新键写成功后清掉别的端点/模型留下的旧语料键：语料哈希随用户补录高频变化，
+  // 只写不清会打满本地配额（详见 pruneStaleCorpusVectors 注释）。
+  await pruneStaleCorpusVectors(key)
   return vectors
 }
 

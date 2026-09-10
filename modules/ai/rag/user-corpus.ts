@@ -45,10 +45,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+/**
+ * 不可见格式字符（零宽空格 / BOM / 方向标记）：从字幕或网页粘贴时很常见。
+ * 不剥掉的后果是「看起来是空的词」能入库，以及「恰饭​」（带零宽）绕过与内置词的去重——
+ * 而精确匹配用 includes，带零宽的词条永远匹配不上字幕，白占权重还白白触发向量重算。
+ */
+const INVISIBLE_CHARS = /[\u200b-\u200f\u2060\ufeff]/gu
+
+/** 词条文本归一：剥不可见字符后 trim（校验、入库、读侧共用同一口径）。 */
+export function normalizeEntryText(value: unknown): string {
+  return typeof value === 'string' ? value.replace(INVISIBLE_CHARS, '').trim() : ''
+}
+
 /** 读侧防御：storage 里可能是旧版本/手改的脏数据，逐条归一，非法条目直接丢弃。 */
 export function normalizeUserEntry(value: unknown): UserCorpusEntry | null {
   if (!isRecord(value)) return null
-  const text = typeof value.text === 'string' ? value.text.trim() : ''
+  const text = normalizeEntryText(value.text)
   if (text === '' || text.length > MAX_ENTRY_LENGTH) return null
   const category = typeof value.category === 'string' ? value.category.trim() : ''
   if (category === '') return null
@@ -74,23 +86,34 @@ export function normalizeUserEntry(value: unknown): UserCorpusEntry | null {
 
 export async function readUserCorpus(): Promise<UserCorpusEntry[]> {
   try {
-    const result = await chrome.storage.local.get(USER_CORPUS_KEY)
-    const raw = result[USER_CORPUS_KEY]
-    if (!Array.isArray(raw)) return []
-    const entries: UserCorpusEntry[] = []
-    const seen = new Set<string>()
-    for (const item of raw) {
-      const entry = normalizeUserEntry(item)
-      // 读侧也去重：历史脏数据里的重复词不该让词表遍历白跑两遍。
-      if (!entry || seen.has(entry.text)) continue
-      seen.add(entry.text)
-      entries.push(entry)
-    }
-    return entries
+    return normalizeUserEntries((await readRaw()).raw)
   } catch {
     // 读失败按「没有用户词」处理：检索链路绝不能因为补录数据挂掉。
+    // 注意这个降级只适用于读侧（effectiveCorpus）；写侧走 readRaw()，
+    // 否则一次瞬时读失败就会把「读不到」当成「没有」，读改写直接清空整个词库。
     return []
   }
+}
+
+/** 裸读：失败照抛，供读改写链使用。 */
+async function readRaw(): Promise<{ raw: unknown }> {
+  const result = await chrome.storage.local.get(USER_CORPUS_KEY)
+  return { raw: result[USER_CORPUS_KEY] }
+}
+
+/** 读侧归一：非数组/脏条目/重复词一律收敛，保证下游拿到的永远是干净列表。 */
+export function normalizeUserEntries(raw: unknown): UserCorpusEntry[] {
+  if (!Array.isArray(raw)) return []
+  const entries: UserCorpusEntry[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    const entry = normalizeUserEntry(item)
+    // 读侧也去重：历史脏数据里的重复词不该让词表遍历白跑两遍。
+    if (!entry || seen.has(entry.text)) continue
+    seen.add(entry.text)
+    entries.push(entry)
+  }
+  return entries
 }
 
 // 写操作串行化：读改写在并发下会互相覆盖（设置页连点两次「添加」就要丢一条）。
@@ -102,18 +125,39 @@ let writeChain: Promise<unknown> = Promise.resolve()
 /** persist 为 null = 校验未过，不写入；value 原样带回调用方（含拒绝原因）。 */
 type MutateOutcome<T> = { persist: UserCorpusEntry[] | null; value: T }
 
+/** 单步存储操作上限：扩展上下文失效时 storage promise 可能永不落定，不给超时就会卡死整条写链。 */
+export const STORAGE_STEP_TIMEOUT_MS = 10_000
+
+async function withStorageTimeout<T>(step: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      step,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`存储操作超过 ${STORAGE_STEP_TIMEOUT_MS}ms 未响应`)),
+          STORAGE_STEP_TIMEOUT_MS,
+        )
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 async function mutate<T>(
   fn: (entries: UserCorpusEntry[]) => MutateOutcome<T> | Promise<MutateOutcome<T>>,
 ): Promise<T> {
   const next = writeChain.then(async () => {
-    const entries = await readUserCorpus()
+    // 链内读用裸读：读失败必须中止本次写入，绝不能拿空列表去覆盖已有词库。
+    const entries = normalizeUserEntries((await withStorageTimeout(readRaw())).raw)
     const outcome = await fn(entries)
     if (outcome.persist !== null) {
-      await chrome.storage.local.set({ [USER_CORPUS_KEY]: outcome.persist })
+      await withStorageTimeout(chrome.storage.local.set({ [USER_CORPUS_KEY]: outcome.persist }))
     }
     return outcome.value
   })
-  // 链条本身永不 reject，避免一次失败把后续写入全卡死。
+  // 链条本身永不 reject，避免一次失败（含超时）把后续写入全卡死。
   writeChain = next.catch(() => undefined)
   return next
 }
@@ -134,7 +178,7 @@ export function validateUserEntryText(
   text: string,
   existing: readonly UserCorpusEntry[],
 ): string | null {
-  const trimmed = text.trim()
+  const trimmed = normalizeEntryText(text)
   if (trimmed === '') return '先填一个词或短语'
   if (trimmed.length > MAX_ENTRY_LENGTH) return `太长了（最多 ${MAX_ENTRY_LENGTH} 字），信号应是短语而不是整句`
   // md 词库用「词|N」表达权重、用「#」表达注释：这两个字符进了词条，导出的 patch 合入 md 时
@@ -159,7 +203,7 @@ export async function addUserCorpusEntry(input: {
   if (category === '' || corpusFileMeta(`${category}.md`) === null) {
     return { ok: false, reason: '品类不合法：请从下拉里选，或用 brands- 前缀新建分组' }
   }
-  const text = input.text.trim()
+  const text = normalizeEntryText(input.text)
   // note 压成单行：脏数据里的换行会让导出 patch 出现非注释行（注入词条）。
   const note = (input.note ?? '').replace(/\s+/gu, ' ').trim().slice(0, 200)
   const defaults = categoryDefaults(category)

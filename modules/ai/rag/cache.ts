@@ -5,6 +5,7 @@
 
 const CACHE_PREFIX = 'biliHelperRagVectorCache:'
 const WINDOW_PREFIX = `${CACHE_PREFIX}windows:`
+const CORPUS_PREFIX = `${CACHE_PREFIX}corpus:`
 
 /** 缓存条目：窗口向量附文本哈希（语料条目不带哈希）。 */
 export interface VectorCacheEntry {
@@ -85,6 +86,29 @@ export async function pruneStaleWindowVectors(currentVideoKey: string): Promise<
     const currentPrefix = `${WINDOW_PREFIX}${currentVideoKey}:`
     const stale = Object.keys(all).filter(
       (key) => key.startsWith(WINDOW_PREFIX) && !key.startsWith(currentPrefix),
+    )
+    if (stale.length > 0) {
+      await chrome.storage.local.remove(stale)
+    }
+  } catch {
+    // 清理失败不影响任何链路。
+  }
+}
+
+/**
+ * 换语料（内容哈希变化）时清理旧语料向量键。
+ * 用户补录/删除词条会让哈希高频变化，一条语料缓存就是几百个浮点数组（MB 级）；
+ * 只写不清必然打满 chrome.storage.local 配额，届时向量缓存静默失效（每次重嵌入），
+ * 更糟的是会连带让用户词库自己的写入开始因配额失败。
+ * 保留同 model:baseUrl 前缀下的其他哈希（并发检测可能正在读），只清别的端点/模型的旧键。
+ */
+export async function pruneStaleCorpusVectors(currentKey: string): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null)
+    const currentStorageKey = storageKey(currentKey)
+    const keptPrefix = currentStorageKey.slice(0, currentStorageKey.lastIndexOf(':') + 1)
+    const stale = Object.keys(all).filter(
+      (key) => key.startsWith(CORPUS_PREFIX) && !key.startsWith(keptPrefix),
     )
     if (stale.length > 0) {
       await chrome.storage.local.remove(stale)

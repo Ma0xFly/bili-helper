@@ -111,6 +111,48 @@ describe('probeServerEndpoint', () => {
     controller.abort()
     expect(await pending).toEqual({ ok: false, reason: '体检已取消' })
   })
+
+  it('死线到期（TimeoutError）→ 报「请求超时」，不能混同成用户取消', async () => {
+    stubFetch(async () =>
+      Promise.reject(Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' })),
+    )
+    const result = await probeServerEndpoint({ baseUrl: 'https://srv.example', token: '' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('请求超时')
+      expect(result.reason).not.toContain('取消')
+    }
+  })
+
+  it('200 但返回 HTML（网关/路由器门户/登录页）→ 红灯，不给假绿灯', async () => {
+    stubFetch(
+      async () =>
+        new Response('<html><body>portal</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        }),
+    )
+    const result = await probeServerEndpoint({ baseUrl: 'https://srv.example', token: '' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('网页')
+      expect(result.reason).toContain('转发服务')
+    }
+  })
+
+  it('200 + JSON 才算体检通过（content-type 不是 html 即可，不要求特定字段）', async () => {
+    stubFetch(
+      async () =>
+        new Response('{"ok":true}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
+    expect(await probeServerEndpoint({ baseUrl: 'https://srv.example', token: '' })).toMatchObject({
+      ok: true,
+      healthSupported: true,
+    })
+  })
 })
 
 describe('describeServerFailure', () => {

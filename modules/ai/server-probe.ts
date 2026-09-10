@@ -42,8 +42,21 @@ export async function probeServerEndpoint(params: ServerProbeParams): Promise<Se
       return { ok: true, ms: Date.now() - started, healthSupported: false }
     }
     if (!response.ok) throw mapResponseError(response)
+    // 200 + HTML：网关/路由器门户/登录页对任意路径都回 200 网页。
+    // 给绿灯会把人引向「服务器没问题」的错误结论，这里判失败并说清原因。
+    if ((response.headers.get('content-type') ?? '').includes('text/html')) {
+      return {
+        ok: false,
+        reason: '地址返回的是网页而不是 JSON（可能是网关或登录页），请确认填的是转发服务地址',
+      }
+    }
     return { ok: true, ms: Date.now() - started, healthSupported: true }
   } catch (error) {
+    // 死线到期（TimeoutError）与用户取消（AbortError）要分开说：
+    // 前者是「服务器没响应」，报成「体检已取消」会把排查方向带偏。
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      return { ok: false, reason: describeServerFailure(mapNetworkError(error)) }
+    }
     if (isAbortError(error)) return { ok: false, reason: '体检已取消' }
     return {
       ok: false,

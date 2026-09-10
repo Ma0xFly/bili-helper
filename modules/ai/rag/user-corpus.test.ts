@@ -6,6 +6,7 @@ import { AD_SIGNAL_CORPUS, corpusContentHash, corpusFileMeta, parseCorpusSource 
 import {
   MAX_ENTRY_LENGTH,
   MAX_USER_ENTRIES,
+  STORAGE_STEP_TIMEOUT_MS,
   USER_CORPUS_CATEGORIES,
   USER_CORPUS_KEY,
   addUserCorpusEntry,
@@ -372,6 +373,72 @@ describe('写入失败要让用户知道（不静默假装成功）', () => {
     setMock.mockRejectedValueOnce(new Error('quota exceeded'))
     await expect(removeUserCorpusEntry('某新词')).rejects.toThrow()
     expect(await readUserCorpus()).toHaveLength(1)
+  })
+
+  it('链内读失败：中止写入并报错，绝不把「读不到」当「没有」而清空词库', async () => {
+    await addUserCorpusEntry({ text: '旧词A', category: 'scripts' })
+    await addUserCorpusEntry({ text: '旧词B', category: 'deals' })
+    expect(await readUserCorpus()).toHaveLength(2)
+
+    const getMock = chrome.storage.local.get as unknown as ReturnType<typeof vi.fn>
+    const setMock = chrome.storage.local.set as unknown as ReturnType<typeof vi.fn>
+    // 前面两次成功添加已经写过 storage，这里只关心读失败之后有没有再写。
+    setMock.mockClear()
+
+    // 删除时恰逢一次瞬时读失败：如果拿空列表去做读改写，两条旧词会被整库覆盖掉。
+    getMock.mockRejectedValueOnce(new Error('context invalidated'))
+    await expect(removeUserCorpusEntry('旧词A')).rejects.toThrow()
+    expect(setMock).not.toHaveBeenCalled()
+
+    getMock.mockRejectedValueOnce(new Error('context invalidated'))
+    expect(await addUserCorpusEntry({ text: '新词', category: 'scripts' })).toEqual({
+      ok: false,
+      reason: '保存失败，请重试',
+    })
+
+    // 存储恢复后词库完好无损：两条旧词都还在，没有被静默清空。
+    expect((await readUserCorpus()).map((entry) => entry.text)).toEqual(['旧词A', '旧词B'])
+  })
+
+  it('存储操作挂起：超时按失败处理，且写链自愈（后续写入照常）', async () => {
+    vi.useFakeTimers()
+    try {
+      const getMock = chrome.storage.local.get as unknown as ReturnType<typeof vi.fn>
+      getMock.mockImplementationOnce(() => new Promise(() => {})) // 永不落定
+      const pending = addUserCorpusEntry({ text: '某词', category: 'scripts' })
+      await vi.advanceTimersByTimeAsync(STORAGE_STEP_TIMEOUT_MS + 50)
+      expect(await pending).toEqual({ ok: false, reason: '保存失败，请重试' })
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // 挂起的那一步不能把整条写链带走：恢复后立刻可写。
+    expect((await addUserCorpusEntry({ text: '某词', category: 'scripts' })).ok).toBe(true)
+    expect(await readUserCorpus()).toHaveLength(1)
+  })
+})
+
+describe('不可见字符（零宽空格/BOM）', () => {
+  it('纯零宽「空词」被拒；带零宽的内置词照样撞去重', async () => {
+    expect((await addUserCorpusEntry({ text: '\u200b\ufeff', category: 'scripts' })).ok).toBe(false)
+    expect(await readUserCorpus()).toEqual([])
+
+    const sneaky = await addUserCorpusEntry({ text: '恰饭\u200b', category: 'scripts' })
+    expect(sneaky.ok).toBe(false)
+    if (!sneaky.ok) expect(sneaky.reason).toContain('内置词库')
+  })
+
+  it('入库前剥掉零宽字符（否则精确匹配永远命中不了字幕）', async () => {
+    const result = await addUserCorpusEntry({ text: '\ufeff某新品牌\u200b', category: 'brands-digital' })
+    expect(result.ok).toBe(true)
+    expect((await readUserCorpus())[0]?.text).toBe('某新品牌')
+  })
+
+  it('读侧同样剥离：手改 storage 塞进带零宽的词条，归一化后不留', async () => {
+    await chrome.storage.local.set({
+      [USER_CORPUS_KEY]: [{ text: '\u200b脏数据词\u200b', category: 'scripts' }],
+    })
+    expect((await readUserCorpus())[0]?.text).toBe('脏数据词')
   })
 })
 
