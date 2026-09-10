@@ -69,3 +69,12 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     setTimeout(() => process.exit(0), 3000).unref()
   })
 }
+
+// 兜底：漏网的异步错误记一条状态，不让进程静默死掉（只记 message，不记栈与请求内容）。
+process.on('unhandledRejection', (reason) => {
+  log(`未处理的 Promise 拒绝：${reason instanceof Error ? reason.message : String(reason)}`)
+})
+process.on('uncaughtException', (error) => {
+  log(`未捕获异常，进程退出：${error.message}`)
+  process.exit(1)
+})

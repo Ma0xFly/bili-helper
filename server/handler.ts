@@ -169,6 +169,12 @@ export function createRequestHandler(deps: ServerDeps): (req: IncomingMessage, r
   }
 
   return function handle(req: IncomingMessage, res: ServerResponse): void {
+    // 客户端中途断开后再写响应，会在 res 上 emit 'error'；没有监听器就是未捕获异常，
+    // 一个用户关页面就能打崩整个进程。断开本身已由 AbortController 处理（停掉上游调用），
+    // 这里只需吞掉写入侧的错误并记一条状态。
+    res.on('error', () => {
+      deps.onWarn?.('响应写入失败（客户端已断开）')
+    })
     const path = pathOf(req)
     const method = req.method ?? 'GET'
 
@@ -221,6 +227,9 @@ export function createRequestHandler(deps: ServerDeps): (req: IncomingMessage, r
 
       if (path === AI_PATHS.chat) {
         const messages: ChatMessage[] = parseChatMessages(body.messages)
+        // 客户端可能已经走了：写向 destroyed 的流会 emit error（上面已挂监听不至于崩），
+        // 但能跳过就跳过，别做无谓写入。
+        const canWrite = (): boolean => !res.writableEnded && !res.destroyed
         res.writeHead(200, {
           'Access-Control-Allow-Origin': allowOrigin,
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -233,14 +242,14 @@ export function createRequestHandler(deps: ServerDeps): (req: IncomingMessage, r
             onEvent: (event) => {
               // 能力层自己也会 emit start；线上只保留服务端这一份，避免客户端看到两个 start。
               if (event.type === 'start') return
-              if (!res.writableEnded) res.write(sseEvent(event))
+              if (canWrite()) res.write(sseEvent(event))
             },
           })
         } catch (error) {
           // 能力层约定流开始后以 end{error} 收束；这里兜住流开始前的意外，保证终止性。
-          if (!res.writableEnded) res.write(sseEvent({ type: 'end', error: errorInfoFrom(error) }))
+          if (canWrite()) res.write(sseEvent({ type: 'end', error: errorInfoFrom(error) }))
         }
-        if (!res.writableEnded) {
+        if (canWrite()) {
           res.write(sseDone())
           res.end()
         }
@@ -266,7 +275,7 @@ export function createRequestHandler(deps: ServerDeps): (req: IncomingMessage, r
       send(res, 200, JSON.stringify(result))
     })().catch((error) => {
       if (!res.headersSent) sendError(req, res, error)
-      else if (!res.writableEnded) res.end()
+      else if (!res.writableEnded && !res.destroyed) res.end()
     })
   }
 }

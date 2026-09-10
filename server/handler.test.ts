@@ -344,6 +344,49 @@ describe('错误映射与请求体防御', () => {
 })
 
 describe('客户端断开', () => {
+  it('SSE 流中途断开：写入侧不崩进程，服务紧接着仍可用', async () => {
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(input, handlers) {
+        // 持续吐块直到被中止：模拟真实流式回答到一半用户关了页面。
+        // 断开后 res 已 destroyed，继续 write 会 emit error——没有监听器就是未捕获异常。
+        for (let index = 0; index < 500 && !input.signal?.aborted; index += 1) {
+          handlers.onEvent({ type: 'message', chunk: `块${index}` })
+          await new Promise((resolve) => setTimeout(resolve, 1))
+        }
+        handlers.onEvent({ type: 'end' })
+      },
+    }
+    const harness = await start({ capabilities })
+
+    const controller = new AbortController()
+    // 两个阶段都可能被中止打断：连接阶段（fetch 本身拒绝）与读流阶段（text() 拒绝），都要接住。
+    const pending = fetch(`${harness.baseUrl}/ai/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], context: CONTEXT }),
+      signal: controller.signal,
+    })
+      .then(
+        (response) => response.text(),
+        () => 'aborted',
+      )
+      .catch(() => 'aborted')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await pending
+
+    // 进程还活着、还能服务：这是对「写入已销毁的响应流」最直接的回归。
+    expect((await fetch(`${harness.baseUrl}/ai/health`)).status).toBe(200)
+    const after = await post(harness.baseUrl, '/ai/ad-detection', CONTEXT)
+    expect(after.status).toBe(200)
+  })
+
   it('连接中断 → 能力层收到 aborted signal（不白烧上游 token）', async () => {
     let seen: AbortSignal | undefined
     let release: (() => void) | undefined
