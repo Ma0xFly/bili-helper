@@ -81,10 +81,10 @@ export default defineContentScript({
         anchor: 'body',
         append: 'last',
         onMount(container, _shadow, shadowHost) {
-          // 文档流内联（原版同款）：面板 = 右栏里的一个 tab（tab 条 + 面板本体），
-          // 插在 up 卡之后，随页面滚动、把原生内容往下推，不覆盖任何原生模块。
-          // 忠实复现实验（真实 CSS + shadow + 失位重插循环实测）：页面健康无副作用。
-          Object.assign(shadowHost.style, { display: 'none' }) // 落位前隐藏（见 ensurePanelPlacement）
+          // 文档流内联（原版同款）：面板 = 右栏里的一个 tab（tab 条 + 面板本体）。
+          // 落位时机由 ensurePanelPlacement 纪律管理（等 hydration 稳定才插入），
+          // 落位前宿主保持 display:none。
+          Object.assign(shadowHost.style, { display: 'none' })
           createApp(PanelApp).mount(container)
           return shadowHost
         },
@@ -306,13 +306,20 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    // ---------- 面板落位：插进右栏文档流（原版同款语义） ----------
-    // 面板 = 右栏的一个 tab：宿主（tab 条 + 面板）插在 up 卡之后、原生内容之前，
-    // 随页面滚动，不覆盖任何原生模块。忠实复现实验（真实 CSS + shadow + 失位重插）
-    // 证明该插入方式对页面无副作用；SPA 换视频/右栏重渲染后由 1.5s 轮询校验重插。
-    // 右栏不可用（导航过渡）时宿主整体隐藏，绝不落在页面底部悬空。
+    // ---------- 面板落位：等右栏挂载稳定后再插入（原版同款语义 + 时机纪律） ----------
+    // 面板 = 右栏的一个 tab：宿主（tab 条 + 面板）插在 up 卡之后，随页面滚动。
+    //
+    // 时机纪律（三轮构建的实测结论）：文档流插入本身无害（晚插入从未破坏页面），
+    // 但真实扩展在 B 站 hydration 进行中就插入/搬动节点 → 右栏 tab 与评论区挂载
+    // 失败。因此：
+    //   1) 锚点（up 卡）首次出现或更换（SPA 换视频）后，必须等右栏尾部模块
+    //      （弹幕条 + 推荐位）都挂载完（或 4s 超时兜底）才插入；
+    //   2) 插入后绝不再因「同级顺序变化」搬动节点——只在宿主被 B 站移除/换父时
+    //      才重新落位； hydration 期间宿主处于隐藏态（display:none），不占位不干扰。
     const PANEL_UP_ANCHOR_SELECTOR = '.up-panel-container'
     const PANEL_COLUMN_SELECTORS = ['.right-container-inner', '.right-container']
+    const PANEL_SETTLE_SELECTORS = ['.video-pod-above-modules', '.rcmd-tab']
+    const PANEL_SETTLE_TIMEOUT_MS = 4000
 
     function findPanelColumn(): HTMLElement | null {
       for (const selector of PANEL_COLUMN_SELECTORS) {
@@ -322,21 +329,38 @@ export default defineContentScript({
       return null
     }
 
+    let panelAnchor: Element | null = null
+    let panelAnchorSightedAt: number | null = null
+
     function ensurePanelPlacement(): void {
       const host = panelMount?.shadowHost
       if (!host) return
-      const up = window.document.querySelector<HTMLElement>(PANEL_UP_ANCHOR_SELECTOR)
       const column = findPanelColumn()
-      // up 卡必须确实是右栏的子级，防止匹配到别的容器的同名节点。
-      if (!up || !column || !column.contains(up)) {
+      const up = column?.querySelector<HTMLElement>(PANEL_UP_ANCHOR_SELECTOR) ?? null
+      if (!column || !up) {
+        panelAnchor = null
+        panelAnchorSightedAt = null
         host.style.display = 'none'
         return
       }
-      if (host.parentElement !== up.parentElement || host.previousElementSibling !== up) {
+      if (up !== panelAnchor) {
+        // 新锚点（首次出现或 SPA 换视频）：重置稳定等待窗口，本回合先不插入。
+        panelAnchor = up
+        panelAnchorSightedAt = Date.now()
+        host.style.display = 'none'
+        return
+      }
+      const settled =
+        PANEL_SETTLE_SELECTORS.every((selector) => column.querySelector(selector) !== null) ||
+        (panelAnchorSightedAt !== null && Date.now() - panelAnchorSightedAt > PANEL_SETTLE_TIMEOUT_MS)
+      if (!settled) {
+        host.style.display = 'none'
+        return
+      }
+      if (!host.isConnected || host.parentElement !== up.parentElement) {
         try {
           up.after(host)
         } catch {
-          // 右栏 DOM 暂不接受插入：保持隐藏，下轮再试。
           host.style.display = 'none'
           return
         }
@@ -344,7 +368,7 @@ export default defineContentScript({
       host.style.display = 'block'
     }
 
-    // 首次落位；SPA 换视频/右栏重渲染由 1.5s 周期检查兜底。
+    // 首次落位等待；SPA 换视频/右栏重渲染由 1.5s 周期检查兜底。
     ensurePanelPlacement()
 
     // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
