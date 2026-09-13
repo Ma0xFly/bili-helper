@@ -155,10 +155,51 @@ async function fetchEmbedModels(): Promise<void> {
 
 type Feedback = { kind: 'ok' | 'warn' | 'fail'; text: string }
 
+// ---------- 服务商预设（开源客户端惯例）：一键填地址，模型输入给推荐占位 ----------
+// 模型名只作 placeholder 提示（迭代快，不自动写入表单）；拉取模型按钮随时拿真实列表。
+const CHAT_PRESETS: { name: string; url: string; model?: string }[] = [
+  { name: 'DeepSeek', url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  { name: '硅基流动 SiliconFlow', url: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+  { name: 'Kimi（月之暗面）', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2-0711-preview' },
+  { name: '通义千问（兼容模式）', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  { name: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.5-air' },
+  { name: 'Ollama（本机）', url: 'http://localhost:11434/v1', model: 'qwen3:8b' },
+  { name: 'LM Studio（本机）', url: 'http://localhost:1234/v1' },
+]
+
+const chatPresetName = computed(
+  () => CHAT_PRESETS.find((preset) => preset.url === form.apiUrl)?.name ?? 'custom',
+)
+const chatModelPlaceholder = computed(
+  () => CHAT_PRESETS.find((preset) => preset.url === form.apiUrl)?.model ?? 'gpt-4o-mini',
+)
+
+function applyChatPreset(event: Event): void {
+  const name = (event.target as HTMLSelectElement).value
+  const preset = CHAT_PRESETS.find((item) => item.name === name)
+  if (preset) form.apiUrl = preset.url
+}
+
 const testing = ref(false)
 const diagResults = ref<Feedback[]>([])
 /** 自增运行号：只有最后一次体检的结果允许写回界面（迟到结果不得覆盖新状态）。 */
 let diagnosticsRunId = 0
+
+/** 汇总徽标：体检完成后给一眼可见的结论（X 项 · 失败/警告/全过）。 */
+const diagSummary = computed(() => {
+  const results = diagResults.value
+  if (results.length === 0) return null
+  const fail = results.filter((item) => item.kind === 'fail').length
+  const warn = results.filter((item) => item.kind === 'warn').length
+  const kind = fail > 0 ? 'fail' : warn > 0 ? 'warn' : 'ok'
+  const parts =
+    fail > 0
+      ? `${fail} 项失败`
+      : warn > 0
+        ? `${warn} 项警告`
+        : '全部通过'
+  return { kind, text: `${results.length} 项检查 · ${parts}` }
+})
 
 function renderFeedback(label: string, result: EndpointTestResult): Feedback {
   if (result.ok) return { kind: 'ok', text: `${label}连接成功 · ${result.model} 响应 ${result.ms}ms` }
@@ -168,6 +209,7 @@ function renderFeedback(label: string, result: EndpointTestResult): Feedback {
 /**
  * 一键体检：按当前模式只测真正会被用到的通道，不测用不上的（纯 server 模式不测本机端点，
  * 纯 local 模式不测服务器）。auto 两边都测——回退路径必须真的可用，否则「智能回退」是空话。
+ * 结果逐项实时上屏（体感不再是一段黑箱等待），迟到结果由 runId 守卫挡掉。
  */
 async function runDiagnostics(): Promise<void> {
   // 迟到结果守卫：体检要几秒，期间用户可能切走侧栏分组或再点一次体检；
@@ -177,14 +219,18 @@ async function runDiagnostics(): Promise<void> {
   diagResults.value = []
   try {
     const results: Feedback[] = []
+    const push = (item: Feedback): void => {
+      results.push(item)
+      if (runId === diagnosticsRunId) diagResults.value = [...results]
+    }
     if (form.mode !== 'local') {
       const probe = await probeServerEndpoint({
         baseUrl: form.serverBaseUrl,
         token: form.serverToken,
       })
-      if (!probe.ok) results.push({ kind: 'fail', text: `服务器连接失败 · ${probe.reason}` })
-      else if (probe.healthSupported) results.push({ kind: 'ok', text: `服务器连接成功 · 响应 ${probe.ms}ms` })
-      else results.push({ kind: 'warn', text: '服务器可达，但未提供体检接口（不影响转发）' })
+      if (!probe.ok) push({ kind: 'fail', text: `服务器连接失败 · ${probe.reason}` })
+      else if (probe.healthSupported) push({ kind: 'ok', text: `服务器连接成功 · 响应 ${probe.ms}ms` })
+      else push({ kind: 'warn', text: '服务器可达，但未提供体检接口（不影响转发）' })
     }
     if (form.mode !== 'server') {
       const embed = resolveEmbeddingEndpoint(form)
@@ -192,14 +238,14 @@ async function runDiagnostics(): Promise<void> {
         testChatEndpoint({ baseUrl: form.apiUrl, model: form.model, apiKey: form.apiKey }),
         testEmbeddingEndpoint({ baseUrl: embed.baseUrl, model: embed.model, apiKey: embed.apiKey }),
       ])
-      results.push(renderFeedback('对话端点', chatResult))
+      push(renderFeedback('对话端点', chatResult))
       // 向量端点继承对话端点时不单独报绿（同一条链路，避免噪音）；拆开了或出问题才报，
       // 出问题顺带展开高级区，让用户直接看到该改哪三个字段。
       const embedConfiguredSeparately =
         form.embedBaseUrl.trim() !== '' || form.embedModel.trim() !== '' || form.embedKey.trim() !== ''
       if (!embedResult.ok) advancedOpen.value = true
       if (embedConfiguredSeparately || !embedResult.ok) {
-        results.push(renderFeedback('向量端点', embedResult))
+        push(renderFeedback('向量端点', embedResult))
       }
     }
     if (runId === diagnosticsRunId) diagResults.value = results
@@ -358,6 +404,19 @@ onMounted(loadUserCorpus)
           <p v-if="!localEndpointsInUse" class="card-note">
             当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
           </p>
+          <div class="field">
+            <span class="field-label">服务商预设</span>
+            <select :value="chatPresetName" aria-label="服务商预设" @change="applyChatPreset">
+              <option value="custom">自定义（手动填写）</option>
+              <option v-for="preset in CHAT_PRESETS" :key="preset.name" :value="preset.name">
+                {{ preset.name }}
+              </option>
+            </select>
+            <span class="field-hint">
+              选中即填入对应地址，模型可点「拉取模型」取真实列表。浏览器直连要求服务商放行跨域（CORS）：
+              本地 Ollama / LM Studio 需开启跨域允许；云端被拦时改走下方「服务器转发」。
+            </span>
+          </div>
           <label class="field">
             <span class="field-label">Base URL</span>
             <input v-model.trim="form.apiUrl" type="url" placeholder="https://api.openai.com/v1" />
@@ -372,7 +431,7 @@ onMounted(loadUserCorpus)
               <input
                 v-model.trim="form.model"
                 list="chat-model-options"
-                placeholder="gpt-4o-mini"
+                :placeholder="chatModelPlaceholder"
                 class="grow"
               />
               <datalist id="chat-model-options">
@@ -444,7 +503,12 @@ onMounted(loadUserCorpus)
         </section>
 
         <section class="card" aria-labelledby="test-title">
-          <h2 id="test-title" class="card-title">一键体检</h2>
+          <div class="card-head-row">
+            <h2 id="test-title" class="card-title">一键体检</h2>
+            <span v-if="diagSummary" class="diag-summary" :class="diagSummary.kind">
+              {{ diagSummary.text }}
+            </span>
+          </div>
           <p class="card-note">
             按当前配置实际探测会被用到的通道：{{
               useServer
@@ -457,14 +521,19 @@ onMounted(loadUserCorpus)
           <button type="button" class="ghost" :disabled="testing" @click="runDiagnostics">
             {{ testing ? '体检中…' : '开始体检' }}
           </button>
-          <div aria-live="polite">
+          <div aria-live="polite" class="diag-results">
+            <div v-if="testing && diagResults.length === 0" class="diag-skeleton" aria-hidden="true">
+              正在逐项探测，请稍候…
+            </div>
             <div
               v-for="(item, index) in diagResults"
               :key="index"
               class="feedback"
               :class="item.kind"
             >
-              <span class="dot" aria-hidden="true" />
+              <span class="badge" aria-hidden="true">
+                {{ item.kind === 'ok' ? '✓' : item.kind === 'warn' ? '!' : '✕' }}
+              </span>
               <span>{{ item.text }}</span>
             </div>
           </div>
@@ -578,7 +647,9 @@ onMounted(loadUserCorpus)
           />
 
           <div v-if="corpusHint" class="feedback" :class="corpusHint.kind" aria-live="polite">
-            <span class="dot" aria-hidden="true" />
+            <span class="badge" aria-hidden="true">
+              {{ corpusHint.kind === 'ok' ? '✓' : corpusHint.kind === 'warn' ? '!' : '✕' }}
+            </span>
             <span>{{ corpusHint.text }}</span>
           </div>
         </section>
@@ -1056,15 +1127,84 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------- 一键体检：卡片头（标题 + 汇总徽标）、结果行（徽标 + 文案）、探测骨架 ---------- */
+.card-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diag-summary {
+  flex: none;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.diag-summary.ok {
+  background: #e9f6ee;
+  color: #2fa96b;
+  border: 1px solid rgba(85, 212, 143, 0.35);
+}
+
+.diag-summary.fail {
+  background: #fdecee;
+  color: #e5484d;
+  border: 1px solid rgba(255, 143, 163, 0.35);
+}
+
+.diag-summary.warn {
+  background: #fdf5e6;
+  color: #b5822a;
+  border: 1px solid rgba(240, 196, 120, 0.4);
+}
+
+.diag-results:empty {
+  display: none;
+}
+
 .feedback {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-top: 12px;
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.feedback .badge {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.diag-skeleton {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: #857fa0;
+  background: #f4f1fb;
+  animation: diag-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes diag-pulse {
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .feedback.ok {
@@ -1084,15 +1224,6 @@ input:focus-visible {
   background: #fdf5e6;
   color: #b5822a;
   border: 1px solid rgba(240, 196, 120, 0.4);
-}
-
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentcolor;
-  box-shadow: 0 0 6px currentcolor;
-  flex-shrink: 0;
 }
 
 .actions {

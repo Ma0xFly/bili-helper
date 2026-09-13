@@ -168,7 +168,7 @@ export interface PanelErrorCopy {
 const ERROR_COPY: Record<AiErrorInfo['kind'], Omit<PanelErrorCopy, 'withSettingsLink'>> = {
   network: {
     title: 'AI 掉线了，去看看端点设置？',
-    hint: '检查端点地址与网络；端点需 CORS 放行 B 站域名（AD-6）',
+    hint: '查地址与网络；浏览器直连要求端点放行 B 站跨域（CORS）——本地服务需开启跨域，或改用「服务器转发」绕过',
   },
   http: {
     title: '端点返回了错误，去设置里看看？',

@@ -272,6 +272,34 @@ describe('options AI 助手表单', () => {
     expect(wrapper.findAll('.feedback.warn')).toHaveLength(1)
   })
 
+  it('服务商预设：选中即填地址、模型占位随预设切换；手改地址回落「自定义」', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const select = wrapper.find('select[aria-label="服务商预设"]')
+    await select.setValue('DeepSeek')
+    const baseUrl = wrapper.find('input[type="url"]')
+    expect(inputValue(baseUrl.element)).toBe('https://api.deepseek.com/v1')
+    // 模型输入的占位符换成该服务商的推荐名（只是提示，不写入表单值）。
+    expect(wrapper.find('input[list="chat-model-options"]').attributes('placeholder')).toBe(
+      'deepseek-chat',
+    )
+    // 下拉反显当前命中的预设（computed 从地址反推）。
+    expect((select.element as HTMLSelectElement).value).toBe('DeepSeek')
+
+    // 手动改地址：预设回落「自定义」，占位符回到通用默认。
+    await baseUrl.setValue('https://my-proxy.example/v1')
+    const after = wrapper.find('select[aria-label="服务商预设"]')
+    expect((after.element as HTMLSelectElement).value).toBe('custom')
+    expect(wrapper.find('input[list="chat-model-options"]').attributes('placeholder')).toBe(
+      'gpt-4o-mini',
+    )
+    // 保存后表单值保持手动填的地址，不被预设覆盖。
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).apiUrl).toBe('https://my-proxy.example/v1')
+  })
+
   it('一键体检（local）：只探对话+向量端点，不碰服务器；继承态不单独报绿', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: {
@@ -386,6 +414,44 @@ describe('options AI 助手表单', () => {
     const feedback = wrapper.findAll('.feedback')
     expect(feedback).toHaveLength(1)
     expect(feedback[0]?.classes()).toContain('warn')
+  })
+
+  it('体检汇总徽标：全绿「全部通过」，有失败时红色计数', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    // 全绿：chat + embeddings 都 200。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) =>
+        String(url).includes('/embeddings')
+          ? new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1] }] }), { status: 200 })
+          : new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: 200 }),
+      ),
+    )
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+    let summary = wrapper.find('.diag-summary')
+    expect(summary.classes()).toContain('ok')
+    expect(summary.text()).toContain('全部通过')
+
+    // 对话端点 401（向量仍 200 且继承不单独报）：汇总转红并计数。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) =>
+        String(url).includes('/embeddings')
+          ? new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1] }] }), { status: 200 })
+          : new Response('{"error":"nope"}', { status: 401 }),
+      ),
+    )
+    await findButton(wrapper, '开始体检').trigger('click')
+    await flushPromises()
+    summary = wrapper.find('.diag-summary')
+    expect(summary.classes()).toContain('fail')
+    expect(summary.text()).toContain('1 项失败')
   })
 
   it('AI 去广告总开关回填并写回 schema', async () => {
