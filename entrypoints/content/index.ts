@@ -285,44 +285,81 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    /** 面板定位：漂浮于播放器右侧下方；按面板实际高度钳制，不溢出视口底部。 */
-    function measurePanelPosition(): void {
-      const video = findVideo()
-      const playerRect =
-        (video?.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null)?.getBoundingClientRect() ??
-        video?.getBoundingClientRect()
-      // 面板实际高度（隐藏/折叠时测不到则用保守估计）。
-      let panelHeight = 480
+    // ---------- 面板停靠 ----------
+    // 停靠位置只由播放器矩形决定，同一布局永远同一位置：右缘与播放器右缘对齐；
+    // 播放器正下方放得下就贴正下方，放不下就收进播放器内右下角（底边距播放器底边 12px）。
+    // 内容变高时底边不动、向上生长——面板不会随内容高度在播放器中间漂来漂去。
+    const PANEL_DOCK_INSET = 12
+    const PANEL_HEIGHT_ESTIMATE = 480
+
+    function measuredPanelHeight(): number {
       try {
-        const rect = panelShadowRoot
-          ?.querySelector<HTMLElement>('.bh-panel')
-          ?.getBoundingClientRect()
-        if (rect && rect.height > 0) panelHeight = rect.height
+        const candidates = panelShadowRoot
+          ?.querySelector<HTMLElement>('.bh-panel-root')
+          ?.querySelectorAll<HTMLElement>('.bh-panel, .bh-panel-collapsed')
+        for (const el of candidates ?? []) {
+          const rect = el.getBoundingClientRect()
+          if (rect.height > 0) return rect.height // display:none（v-show）的候选高度为 0，跳过
+        }
       } catch {
         // 测量失败沿用估计值。
       }
-      const viewportHeight = window.innerHeight
-      const minTop = 16
-      const maxTop = Math.max(minTop, viewportHeight - panelHeight - 24)
-      if (playerRect && playerRect.width > 0 && playerRect.height > 0) {
-        panel.top = Math.min(Math.max(minTop, playerRect.bottom + 16), maxTop)
-        const roomRight = window.innerWidth - playerRect.right
-        panel.right = roomRight >= 220 ? Math.max(16, roomRight - 4) : 20
-      } else {
-        panel.top = Math.min(96, maxTop)
+      return PANEL_HEIGHT_ESTIMATE
+    }
+
+    let measureRafPending = false
+    function scheduleMeasure(): void {
+      if (measureRafPending) return
+      measureRafPending = true
+      window.requestAnimationFrame(() => {
+        measureRafPending = false
+        measurePanelPosition()
+      })
+    }
+
+    // 播放器尺寸变化（宽屏/剧场模式/换视频）与面板自身高度变化（tab 切换/内容增减）即时重停靠；
+    // 1.5s 周期检查继续兜底，防观测器漏报。
+    const panelResizeObserver = new ResizeObserver(scheduleMeasure)
+    let observedPlayer: Element | null = null
+    function observePlayerEl(player: Element): void {
+      if (observedPlayer === player) return
+      panelResizeObserver.disconnect()
+      panelResizeObserver.observe(player)
+      observedPlayer = player
+    }
+    function observePanelEl(): void {
+      const el = panelShadowRoot?.querySelector<HTMLElement>('.bh-panel')
+      if (el) panelResizeObserver.observe(el) // 重复 observe 同一元素是无操作
+    }
+
+    function measurePanelPosition(): void {
+      const video = findVideo()
+      const playerEl = (video?.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null) ?? video
+      if (!playerEl) {
+        // 无播放器：退回右上角附近的固定位置，不遮内容。
+        panel.top = Math.max(16, Math.min(96, window.innerHeight - measuredPanelHeight() - 24))
         panel.right = 20
+        return
+      }
+      observePlayerEl(playerEl)
+      observePanelEl()
+      const rect = playerEl.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+      panel.right = Math.max(PANEL_DOCK_INSET, window.innerWidth - rect.right + PANEL_DOCK_INSET)
+      const panelHeight = measuredPanelHeight()
+      const belowTop = rect.bottom + PANEL_DOCK_INSET
+      if (belowTop + panelHeight <= window.innerHeight - PANEL_DOCK_INSET) {
+        panel.top = belowTop
+      } else {
+        // 正下方放不下：贴播放器内右下角，底边悬在播放器底边上方 12px；视口钳制兜底。
+        const dockedTop = rect.bottom - panelHeight - PANEL_DOCK_INSET
+        panel.top = Math.max(PANEL_DOCK_INSET, Math.min(dockedTop, window.innerHeight - panelHeight - PANEL_DOCK_INSET))
       }
     }
 
-    // 窗口变化即时重定位（防抖，避免走 1.5s 周期检查的滞后又不过度触发）。
-    let resizeTimer: number | undefined
-    window.addEventListener('resize', () => {
-      if (resizeTimer !== undefined) window.clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(() => {
-        resizeTimer = undefined
-        measurePanelPosition()
-      }, 150)
-    })
+    // 页面滚动：播放器在视口里移动，面板必须跟着走（rAF 合帧，滚动中不掉队也不抖）。
+    window.addEventListener('scroll', scheduleMeasure, { passive: true })
+    window.addEventListener('resize', scheduleMeasure)
 
     // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
     window.document.addEventListener('visibilitychange', () => {
