@@ -100,7 +100,13 @@ function onTabKeydown(event: KeyboardEvent): void {
   <!-- 独立宿主后自带 token 作用域：.bh-root 承载 --bh-* 变量与字体，data-dark 随 B 站夜间模式。
        文档流内联（右栏），不再做视口定位。 -->
   <div class="bh-root" :data-dark="ui.dark ? '' : undefined">
-    <div v-show="visible" class="bh-panel-root">
+    <!-- 覆盖层停靠：宿主是 body 下的零尺寸 fixed 锚点，面板本体在此定位（右栏锚定坐标来自 panel 状态）。
+         绝不进入 B 站文档流（页面 hydration 对陌生节点敏感）。 -->
+    <div
+      v-show="visible"
+      class="bh-panel-root"
+      :style="{ top: `${panel.top}px`, right: `${panel.right}px`, width: `${panel.width}px` }"
+    >
       <button
         v-show="collapsed"
         type="button"

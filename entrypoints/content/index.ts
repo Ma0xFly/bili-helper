@@ -81,8 +81,19 @@ export default defineContentScript({
         anchor: 'body',
         append: 'last',
         onMount(container, _shadow, shadowHost) {
-          // 原版同款宿主形态（.bili-helper-ai-panel-host）：块级、占满右栏宽、下方 12px 间距。
-          Object.assign(shadowHost.style, { display: 'block', width: '100%', margin: '0 0 12px' })
+          // 覆盖层停靠（重要）：面板绝不插进 B 站的文档流——页面自身的 hydration/
+          // 粘性布局对陌生兄弟节点敏感（实测会把右栏 tab 与评论区挤断）。
+          // 宿主只是 body 下的零尺寸 fixed 锚点，面板本体在 shadow 内以视口坐标
+          // 定位（panel.top/right/width 响应式驱动，右栏几何锚定），对页面 DOM 零改动。
+          Object.assign(shadowHost.style, {
+            position: 'fixed',
+            top: '0',
+            left: '0',
+            width: '0',
+            height: '0',
+            pointerEvents: 'none',
+            zIndex: '2147483000',
+          })
           createApp(PanelApp).mount(container)
           return shadowHost
         },
@@ -304,56 +315,63 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    // ---------- 面板停靠（原版同款）：插进 B 站右栏文档流 ----------
-    // 宿主挂在右栏容器、up 主信息卡之后（弹幕列表上方），随文档流与列内 sticky 滚动——
-    // 永远「固定在右侧上方」，不靠视口坐标模拟（宽屏/剧场模式下列落到底部也自动跟随）。
-    // B 站重渲染右栏会把宿主一起冲掉：每次插入后校验位置，失位即重插，1.5s 周期检查兜底。
-    const PANEL_RIGHT_CONTAINER_SELECTORS = [
-      '.right-container-inner.scroll-sticky',
-      '.right-container-inner',
-      '.right-container',
-    ]
-    const PANEL_TOP_REFERENCE_SELECTOR = '.up-panel-container'
+    // ---------- 面板停靠：视口层锚定右栏（读而不写） ----------
+    // 面板位置只由右栏矩形的实时读数决定：静止时贴 up 卡下方、与右栏右缘对齐（即
+    // 「固定在右侧上方」）；滚动后 up 卡离屏，钳到页头之下保持可见。B 站右栏自身
+    // 粘性布局，getBoundingClientRect 天然给出吸附后的位置，面板跟着走。
+    // 关键纪律：对页面 DOM 只读不写，绝不插入/移动节点——实测早插入会打断 B 站
+    // 的 hydration，右栏 tab 与评论区直接消失（覆盖层方案从机制上排除这类破坏）。
+    const PANEL_COLUMN_SELECTORS = ['.right-container', '.right-container-inner']
+    const PANEL_UP_ANCHOR_SELECTOR = '.up-panel-container'
+    const PANEL_DOCK_INSET = 12
 
-    interface PanelAnchor {
-      target: HTMLElement
-      topReference: HTMLElement | null
+    let panelRafPending = false
+    function schedulePanelMeasure(): void {
+      if (panelRafPending) return
+      panelRafPending = true
+      window.requestAnimationFrame(() => {
+        panelRafPending = false
+        measurePanelPosition()
+      })
     }
 
-    function findPanelAnchor(): PanelAnchor | null {
-      const container =
-        PANEL_RIGHT_CONTAINER_SELECTORS.map((selector) =>
-          window.document.querySelector<HTMLElement>(selector),
-        ).find((el) => el !== null) ?? null
-      if (!container) return null
-      const topReference = container.querySelector<HTMLElement>(PANEL_TOP_REFERENCE_SELECTOR)
-      if (topReference) return { target: container, topReference }
-      // 无 up 主卡（少见布局）：退而求其次插在评论区前（同为容器直接子节点时语义一致）。
-      const commentApp = window.document.querySelector<HTMLElement>('#commentapp')
-      if (commentApp && commentApp.parentElement === container) {
-        return { target: container, topReference: commentApp }
+    function findPanelColumn(): HTMLElement | null {
+      for (const selector of PANEL_COLUMN_SELECTORS) {
+        const el = window.document.querySelector<HTMLElement>(selector)
+        if (el) return el
       }
-      return { target: container, topReference: null }
+      return null
     }
 
-    function panelPlaced(anchor: PanelAnchor, host: HTMLElement): boolean {
-      if (host.parentElement !== anchor.target) return false
-      if (anchor.topReference) return host.previousElementSibling === anchor.topReference
-      return anchor.target.firstElementChild === host
+    function measurePanelPosition(): void {
+      const column = findPanelColumn()
+      if (!column) return // 右栏还没渲染：保持当前坐标，下一轮再锚
+      const rect = column.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+      panel.width = Math.max(320, Math.min(440, Math.round(rect.width)))
+      panel.right = Math.max(PANEL_DOCK_INSET, Math.round(window.innerWidth - rect.right))
+      // 顶部锚：up 卡下缘（无 up 卡时用右栏顶部）；滚动离屏后钳到安全边距。
+      const upPanel = window.document.querySelector<HTMLElement>(PANEL_UP_ANCHOR_SELECTOR)
+      const anchorTop = upPanel ? upPanel.getBoundingClientRect().bottom : rect.top
+      panel.top = Math.max(PANEL_DOCK_INSET, Math.min(Math.round(anchorTop), window.innerHeight - 120))
     }
 
-    function ensurePanelPlacement(): void {
-      const host = panelMount?.shadowHost
-      if (!host) return
-      const anchor = findPanelAnchor()
-      if (!anchor || panelPlaced(anchor, host)) return
-      try {
-        if (anchor.topReference) anchor.topReference.after(host)
-        else anchor.target.prepend(host)
-      } catch {
-        // 右栏 DOM 暂不接受插入（页面状态异常）：留在原地，下轮再试。
+    // 滚动/窗口变化/右栏尺寸变化（弹幕条展开、合集加载）即时重锚；rAF 合帧防抖。
+    window.addEventListener('scroll', schedulePanelMeasure, { passive: true })
+    window.addEventListener('resize', schedulePanelMeasure)
+    const panelColumnObserver = new ResizeObserver(schedulePanelMeasure)
+    let observedColumn: Element | null = null
+    function observePanelColumn(): void {
+      const column = findPanelColumn()
+      if (column && column !== observedColumn) {
+        panelColumnObserver.disconnect()
+        panelColumnObserver.observe(column)
+        observedColumn = column
       }
     }
+    // 首次测量并把观测挂上；SPA 换视频由 1.5s 周期检查兜底换观测目标。
+    measurePanelPosition()
+    observePanelColumn()
 
     // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
     window.document.addEventListener('visibilitychange', () => {
@@ -406,7 +424,8 @@ export default defineContentScript({
       controller.retryIfNeeded()
       controller.checkNavigation()
       void syncPanelSession()
-      ensurePanelPlacement()
+      measurePanelPosition()
+      observePanelColumn()
     }, NAV_CHECK_INTERVAL_MS)
     try {
       new MutationObserver(() => {
@@ -457,7 +476,6 @@ export default defineContentScript({
       // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
     }
     panel.ready = true
-    ensurePanelPlacement()
     void syncPanelSession()
 
     void controller.start()
