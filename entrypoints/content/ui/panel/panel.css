@@ -4,19 +4,19 @@
    与 key-ask-tab.html（视觉以脊柱为准）。 */
 
 /* ---------- 面板定位与壳 ---------- */
+/* 文档流内联（原版同款）：宿主插在 B 站右栏、up 主卡之后，随页面滚动，不做视口定位。 */
 .bh-panel-root {
-  position: fixed;
-  pointer-events: none;
-  z-index: 2147483100;
+  position: static;
+  width: 100%;
 }
 
 .bh-panel {
   display: flex;
   flex-direction: column;
-  width: 400px;
-  min-width: 380px;
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 40px);
+  width: 100%;
+  min-width: 0;
+  /* 右栏内联：不高于视口太多，超出走内部滚动（.bh-panel-body overflow-y:auto），别把弹幕列表顶出屏 */
+  max-height: calc(100vh - 120px);
   overflow: hidden;
   background: var(--bh-surface-glass);
   backdrop-filter: blur(24px) saturate(1.4);

@@ -9,6 +9,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import SummaryTab from './SummaryTab.vue'
 import ChatTab from './ChatTab.vue'
 import { panel, panelActivity, panelActions } from '../../../../modules/content/panel-state'
+import { ui } from '../../../../modules/content/ui-state'
 import { summaryAgoSeconds } from '../../../../modules/ai/panel-logic'
 import './panel.css'
 
@@ -96,93 +97,93 @@ function onTabKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <div
-    v-show="visible"
-    class="bh-panel-root"
-    :style="{ top: `${panel.top}px`, right: `${panel.right}px` }"
-  >
-    <button
-      v-show="collapsed"
-      type="button"
-      class="bh-panel-collapsed"
-      aria-label="展开 AI 面板"
-      @click="collapsed = false"
-    >
-      <span class="bh-ai-orb" aria-hidden="true">AI</span>
-      <span class="bh-panel-collapsed-text">AI 助手</span>
-    </button>
+  <!-- 独立宿主后自带 token 作用域：.bh-root 承载 --bh-* 变量与字体，data-dark 随 B 站夜间模式。
+       文档流内联（右栏），不再做视口定位。 -->
+  <div class="bh-root" :data-dark="ui.dark ? '' : undefined">
+    <div v-show="visible" class="bh-panel-root">
+      <button
+        v-show="collapsed"
+        type="button"
+        class="bh-panel-collapsed"
+        aria-label="展开 AI 面板"
+        @click="collapsed = false"
+      >
+        <span class="bh-ai-orb" aria-hidden="true">AI</span>
+        <span class="bh-panel-collapsed-text">AI 助手</span>
+      </button>
 
-    <section
-      v-show="!collapsed"
-      class="bh-panel"
-      role="region"
-      aria-label="AI 助手面板"
-    >
-      <header class="bh-panel-head">
-        <div class="bh-panel-title-row">
-          <span class="bh-ai-orb" aria-hidden="true">AI</span>
-          <div class="bh-panel-title-wrap">
-            <span class="bh-panel-title">AI 助手</span>
-            <span class="bh-panel-subtitle">{{ subtitle }}</span>
+      <section
+        v-show="!collapsed"
+        class="bh-panel"
+        role="region"
+        aria-label="AI 助手面板"
+      >
+        <header class="bh-panel-head">
+          <div class="bh-panel-title-row">
+            <span class="bh-ai-orb" aria-hidden="true">AI</span>
+            <div class="bh-panel-title-wrap">
+              <span class="bh-panel-title">AI 助手</span>
+              <span class="bh-panel-subtitle">{{ subtitle }}</span>
+            </div>
+            <button
+              type="button"
+              class="bh-panel-collapse-btn"
+              aria-label="收起面板"
+              @click="collapsed = true"
+            >
+              −
+            </button>
           </div>
-          <button
-            type="button"
-            class="bh-panel-collapse-btn"
-            aria-label="收起面板"
-            @click="collapsed = true"
-          >
-            −
-          </button>
+          <div class="bh-tab-bar" role="tablist" aria-label="面板功能" @keydown="onTabKeydown">
+            <button
+              v-for="(tab, index) in TABS"
+              :key="tab.key"
+              :ref="(el) => setTabButton(el, index)"
+              :id="`bh-tab-${tab.key}`"
+              type="button"
+              role="tab"
+              class="bh-tab"
+              :class="{ active: activeTab === tab.key }"
+              :aria-selected="activeTab === tab.key"
+              :aria-controls="`bh-tabpanel-${tab.key}`"
+              :tabindex="activeTab === tab.key ? 0 : -1"
+              @click="selectTab(tab.key)"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+        </header>
+        <div class="bh-panel-body">
+          <!-- 采集硬失败（视频元数据取不到）：错误态 + 重试按钮（单源失败已拼部分上下文不算失败） -->
+          <div v-if="panel.collectError && !panel.session" class="bh-feedback error" role="alert">
+            <div class="bh-feedback-body">
+              <span class="bh-feedback-title">视频资料拉取失败</span>
+              <span class="bh-feedback-hint">网络或页面状态异常，稍后重试</span>
+            </div>
+            <button type="button" class="bh-link" @click="panelActions.retryCollection()">
+              重试
+            </button>
+          </div>
+          <template v-else>
+            <div
+              v-show="activeTab === 'summary'"
+              id="bh-tabpanel-summary"
+              role="tabpanel"
+              aria-labelledby="bh-tab-summary"
+            >
+              <SummaryTab :key="sessionKey" />
+            </div>
+            <div
+              v-show="activeTab === 'chat'"
+              id="bh-tabpanel-chat"
+              role="tabpanel"
+              aria-labelledby="bh-tab-chat"
+            >
+              <ChatTab :key="sessionKey" />
+            </div>
+          </template>
         </div>
-        <div class="bh-tab-bar" role="tablist" aria-label="面板功能" @keydown="onTabKeydown">
-          <button
-            v-for="(tab, index) in TABS"
-            :key="tab.key"
-            :ref="(el) => setTabButton(el, index)"
-            :id="`bh-tab-${tab.key}`"
-            type="button"
-            role="tab"
-            class="bh-tab"
-            :class="{ active: activeTab === tab.key }"
-            :aria-selected="activeTab === tab.key"
-            :aria-controls="`bh-tabpanel-${tab.key}`"
-            :tabindex="activeTab === tab.key ? 0 : -1"
-            @click="selectTab(tab.key)"
-          >
-            {{ tab.label }}
-          </button>
-        </div>
-      </header>
-      <div class="bh-panel-body">
-        <!-- 采集硬失败（视频元数据取不到）：错误态 + 重试按钮（单源失败已拼部分上下文不算失败） -->
-        <div v-if="panel.collectError && !panel.session" class="bh-feedback error" role="alert">
-          <div class="bh-feedback-body">
-            <span class="bh-feedback-title">视频资料拉取失败</span>
-            <span class="bh-feedback-hint">网络或页面状态异常，稍后重试</span>
-          </div>
-          <button type="button" class="bh-link" @click="panelActions.retryCollection()">
-            重试
-          </button>
-        </div>
-        <template v-else>
-          <div
-            v-show="activeTab === 'summary'"
-            id="bh-tabpanel-summary"
-            role="tabpanel"
-            aria-labelledby="bh-tab-summary"
-          >
-            <SummaryTab :key="sessionKey" />
-          </div>
-          <div
-            v-show="activeTab === 'chat'"
-            id="bh-tabpanel-chat"
-            role="tabpanel"
-            aria-labelledby="bh-tab-chat"
-          >
-            <ChatTab :key="sessionKey" />
-          </div>
-        </template>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 </template>

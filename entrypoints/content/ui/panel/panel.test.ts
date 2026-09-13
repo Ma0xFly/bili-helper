@@ -43,8 +43,6 @@ beforeEach(() => {
   panel.pageEnabled = true
   panel.fullscreen = false
   panel.ready = true
-  panel.top = 96
-  panel.right = 20
   panel.session = null
   panel.collectError = false
   panelActivity.summaryStatus = 'idle'
@@ -91,33 +89,35 @@ describe('PanelApp（面板壳）', () => {
   it('显隐 gate：设置读回前 / 设置总开关关 / popup 快开关关 / 全屏 → 面板隐藏（v-show 不卸载内容）', async () => {
     panel.session = makeSession()
     const wrapper = mount(PanelApp)
-    expect(wrapper.find('.bh-panel-root').attributes('style')).not.toContain('display: none')
+    // 可见时 v-show 不写内联 style（面板已无定位样式），attributes('style') 会是 undefined。
+    const rootStyle = (): string => wrapper.find('.bh-panel-root').attributes('style') ?? ''
+    expect(rootStyle()).not.toContain('display: none')
 
     panel.ready = false // 设置读回前：不闪现
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).toContain('display: none')
+    expect(rootStyle()).toContain('display: none')
     panel.ready = true
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).not.toContain('display: none')
+    expect(rootStyle()).not.toContain('display: none')
 
     panel.masterEnabled = false
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).toContain('display: none')
+    expect(rootStyle()).toContain('display: none')
     panel.masterEnabled = true
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).not.toContain('display: none')
+    expect(rootStyle()).not.toContain('display: none')
 
     panel.pageEnabled = false
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).toContain('display: none')
+    expect(rootStyle()).toContain('display: none')
     panel.pageEnabled = true
 
     panel.fullscreen = true
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).toContain('display: none')
+    expect(rootStyle()).toContain('display: none')
     panel.fullscreen = false
     await nextTick()
-    expect(wrapper.find('.bh-panel-root').attributes('style')).not.toContain('display: none')
+    expect(rootStyle()).not.toContain('display: none')
 
     // 隐藏全程 v-show：tab 内容节点始终在场（跨隐藏不卸载）。
     expect(wrapper.find('.bh-panel').exists()).toBe(true)

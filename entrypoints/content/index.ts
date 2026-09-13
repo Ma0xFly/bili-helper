@@ -5,6 +5,7 @@ import { createShadowRootUi } from 'wxt/utils/content-script-ui/shadow-root'
 import { createApp } from 'vue'
 import { browser } from 'wxt/browser'
 import App from './ui/App.vue'
+import PanelApp from './ui/panel/PanelApp.vue'
 import { ui } from '../../modules/content/ui-state'
 import { AdSkipController } from '../../modules/content/ad-skip-controller'
 import type { TimerApi } from '../../modules/content/ad-skip-controller'
@@ -43,16 +44,15 @@ export default defineContentScript({
   cssInjectionMode: 'ui',
   async main(ctx) {
     let uiMount: Awaited<ReturnType<typeof createShadowRootUi<HTMLElement>>> | null = null
-    // 面板测量用：onMount 时捕获 shadow root，避免依赖 uiMount 的内部形状。
-    let panelShadowRoot: ShadowRoot | null = null
+    // 面板独立宿主：文档流内联（插进 B 站右栏），与覆盖层 host（fixed 铺满视口）分开。
+    let panelMount: Awaited<ReturnType<typeof createShadowRootUi<HTMLElement>>> | null = null
     try {
       uiMount = await createShadowRootUi<HTMLElement>(ctx, {
         name: 'bili-helper-anchor',
         position: 'inline',
         anchor: 'body',
         append: 'last',
-        onMount(container, shadow, shadowHost) {
-          panelShadowRoot = shadow
+        onMount(container, _shadow, shadowHost) {
           // 宿主铺满视口但指针事件穿透；浮层内容（提示条/标记/chip）各自开启事件。
           Object.assign(shadowHost.style, {
             position: 'fixed',
@@ -71,6 +71,25 @@ export default defineContentScript({
     } catch {
       // 页面早导航等场景下宿主已不可用：静默放弃，不影响宿主页。
       return
+    }
+
+    // 面板宿主：文档流内联，挂进 B 站右栏（插入点由 ensurePanelPlacement 维护）。
+    try {
+      panelMount = await createShadowRootUi<HTMLElement>(ctx, {
+        name: 'bili-helper-panel-anchor',
+        position: 'inline',
+        anchor: 'body',
+        append: 'last',
+        onMount(container, _shadow, shadowHost) {
+          // 原版同款宿主形态（.bili-helper-ai-panel-host）：块级、占满右栏宽、下方 12px 间距。
+          Object.assign(shadowHost.style, { display: 'block', width: '100%', margin: '0 0 12px' })
+          createApp(PanelApp).mount(container)
+          return shadowHost
+        },
+      })
+      panelMount.mount()
+    } catch {
+      // 面板挂不上不影响广告浮层族（提示条/标记/chip 照常工作）。
     }
 
     // ---------- 播放器定位器（真实 DOM） ----------
@@ -285,81 +304,56 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    // ---------- 面板停靠 ----------
-    // 停靠位置只由播放器矩形决定，同一布局永远同一位置：右缘与播放器右缘对齐；
-    // 播放器正下方放得下就贴正下方，放不下就收进播放器内右下角（底边距播放器底边 12px）。
-    // 内容变高时底边不动、向上生长——面板不会随内容高度在播放器中间漂来漂去。
-    const PANEL_DOCK_INSET = 12
-    const PANEL_HEIGHT_ESTIMATE = 480
+    // ---------- 面板停靠（原版同款）：插进 B 站右栏文档流 ----------
+    // 宿主挂在右栏容器、up 主信息卡之后（弹幕列表上方），随文档流与列内 sticky 滚动——
+    // 永远「固定在右侧上方」，不靠视口坐标模拟（宽屏/剧场模式下列落到底部也自动跟随）。
+    // B 站重渲染右栏会把宿主一起冲掉：每次插入后校验位置，失位即重插，1.5s 周期检查兜底。
+    const PANEL_RIGHT_CONTAINER_SELECTORS = [
+      '.right-container-inner.scroll-sticky',
+      '.right-container-inner',
+      '.right-container',
+    ]
+    const PANEL_TOP_REFERENCE_SELECTOR = '.up-panel-container'
 
-    function measuredPanelHeight(): number {
+    interface PanelAnchor {
+      target: HTMLElement
+      topReference: HTMLElement | null
+    }
+
+    function findPanelAnchor(): PanelAnchor | null {
+      const container =
+        PANEL_RIGHT_CONTAINER_SELECTORS.map((selector) =>
+          window.document.querySelector<HTMLElement>(selector),
+        ).find((el) => el !== null) ?? null
+      if (!container) return null
+      const topReference = container.querySelector<HTMLElement>(PANEL_TOP_REFERENCE_SELECTOR)
+      if (topReference) return { target: container, topReference }
+      // 无 up 主卡（少见布局）：退而求其次插在评论区前（同为容器直接子节点时语义一致）。
+      const commentApp = window.document.querySelector<HTMLElement>('#commentapp')
+      if (commentApp && commentApp.parentElement === container) {
+        return { target: container, topReference: commentApp }
+      }
+      return { target: container, topReference: null }
+    }
+
+    function panelPlaced(anchor: PanelAnchor, host: HTMLElement): boolean {
+      if (host.parentElement !== anchor.target) return false
+      if (anchor.topReference) return host.previousElementSibling === anchor.topReference
+      return anchor.target.firstElementChild === host
+    }
+
+    function ensurePanelPlacement(): void {
+      const host = panelMount?.shadowHost
+      if (!host) return
+      const anchor = findPanelAnchor()
+      if (!anchor || panelPlaced(anchor, host)) return
       try {
-        const candidates = panelShadowRoot
-          ?.querySelector<HTMLElement>('.bh-panel-root')
-          ?.querySelectorAll<HTMLElement>('.bh-panel, .bh-panel-collapsed')
-        for (const el of candidates ?? []) {
-          const rect = el.getBoundingClientRect()
-          if (rect.height > 0) return rect.height // display:none（v-show）的候选高度为 0，跳过
-        }
+        if (anchor.topReference) anchor.topReference.after(host)
+        else anchor.target.prepend(host)
       } catch {
-        // 测量失败沿用估计值。
-      }
-      return PANEL_HEIGHT_ESTIMATE
-    }
-
-    let measureRafPending = false
-    function scheduleMeasure(): void {
-      if (measureRafPending) return
-      measureRafPending = true
-      window.requestAnimationFrame(() => {
-        measureRafPending = false
-        measurePanelPosition()
-      })
-    }
-
-    // 播放器尺寸变化（宽屏/剧场模式/换视频）与面板自身高度变化（tab 切换/内容增减）即时重停靠；
-    // 1.5s 周期检查继续兜底，防观测器漏报。
-    const panelResizeObserver = new ResizeObserver(scheduleMeasure)
-    let observedPlayer: Element | null = null
-    function observePlayerEl(player: Element): void {
-      if (observedPlayer === player) return
-      panelResizeObserver.disconnect()
-      panelResizeObserver.observe(player)
-      observedPlayer = player
-    }
-    function observePanelEl(): void {
-      const el = panelShadowRoot?.querySelector<HTMLElement>('.bh-panel')
-      if (el) panelResizeObserver.observe(el) // 重复 observe 同一元素是无操作
-    }
-
-    function measurePanelPosition(): void {
-      const video = findVideo()
-      const playerEl = (video?.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null) ?? video
-      if (!playerEl) {
-        // 无播放器：退回右上角附近的固定位置，不遮内容。
-        panel.top = Math.max(16, Math.min(96, window.innerHeight - measuredPanelHeight() - 24))
-        panel.right = 20
-        return
-      }
-      observePlayerEl(playerEl)
-      observePanelEl()
-      const rect = playerEl.getBoundingClientRect()
-      if (rect.width <= 0 || rect.height <= 0) return
-      panel.right = Math.max(PANEL_DOCK_INSET, window.innerWidth - rect.right + PANEL_DOCK_INSET)
-      const panelHeight = measuredPanelHeight()
-      const belowTop = rect.bottom + PANEL_DOCK_INSET
-      if (belowTop + panelHeight <= window.innerHeight - PANEL_DOCK_INSET) {
-        panel.top = belowTop
-      } else {
-        // 正下方放不下：贴播放器内右下角，底边悬在播放器底边上方 12px；视口钳制兜底。
-        const dockedTop = rect.bottom - panelHeight - PANEL_DOCK_INSET
-        panel.top = Math.max(PANEL_DOCK_INSET, Math.min(dockedTop, window.innerHeight - panelHeight - PANEL_DOCK_INSET))
+        // 右栏 DOM 暂不接受插入（页面状态异常）：留在原地，下轮再试。
       }
     }
-
-    // 页面滚动：播放器在视口里移动，面板必须跟着走（rAF 合帧，滚动中不掉队也不抖）。
-    window.addEventListener('scroll', scheduleMeasure, { passive: true })
-    window.addEventListener('resize', scheduleMeasure)
 
     // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
     window.document.addEventListener('visibilitychange', () => {
@@ -412,7 +406,7 @@ export default defineContentScript({
       controller.retryIfNeeded()
       controller.checkNavigation()
       void syncPanelSession()
-      measurePanelPosition()
+      ensurePanelPlacement()
     }, NAV_CHECK_INTERVAL_MS)
     try {
       new MutationObserver(() => {
@@ -463,7 +457,7 @@ export default defineContentScript({
       // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
     }
     panel.ready = true
-    measurePanelPosition()
+    ensurePanelPlacement()
     void syncPanelSession()
 
     void controller.start()

@@ -4,10 +4,8 @@
    基准：DESIGN.md colors / skip-banner token 族，视觉对齐 mockups/key-skip-overlay.html。 */
 
 .bh-root {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 2147483000;
+  /* 只承载字体与设计 token：AI 面板（右栏文档流内联）与广告浮层（fixed 覆盖层）共用同一登记处，
+     定位各走各的——覆盖层的 fixed 定位在 .bh-overlay-root。 */
   font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
   /* 亮色 token */
   --bh-text-primary: #2e2a3b;
@@ -92,6 +90,14 @@
   --bh-glow-purple: rgba(156, 133, 255, 0.14);
   --bh-glow-pink-soft: rgba(255, 160, 189, 0.2);
   --bh-inset-shadow-dark: rgba(0, 0, 0, 0.3);
+}
+
+/* 覆盖层根：铺满视口、指针穿透（仅 App.vue 的广告浮层根使用；面板不走这条） */
+.bh-overlay-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483000;
 }
 
 .bh-overlay {

@@ -35,9 +35,6 @@ export const panel = reactive({
   fullscreen: false,
   /** 设置读回完成前保持隐藏：panelEnabled=false 用户不会看到面板闪现。 */
   ready: false,
-  /** 面板定位（视口坐标），由接线层按播放器矩形测量。 */
-  top: 96,
-  right: 20,
   /** 当前视频会话；null = 尚未采集完成（组件按 session.bvid 键控，变化即自复位）。 */
   session: null as PanelSession | null,
   /**
