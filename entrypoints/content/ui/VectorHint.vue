@@ -5,7 +5,7 @@ import { ui } from '../../../modules/content/ui-state'
 
 <template>
   <div v-if="ui.vectorHint.visible" class="bh-vector-hint" role="alert">
-    <span class="bh-vector-hint-text">向量端点（Embedding）的 API 有问题，暂时只用词表匹配</span>
+    <span class="bh-vector-hint-text">{{ ui.vectorHint.text }}</span>
     <button type="button" class="bh-btn-stay" @click="ui.actions.onOpenSettings()">去看看设置</button>
   </div>
 </template>

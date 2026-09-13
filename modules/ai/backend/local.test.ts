@@ -194,10 +194,12 @@ describe('local chat（直连流式转 SSE 事件）', () => {
 
 describe('local detectAds（RAG 链路接线）', () => {
   it('端点未配置抛 AiError config（内容脚本据此静默不弹 UI）', async () => {
-    const backend = createLocalBackend(settingsOf({ apiUrl: '', model: '' }))
+    const backend = createLocalBackend(
+      settingsOf({ apiUrl: '', model: '', embedBaseUrl: '', embedModel: '' }),
+    )
     await expect(backend.detectAds({ ...CONTEXT, strategy: 'smart' })).rejects.toMatchObject({
       kind: 'config',
-      message: '还没配置端点，先去设置页填一下',
+      message: /至少配一个/,
     })
   })
 

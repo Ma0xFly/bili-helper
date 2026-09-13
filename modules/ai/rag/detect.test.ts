@@ -194,13 +194,67 @@ describe('runRagDetect（全链路）', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('端点未配置：抛 AiError(config)，且不发任何请求', async () => {
+  it('端点全未配置：抛 AiError(config)，且不发任何请求', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     await expect(
-      runRagDetect(makeInput(AD_SUBTITLES), makeSettings({ apiUrl: '', model: '' }), {}),
-    ).rejects.toMatchObject({ kind: 'config', message: '还没配置端点，先去设置页填一下' })
+      runRagDetect(
+        makeInput(AD_SUBTITLES),
+        makeSettings({ apiUrl: '', model: '', embedBaseUrl: '', embedModel: '' }),
+        {},
+      ),
+    ).rejects.toMatchObject({ kind: 'config', message: /至少配一个/ })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('极速匹配：只配向量端点（对话未配置）→ 命中窗口成段、product_name 取命中语料词、零对话调用', async () => {
+    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await runRagDetect(
+      makeInput(AD_SUBTITLES),
+      makeSettings({ apiUrl: '', model: '' }),
+      {},
+    )
+    expect(result.source).toBe('rag')
+    expect(result.ads.length).toBeGreaterThan(0)
+    // 置信度保守封顶（极速模式明确低于 LLM 定界的可信度）。
+    for (const ad of result.ads) expect(ad.confidence).toBeLessThanOrEqual(0.6)
+    // product_name 来自窗口内精确命中的语料短语。
+    const names = result.ads.flatMap((ad) => ad.product_name.split('、')).filter(Boolean)
+    expect(names.some((name) => name.includes('恰饭') || name.includes('赞助'))).toBe(true)
+    // 零对话调用：请求只有 /embeddings。
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/embeddings')
+    }
+  })
+
+  it('极速模式无命中：{ads:[], source:"none"}，不触发 LLM 全文兜底', async () => {
+    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await runRagDetect(
+      makeInput(NO_SIGNAL_SUBTITLES),
+      makeSettings({ apiUrl: '', model: '' }),
+      {},
+    )
+    expect(result).toEqual({ ads: [], source: 'none' })
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/embeddings')
+    }
+  })
+
+  it('对话端点调用失败：onRetrievalOnly 触发一次，退回召回窗口（极速匹配收尾）', async () => {
+    const fetchMock = pipeFetch({
+      embeddings: tokenEmbeddingResponse,
+      chat: () => new Response('{}', { status: 500 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRetrievalOnly = vi.fn()
+    const result = await runRagDetect(makeInput(AD_SUBTITLES), makeSettings(), { onRetrievalOnly })
+    expect(result.source).toBe('rag')
+    expect(result.ads.length).toBeGreaterThan(0)
+    expect(onRetrievalOnly).toHaveBeenCalledTimes(1)
   })
 
   it('LLM 定界输出不可解析：宽松解析失败后退回召回窗口（留窗口不悬挂）', async () => {

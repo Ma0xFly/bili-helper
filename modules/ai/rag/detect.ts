@@ -1,9 +1,13 @@
 // RAG 主体：召回（词表 BM25 + 向量语义，RRF 融合去重）→ 小转大（命中窗口回取父级 ±40 秒上下文）→
 // LLM 精确定界（只喂候选窗口、JSON 先解析后宽松、最终保留召回窗口）→ 片段合并/置信度归一。
 //
+// 对话端点是可选依赖：未配置（只配了向量端点）或调用失败时，走「极速匹配」——
+// 命中窗口直接成段（窗口±边界、命中语料词作商品名、检索分映射保守置信度），零对话调用。
+//
 // 降级链（顺序）：①混合检索 RAG → ②/embeddings 不可用：纯词表召回续跑 + 向量故障一次性提示 →
-// ③纯词表召回无命中且字幕可用：LLM 全文兜底 → ④无字幕/全部不可用：{ads:[], source:"none"}。
-// 检索层对外永不抛错：唯一外抛是端点未配置的 AiError(config)，内容脚本据此静默不弹 UI。
+// ③对话端点不可用（未配置/调用失败）：极速匹配（纯检索定界）+ 一次性提示 →
+// ④纯词表召回无命中且字幕可用且对话可用：LLM 全文兜底 → ⑤无字幕/全部不可用：{ads:[], source:"none"}。
+// 检索层对外永不抛错：唯一外抛是端点全未配置的 AiError(config)，内容脚本据此静默不弹 UI。
 
 import { AiError } from '../../shared/error'
 import type { AiSettings } from '../../settings'
@@ -13,6 +17,9 @@ import type { ChatEndpoint } from '../llm/client'
 import type { AdSegment, DetectAdsInput, DetectAdsResult } from '../port'
 import { buildDetectBoundsMessages, buildDetectFulltextMessages, parseDetectAdResponse } from '../prompts'
 import type { DetectCandidateSpan } from '../prompts'
+import type { CorpusSignal } from './corpus'
+import { AD_SIGNAL_CORPUS } from './corpus'
+import { exactSignalMatches } from './bm25'
 import type { LexicalRankedWindow } from './bm25'
 import { rankWindowsByLexical } from './bm25'
 import { chunkSubtitleWindows } from './vector'
@@ -24,6 +31,8 @@ import { rrfFuse } from './rrf'
 export interface DetectHooks {
   /** 向量端点（/embeddings）不可用、退纯词表检索时回调；同一次检测最多触发一次。 */
   onVectorFallback?: () => void
+  /** 对话端点不可用（未配置视为有意为之不提示；调用失败才触发），本次以极速匹配收尾。 */
+  onRetrievalOnly?: () => void
 }
 
 /** 小转大：命中窗口两边回取的父级上下文秒数。 */
@@ -82,20 +91,27 @@ export function mergeAdSegments(ads: AdSegment[], duration: number): AdSegment[]
   return merged
 }
 
-/** 召回窗口兜底成片段（LLM 不可用/输出不可解析时）：融合分映射保守置信度。 */
+/**
+ * 召回窗口兜底成片段（极速匹配：LLM 未配置/不可用/输出不可解析时）：
+ * 融合分映射保守置信度（封顶 0.6，明确低于 LLM 定界的可信度）；
+ * product_name 取窗口内精确命中的语料短语（品牌/话术词本身就是商品线索）。
+ */
 function windowsAsFallbackAds(
   windows: SubtitleWindow[],
   ranked: { index: number; score: number }[],
   duration: number,
+  corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
 ): AdSegment[] {
   return ranked
     .map(({ index, score }) => {
       const window = windows[index]
+      const text = window?.text ?? ''
+      const hits = Array.from(exactSignalMatches(text, corpus)).slice(0, 3)
       return {
         start: window?.start ?? 0,
         end: window?.end ?? 0,
-        product_name: '',
-        ad_content: window ? window.text.slice(0, 200) : '',
+        product_name: hits.join('、'),
+        ad_content: text.slice(0, 200),
         confidence: Math.min(0.6, Math.max(0.3, 0.3 + score * 6)),
       }
     })
@@ -139,12 +155,13 @@ function collectCommentTexts(input: DetectAdsInput, limit = 20): string[] {
   return texts
 }
 
-/** LLM 定界：只喂候选窗口；调用失败/输出不可解析都保留召回窗口兜底（降级链保证可渲染）。 */
+/** LLM 定界：只喂候选窗口；调用失败/输出不可解析都保留召回窗口兜底（极速匹配收尾 + 一次性提示）。 */
 async function delimitWithLlm(
   input: DetectAdsInput,
   endpoint: ChatEndpoint,
   spans: DetectCandidateSpan[],
   fallbacks: AdSegment[],
+  hooks: DetectHooks = {},
 ): Promise<AdSegment[]> {
   let raw: string
   try {
@@ -156,9 +173,13 @@ async function delimitWithLlm(
     raw = result.content
   } catch (error) {
     if (isAbortError(error) || input.signal?.aborted) throw error
+    hooks.onRetrievalOnly?.()
     return fallbacks
   }
-  return parseDetectAdResponse(raw, fallbacks, input.video.duration)
+  const ads = parseDetectAdResponse(raw, fallbacks, input.video.duration, () =>
+    hooks.onRetrievalOnly?.(),
+  )
+  return ads
 }
 
 /** ③全文兜底：字幕整段交模型找广告；定界不出片段即视为无广告（source none），解析失败同样收尾。 */
@@ -196,16 +217,22 @@ export async function runRagDetect(
 ): Promise<DetectAdsResult> {
   const chatUrl = settings.apiUrl.trim()
   const chatModel = settings.model.trim()
-  if (!chatUrl || !chatModel) {
-    throw new AiError('config', '还没配置端点，先去设置页填一下')
-  }
-  const endpoint: ChatEndpoint = {
-    baseUrl: chatUrl,
-    model: chatModel,
-    apiKey: settings.apiKey.trim(),
-    format: settings.apiFormat,
-  }
+  // 对话端点可选（极速匹配只需向量/词表检索）；两端点全未配置才是配置错误。
+  const chatReady = chatUrl !== '' && chatModel !== ''
   const resolvedEmbed = resolveEmbeddingEndpoint(settings)
+  const embedReady =
+    resolvedEmbed.baseUrl.trim() !== '' && resolvedEmbed.model.trim() !== ''
+  if (!chatReady && !embedReady) {
+    throw new AiError('config', '还没配置端点，先去设置页填一下（对话端点或向量端点至少配一个）')
+  }
+  const endpoint: ChatEndpoint | null = chatReady
+    ? {
+        baseUrl: chatUrl,
+        model: chatModel,
+        apiKey: settings.apiKey.trim(),
+        format: settings.apiFormat,
+      }
+    : null
   const embedEndpoint: ChatEndpoint = {
     baseUrl: resolvedEmbed.baseUrl,
     model: resolvedEmbed.model,
@@ -246,14 +273,19 @@ export async function runRagDetect(
   // 两路 RRF 融合出候选窗口。
   const fused = rrfFuse([lexicalRanked.map((item) => item.index), vectorRankedIndexes])
   if (fused.length === 0) {
-    // ③无命中且字幕可用：LLM 全文兜底；④无字幕：空结果收尾。
+    // ③无命中且字幕可用：LLM 全文兜底（对话可用时）；极速模式/无字幕：空结果收尾。
+    if (!chatReady) return { ads: [], source: 'none' }
     return subtitles.length === 0
       ? { ads: [], source: 'none' }
-      : detectByFulltext(input, endpoint)
+      : detectByFulltext(input, endpoint as ChatEndpoint)
   }
 
   const spans = buildCandidateSpans(windows, fused, input, duration)
-  const fallbacks = mergeAdSegments(windowsAsFallbackAds(windows, fused, duration), duration)
-  const ads = await delimitWithLlm(input, endpoint, spans, fallbacks)
+  const fallbacks = mergeAdSegments(windowsAsFallbackAds(windows, fused, duration, corpus), duration)
+  // 极速匹配：对话端点未配置（只配向量）→ 命中窗口直接成段，零对话调用。
+  if (!chatReady) {
+    return { ads: mergeAdSegments(fallbacks, duration), source: 'rag' }
+  }
+  const ads = await delimitWithLlm(input, endpoint as ChatEndpoint, spans, fallbacks, hooks)
   return { ads: mergeAdSegments(ads, duration), source: 'rag' }
 }

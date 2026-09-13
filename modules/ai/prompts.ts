@@ -315,7 +315,12 @@ function finiteNumber(value: unknown): number {
  * 定界输出「先 JSON 后宽松后保留召回窗口」：JSON 形状完整取其结构（字段先数字强转），
  * 否则宽松文本解析时间对；再不行退回召回窗口（降级链保证永远拿到可渲染结果）。
  */
-export function parseDetectAdResponse(raw: string, fallbacks: AdSegment[], maxEnd: number): AdSegment[] {
+export function parseDetectAdResponse(
+  raw: string,
+  fallbacks: AdSegment[],
+  maxEnd: number,
+  onTotalFallback?: () => void,
+): AdSegment[] {
   const parsed = extractJson(raw)
   const root = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null
   if (root && Array.isArray(root.ads)) {
@@ -342,5 +347,7 @@ export function parseDetectAdResponse(raw: string, fallbacks: AdSegment[], maxEn
   }
   const loose = looseParseAdBounds(raw, maxEnd)
   if (loose.length > 0) return loose
+  // 严格+宽松都解析失败：退回召回窗口兜底（极速匹配收尾），回调供上层提示。
+  onTotalFallback?.()
   return fallbacks.map((ad) => ({ ...ad }))
 }

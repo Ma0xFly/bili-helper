@@ -254,18 +254,43 @@ async function runDiagnostics(): Promise<void> {
     }
     if (form.mode !== 'server') {
       const embed = resolveEmbeddingEndpoint(form)
-      const [chatResult, embedResult] = await Promise.all([
-        testChatEndpoint({ baseUrl: form.apiUrl, model: form.model, apiKey: form.apiKey }),
-        testEmbeddingEndpoint({ baseUrl: embed.baseUrl, model: embed.model, apiKey: embed.apiKey }),
-      ])
-      push(renderFeedback('对话端点', chatResult))
-      // 向量端点继承对话端点时不单独报绿（同一条链路，避免噪音）；拆开了或出问题才报，
-      // 出问题顺带展开高级区，让用户直接看到该改哪三个字段。
-      const embedConfiguredSeparately =
-        form.embedBaseUrl.trim() !== '' || form.embedModel.trim() !== '' || form.embedKey.trim() !== ''
-      if (!embedResult.ok) advancedOpen.value = true
-      if (embedConfiguredSeparately || !embedResult.ok) {
-        push(renderFeedback('向量端点', embedResult))
+      const chatConfigured = form.apiUrl.trim() !== '' && form.model.trim() !== ''
+      const embedExplicit = form.embedBaseUrl.trim() !== '' && form.embedModel.trim() !== ''
+      if (!chatConfigured && !embedExplicit) {
+        push({
+          kind: 'fail',
+          text: '还没配置端点：对话端点（总结/提问/LLM 定界）或向量端点（极速匹配）至少配一个',
+        })
+        advancedOpen.value = true
+      } else {
+        if (chatConfigured) {
+          const chatResult = await testChatEndpoint({
+            baseUrl: form.apiUrl,
+            model: form.model,
+            apiKey: form.apiKey,
+            format: form.apiFormat,
+          })
+          push(renderFeedback('对话端点', chatResult))
+        } else {
+          // 极速模式：去广告不依赖对话端点，如实告知能力边界。
+          push({
+            kind: 'warn',
+            text: '对话端点未配置：去广告走极速匹配（仅向量+词表检索），总结/提问不可用',
+          })
+        }
+        const embedResult = await testEmbeddingEndpoint({
+          baseUrl: embed.baseUrl,
+          model: embed.model,
+          apiKey: embed.apiKey,
+        })
+        // 向量端点继承对话端点时不单独报绿（同一条链路，避免噪音）；拆开了或出问题才报，
+        // 出问题顺带展开高级区，让用户直接看到该改哪三个字段。
+        const embedConfiguredSeparately =
+          form.embedBaseUrl.trim() !== '' || form.embedModel.trim() !== '' || form.embedKey.trim() !== ''
+        if (!embedResult.ok) advancedOpen.value = true
+        if (embedConfiguredSeparately || !embedResult.ok) {
+          push(renderFeedback('向量端点', embedResult))
+        }
       }
     }
     if (runId === diagnosticsRunId) diagResults.value = results
@@ -511,6 +536,9 @@ onMounted(loadUserCorpus)
 
         <section class="card" aria-labelledby="chat-endpoint-title">
           <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
+          <p class="card-note">
+            总结 / 提问必须有对话端点；只配向量端点时去广告自动走「极速匹配」（纯检索定界，精度略低、零对话开销）。
+          </p>
           <p v-if="!localEndpointsInUse" class="card-note">
             当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
           </p>

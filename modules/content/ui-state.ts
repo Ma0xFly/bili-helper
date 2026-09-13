@@ -52,7 +52,7 @@ export const ui = reactive({
   overlay: { visible: false, left: 0, top: 0, width: 0, height: 0 } as OverlayGeometry,
   banner: { visible: false, copy: '', sub: '', countdown: 3, progress: 1 } as BannerState,
   chip: { visible: false, text: '' } as SavedChipState,
-  vectorHint: { visible: false },
+  vectorHint: { visible: false, text: '向量端点（Embedding）的 API 有问题，暂时只用词表匹配' },
   marks: [] as AdMarkState[],
   /**
    * 去广告检测结果镜像（控制器维护）：AI 面板分段时间线与广告区间合并打标用。

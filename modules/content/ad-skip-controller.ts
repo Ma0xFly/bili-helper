@@ -80,7 +80,21 @@ export class AdSkipController {
   private optedOut = new Set<string>()
   private skippedOnce = new Set<string>()
   private skipScheduled = new Set<string>()
-  private vectorHintShown = false
+  private hintShown = false
+
+  /**
+   * 降级一次性提示（报错式不静默）：向量故障 / 对话故障退极速匹配共用同一出口，
+   * 同视频只出现一次，展示 VECTOR_HINT_DISPLAY_MS 后自动消失。
+   */
+  private showHint(text: string): void {
+    if (this.hintShown || !this.pageEnabled || !this.masterEnabled) return
+    this.hintShown = true
+    ui.vectorHint.text = text
+    ui.vectorHint.visible = true
+    this.deps.timers.setTimeout(() => {
+      ui.vectorHint.visible = false
+    }, VECTOR_HINT_DISPLAY_MS)
+  }
   private countdownTimer: number | null = null
   private measureTimer: number | null = null
   private chipTimer: number | null = null
@@ -233,14 +247,10 @@ export class AdSkipController {
 
       const backend = this.deps.createBackend(settings, {
         onVectorFallback: () => {
-          // 报错式提示（不静默）：同视频只出现一次。
-          if (!this.vectorHintShown && this.pageEnabled && this.masterEnabled) {
-            this.vectorHintShown = true
-            ui.vectorHint.visible = true
-            this.deps.timers.setTimeout(() => {
-              ui.vectorHint.visible = false
-            }, VECTOR_HINT_DISPLAY_MS)
-          }
+          this.showHint('向量端点（Embedding）的 API 有问题，暂时只用词表匹配')
+        },
+        onRetrievalOnly: () => {
+          this.showHint('对话端点这次没响应，先用极速匹配（仅检索）跳广告')
         },
       })
 
@@ -554,7 +564,7 @@ export class AdSkipController {
     ui.ads = []
     this.hideBanner()
     ui.chip.visible = false
-    this.vectorHintShown = false
+    this.hintShown = false
     ui.vectorHint.visible = false
     this.optedOut.clear()
     this.skippedOnce.clear()
