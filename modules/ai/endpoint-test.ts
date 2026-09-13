@@ -3,13 +3,15 @@
 // 未配置时由直连客户端的 config 守卫拦截，reason 即「先去设置页配置端点」。
 
 import { AiError } from '../shared/error'
-import type { ChatEndpoint } from './llm/client'
+import type { ApiFormat, ChatEndpoint } from './llm/client'
 import { PROBE_TIMEOUT_MS, chatCompletion, embeddings, withDeadline } from './llm/client'
 
 export interface EndpointTestParams {
   baseUrl: string
   model: string
   apiKey: string
+  /** 对话协议：anthropic 走 /messages（向量探测不受影响，向量只有 OpenAI 形态）。 */
+  format?: ApiFormat
   signal?: AbortSignal
 }
 
@@ -44,7 +46,12 @@ async function runProbe(
 ): Promise<EndpointTestResult> {
   const started = Date.now()
   try {
-    await probe({ baseUrl: params.baseUrl, model: params.model, apiKey: params.apiKey })
+    await probe({
+      baseUrl: params.baseUrl,
+      model: params.model,
+      apiKey: params.apiKey,
+      format: params.format,
+    })
     return { ok: true, model: params.model, ms: Date.now() - started }
   } catch (error) {
     return { ok: false, reason: describeTestFailure(error) }
@@ -65,7 +72,7 @@ export function describeTestFailure(error: unknown): string {
       return `端点返回 ${error.status ?? '错误'}：请检查端点地址是否正确；5xx 可稍后重试`
     case 'parse':
       if (error.message === '端点返回了空回复') return error.message
-      return '响应不是 OpenAI 兼容格式：请确认该地址确实是对话/向量端点'
+      return '响应格式不符合所选协议：请确认 API 协议选对（OpenAI / Anthropic）、地址确实是该类端点'
     case 'network':
       return error.message === '请求超时'
         ? '请求超时：端点未在限定时间内响应，请检查端点是否可用'

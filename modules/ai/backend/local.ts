@@ -22,6 +22,7 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
     baseUrl: settings.apiUrl,
     model: settings.model,
     apiKey: settings.apiKey,
+    format: settings.apiFormat,
   }
 
   return {

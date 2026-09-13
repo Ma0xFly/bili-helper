@@ -69,7 +69,7 @@ describe('options AI 助手表单', () => {
 
     // 字段回填：对话 Base URL 与模型取到存储值。
     expect(inputValue(wrapper.find('input[type="url"]').element)).toBe('https://chat.example/v1')
-    expect(inputValue(wrapper.find('input[list="chat-model-options"]').element)).toBe('gpt-4o-mini')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('gpt-4o-mini')
 
     // mode=server → 服务器开关为开，字段可见且回填，回退子开关为关。
     const serverSwitch = wrapper.find('input[aria-label="使用自己的服务器"]')
@@ -93,6 +93,7 @@ describe('options AI 助手表单', () => {
       apiUrl: 'https://chat.example/v1',
       model: 'gpt-4o-mini',
       apiKey: 'sk-chat',
+      apiFormat: 'openai',
       embedBaseUrl: '',
       embedModel: '',
       embedKey: '',
@@ -167,7 +168,7 @@ describe('options AI 助手表单', () => {
     // happy-dom 下 isVisible() 不可靠，直接断言 v-show 写入的内联 display。
     const advanced = wrapper.find('#advanced-embed')
     expect((advanced.element as HTMLElement).style.display).toBe('none')
-    expect(wrapper.find('input[list="embed-model-options"]').exists()).toBe(true)
+    expect(wrapper.find('input[aria-label="嵌入模型"]').exists()).toBe(true)
 
     const toggle = wrapper.find('button[aria-controls="advanced-embed"]')
     expect(toggle.text()).toContain('向量端点')
@@ -175,7 +176,7 @@ describe('options AI 助手表单', () => {
     expect((advanced.element as HTMLElement).style.display).not.toBe('none')
     expect(toggle.text()).toContain('收起')
 
-    const embedModel = wrapper.find('input[list="embed-model-options"]')
+    const embedModel = wrapper.find('input[aria-label="嵌入模型"]')
     await embedModel.setValue('bge-m3')
     await wrapper.find('button.primary').trigger('click')
     await flushPromises()
@@ -281,7 +282,7 @@ describe('options AI 助手表单', () => {
     const baseUrl = wrapper.find('input[type="url"]')
     expect(inputValue(baseUrl.element)).toBe('https://api.deepseek.com/v1')
     // 模型输入的占位符换成该服务商的推荐名（只是提示，不写入表单值）。
-    expect(wrapper.find('input[list="chat-model-options"]').attributes('placeholder')).toBe(
+    expect(wrapper.find('input[aria-label="对话模型"]').attributes('placeholder')).toBe(
       'deepseek-chat',
     )
     // 下拉反显当前命中的预设（computed 从地址反推）。
@@ -291,7 +292,7 @@ describe('options AI 助手表单', () => {
     await baseUrl.setValue('https://my-proxy.example/v1')
     const after = wrapper.find('select[aria-label="服务商预设"]')
     expect((after.element as HTMLSelectElement).value).toBe('custom')
-    expect(wrapper.find('input[list="chat-model-options"]').attributes('placeholder')).toBe(
+    expect(wrapper.find('input[aria-label="对话模型"]').attributes('placeholder')).toBe(
       'gpt-4o-mini',
     )
     // 保存后表单值保持手动填的地址，不被预设覆盖。
@@ -687,5 +688,108 @@ describe('options AI 助手表单', () => {
     expect(hint.text()).toContain('导出入库 patch')
     // 词确实存下了（回退直连时要用），只是不承诺服务器侧生效。
     expect(await readUserCorpus()).toHaveLength(1)
+  })
+
+  it('API 协议选择：anthropic 回填与写回', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiFormat: 'anthropic' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    const select = wrapper.find('select[aria-label="API 协议"]')
+    expect((select.element as HTMLSelectElement).value).toBe('anthropic')
+
+    await select.setValue('openai')
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).apiFormat).toBe('openai')
+  })
+
+  it('配置方案：存为方案 → 切换端点 → 应用还原（表单即时更新，无需再点保存）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://a.example/v1', model: 'm-a' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    // 当前连接存为方案。
+    await wrapper.find('input[aria-label="方案名称"]').setValue('A 方案')
+    await findButton(wrapper, '存为方案').trigger('click')
+    await flushPromises()
+    const select = wrapper.find('select[aria-label="选择方案"]')
+    expect((select.element as HTMLSelectElement).value).not.toBe('')
+    expect(wrapper.find('.feedback.ok').text()).toContain('已保存')
+
+    // 换一套连接（模拟用户手动改了端点）。
+    await wrapper.find('input[type="url"]').setValue('https://b.example/v1')
+
+    // 应用方案：连接字段整体还原，方案卡的提示说明已写入存储。
+    await findButton(wrapper, '应用').trigger('click')
+    await flushPromises()
+    expect(inputValue(wrapper.find('input[type="url"]').element)).toBe('https://a.example/v1')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('m-a')
+    expect((await storedSettings()).apiUrl).toBe('https://a.example/v1')
+
+    // 删除方案：下拉回到空态。
+    await findButton(wrapper, '删除').trigger('click')
+    await flushPromises()
+    const selectAfter = wrapper.find('select[aria-label="选择方案"]')
+    expect((selectAfter.element as HTMLSelectElement).disabled).toBe(true)
+  })
+
+  it('模型选择器：输入即过滤（startsWith 优先），点选写回表单', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://a.example/v1' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            data: [{ id: 'beta-model' }, { id: 'b-alpha-model' }, { id: 'gamma-model' }, { id: 'Alpha-model' }],
+          }),
+          { status: 200 },
+        ),
+      ),
+    )
+    await findButton(wrapper, '拉取模型').trigger('click')
+    await flushPromises()
+
+    const input = wrapper.find('input[aria-label="对话模型"]')
+    // 聚焦展开全量（按字母序）：Alpha-model 排最前。
+    await input.trigger('focus')
+    let items = wrapper.findAll('.model-list li')
+    expect(items.map((item) => item.text())).toEqual([
+      'Alpha-model',
+      'b-alpha-model',
+      'beta-model',
+      'gamma-model',
+    ])
+
+    // 输入 b：两条都以 b 开头（startsWith 组内按字母序），gamma 被过滤；
+    // contains 组会排在 startsWith 组之后（见下一步用例：alpha 命中但不以输入开头）。
+    await input.setValue('b')
+    items = wrapper.findAll('.model-list li')
+    expect(items.map((item) => item.text())).toEqual(['b-alpha-model', 'beta-model'])
+
+    // 输入 a：'Alpha-model' 是 startsWith（大小写不敏感）排最前；其余三条只是 contains，
+    // 组内按字母序——startsWith 组优先于 contains 组的规则得到验证。
+    await input.setValue('a')
+    items = wrapper.findAll('.model-list li')
+    expect(items.map((item) => item.text())).toEqual([
+      'Alpha-model',
+      'b-alpha-model',
+      'beta-model',
+      'gamma-model',
+    ])
+
+    // 点选写回表单并收起列表（当前列表首项即上一步过滤后的 Alpha-model）。
+    await items[0]!.trigger('mousedown')
+    expect(inputValue(input.element)).toBe('Alpha-model')
+    // v-show 收起 = display:none（DOM 保留，断言样式而不是节点数）。
+    const list = wrapper.find('.model-list')
+    expect((list.element as HTMLElement).style.display).toBe('none')
   })
 })

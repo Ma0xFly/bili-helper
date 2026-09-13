@@ -337,3 +337,119 @@ describe('listModels（模型列表）', () => {
     })
   })
 })
+describe('chatCompletion（Anthropic Messages）', () => {
+  const ANTHROPIC_ENDPOINT = { ...ENDPOINT, format: 'anthropic' as const }
+
+  it('走 /messages 路径：x-api-key + 版本头，system 提到顶层，max_tokens 必填', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ content: [{ type: 'text', text: '答' }, { type: 'text', text: '案' }] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await chatCompletion({
+      endpoint: ANTHROPIC_ENDPOINT,
+      messages: [
+        { role: 'system', content: '你是助手' },
+        { role: 'user', content: '你好' },
+      ],
+    })
+    expect(result.content).toBe('答案')
+    const { url, init } = fetchCall(fetchMock)
+    expect(url).toBe('https://llm.example/v1/messages')
+    const headers = init?.headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('k-1')
+    expect(headers['anthropic-version']).toBe('2023-06-01')
+    expect(headers.Authorization).toBeUndefined()
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    expect(body.model).toBe('m-1')
+    expect(body.system).toBe('你是助手')
+    expect(body.max_tokens).toBe(4096)
+    expect(body.messages).toEqual([{ role: 'user', content: '你好' }])
+  })
+
+  it('content 数组缺失 → parse 错误（协议不匹配的提示去向）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ choices: [{ message: { content: 'x' } }] })))
+    await expect(
+      chatCompletion({ endpoint: ANTHROPIC_ENDPOINT, messages: MESSAGES }),
+    ).rejects.toMatchObject({ kind: 'parse' })
+  })
+})
+
+describe('chatCompletionStream（Anthropic SSE）', () => {
+  it('content_block_delta 增量逐段下发，message_stop 终止', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          'data: {"type":"message_start"}',
+          'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}',
+          'event: ping',
+          'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}',
+          'data: {"type":"message_stop"}',
+        ]),
+      ),
+    )
+    const chunks: string[] = []
+    const result = await chatCompletionStream({
+      endpoint: { ...ENDPOINT, format: 'anthropic' },
+      messages: MESSAGES,
+      onChunk: (chunk) => chunks.push(chunk),
+    })
+    expect(chunks).toEqual(['你', '好'])
+    expect(result.content).toBe('你好')
+  })
+
+  it('流内 error 事件 → http 错误（消费方以 end{error} 收束）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse(['data: {"type":"error","error":{"type":"overloaded_error","message":"过载"}}']),
+      ),
+    )
+    await expect(
+      chatCompletionStream({
+        endpoint: { ...ENDPOINT, format: 'anthropic' },
+        messages: MESSAGES,
+        onChunk: () => undefined,
+      }),
+    ).rejects.toMatchObject({ kind: 'http', message: '过载' })
+  })
+})
+
+describe('listModels（容错对齐开源客户端做法）', () => {
+  it('anthropic 格式：x-api-key 头 + 同一 /models 路径', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ id: 'claude-sonnet-4' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const ids = await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: 'k-1', format: 'anthropic' })
+    expect(ids).toEqual(['claude-sonnet-4'])
+    const headers = fetchCall(fetchMock).init?.headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('k-1')
+    expect(headers.Authorization).toBeUndefined()
+  })
+
+  it('401 时摘掉鉴权重试一次（部分中转 /models 不收 Key）', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      return 'Authorization' in headers
+        ? new Response('no', { status: 401 })
+        : jsonResponse({ data: [{ id: 'm-a' }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: 'k-1' })).toEqual(['m-a'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('响应形状多认：{models:[{name}]}（Ollama 形）与裸数组字符串', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ models: [{ name: 'qwen3:8b' }] })))
+    expect(await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: '' })).toEqual(['qwen3:8b'])
+
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(['m-1', 'm-2'])))
+    expect(await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: '' })).toEqual(['m-1', 'm-2'])
+  })
+
+  it('HTTP 状态码透出（404 → 文案带状态，提示可能不支持 /models）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('no', { status: 404 })))
+    await expect(listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: '' })).rejects.toThrow(
+      /HTTP 404/,
+    )
+  })
+})

@@ -67,10 +67,10 @@ describe('testEmbeddingEndpoint', () => {
     expect(result.ok).toBe(true)
   })
 
-  it('非 OpenAI 兼容响应红灯：reason 提示确认端点', async () => {
+  it('非所选协议的响应红灯：reason 提示确认协议', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [] })))
     const result = await testEmbeddingEndpoint({ baseUrl: 'https://llm.example/v1', model: 'emb-1', apiKey: 'k-1' })
-    if (!result.ok) expect(result.reason).toContain('OpenAI 兼容')
+    if (!result.ok) expect(result.reason).toContain('协议')
     else throw new Error('应当失败')
   })
 
@@ -92,7 +92,7 @@ describe('describeTestFailure（kind → 红灯文案映射）', () => {
     expect(describeTestFailure(new AiError('config', '先去设置页配置端点'))).toBe('先去设置页配置端点')
     expect(describeTestFailure(new AiError('auth', '端点返回了 403', { status: 403 }))).toContain('未授权')
     expect(describeTestFailure(new AiError('http', '端点返回了 502', { status: 502 }))).toContain('端点返回 502')
-    expect(describeTestFailure(new AiError('parse', '坏格式'))).toContain('OpenAI 兼容')
+    expect(describeTestFailure(new AiError('parse', '坏格式'))).toContain('协议')
     expect(describeTestFailure(new AiError('network', '断了'))).toContain('CORS')
     expect(describeTestFailure(new Error('未知'))).toContain('未知错误')
   })

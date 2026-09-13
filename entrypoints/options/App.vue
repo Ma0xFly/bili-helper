@@ -20,7 +20,15 @@ import {
 } from '../../modules/ai/rag/user-corpus'
 import type { UserCorpusEntry } from '../../modules/ai/rag/user-corpus'
 import { readAiSettings, resolveEmbeddingEndpoint, writeAiSettings } from '../../modules/settings'
-import type { AiMode } from '../../modules/settings'
+import type { AiMode, AiSettings } from '../../modules/settings'
+import {
+  applyProfile,
+  deleteProfile,
+  readAiProfiles,
+  saveProfileFromCurrent,
+} from '../../modules/settings/profiles'
+import type { AiProfile } from '../../modules/settings/profiles'
+import ModelCombo from './ModelCombo.vue'
 
 const groups = ['AI 助手', '服务器', '过滤', '净化', '布局', '增强']
 const active = ref<string>(groups[0] ?? 'AI 助手')
@@ -29,6 +37,7 @@ interface FormModel {
   apiUrl: string
   apiKey: string
   model: string
+  apiFormat: 'openai' | 'anthropic'
   embedBaseUrl: string
   embedKey: string
   embedModel: string
@@ -43,6 +52,7 @@ const form = reactive<FormModel>({
   apiUrl: '',
   apiKey: '',
   model: '',
+  apiFormat: 'openai',
   embedBaseUrl: '',
   embedKey: '',
   embedModel: '',
@@ -55,25 +65,31 @@ const form = reactive<FormModel>({
 
 const loadError = ref('')
 
+/** 存储值 → 表单（挂载回填与应用方案共用同一份搬运，避免两处漂移）。 */
+function applyStoredToForm(settings: AiSettings): void {
+  form.apiUrl = settings.apiUrl
+  form.apiKey = settings.apiKey
+  form.model = settings.model
+  form.apiFormat = settings.apiFormat
+  form.embedBaseUrl = settings.embedBaseUrl
+  form.embedKey = settings.embedKey
+  form.embedModel = settings.embedModel
+  form.mode = settings.mode
+  fallbackWanted.value = settings.mode === 'auto'
+  form.serverBaseUrl = settings.serverBaseUrl
+  form.serverToken = settings.serverToken
+  form.adSkipEnabled = settings.adSkipEnabled
+  form.panelEnabled = settings.panelEnabled
+}
+
 onMounted(async () => {
   try {
-    const settings = await readAiSettings()
-    form.apiUrl = settings.apiUrl
-    form.apiKey = settings.apiKey
-    form.model = settings.model
-    form.embedBaseUrl = settings.embedBaseUrl
-    form.embedKey = settings.embedKey
-    form.embedModel = settings.embedModel
-    form.mode = settings.mode
-    fallbackWanted.value = settings.mode === 'auto'
-    form.serverBaseUrl = settings.serverBaseUrl
-    form.serverToken = settings.serverToken
-    form.adSkipEnabled = settings.adSkipEnabled
-    form.panelEnabled = settings.panelEnabled
+    applyStoredToForm(await readAiSettings())
   } catch {
     // 读取失败要给可见提示，而不是静默留下空表单。
     loadError.value = '设置加载失败，请刷新重试'
   }
+  void loadProfiles()
 })
 
 // 运行模式的开关化表达：底层仍是 local/server/auto 三态，界面只问两个是非题。
@@ -132,7 +148,11 @@ async function fetchChatModels(): Promise<void> {
   chatModelsHint.value = ''
   try {
     // 拉取失败不阻塞：退回手动输入（组合框保持可输入）。
-    chatModelOptions.value = await listModels({ baseUrl: form.apiUrl, apiKey: form.apiKey })
+    chatModelOptions.value = await listModels({
+      baseUrl: form.apiUrl,
+      apiKey: form.apiKey,
+      format: form.apiFormat,
+    })
   } catch {
     chatModelsHint.value = FETCH_MODELS_HINT
   } finally {
@@ -273,6 +293,57 @@ async function save(): Promise<void> {
   }, 2000)
 }
 
+// ---------- 配置方案（多套连接快照，一键换家）----------
+const profiles = ref<AiProfile[]>([])
+const selectedProfileId = ref('')
+const profileName = ref('')
+const profileHint = ref<Feedback | null>(null)
+
+async function loadProfiles(): Promise<void> {
+  profiles.value = await readAiProfiles()
+}
+
+async function onSaveProfile(): Promise<void> {
+  const name = profileName.value.trim()
+  try {
+    profiles.value = await saveProfileFromCurrent(name)
+    const saved = profiles.value.find((profile) => profile.name === name)
+    if (saved) selectedProfileId.value = saved.id
+    profileHint.value = { kind: 'ok', text: `方案「${name}」已保存（当前连接设置）` }
+    profileName.value = ''
+  } catch (error) {
+    profileHint.value = {
+      kind: 'fail',
+      text: error instanceof Error ? error.message : '保存失败，请重试',
+    }
+  }
+}
+
+async function onApplyProfile(): Promise<void> {
+  if (selectedProfileId.value === '') return
+  try {
+    // 应用即写入存储（主设置已更新），表单同步搬运，无需再点保存。
+    applyStoredToForm(await applyProfile(selectedProfileId.value))
+    profileHint.value = { kind: 'ok', text: '方案已应用并保存' }
+  } catch (error) {
+    profileHint.value = {
+      kind: 'fail',
+      text: error instanceof Error ? error.message : '应用失败，请重试',
+    }
+  }
+}
+
+async function onDeleteProfile(): Promise<void> {
+  if (selectedProfileId.value === '') return
+  try {
+    profiles.value = await deleteProfile(selectedProfileId.value)
+    selectedProfileId.value = profiles.value[0]?.id ?? ''
+    profileHint.value = { kind: 'ok', text: '方案已删除' }
+  } catch {
+    profileHint.value = { kind: 'fail', text: '删除失败，请重试' }
+  }
+}
+
 // ---------- 广告词库（用户层补录）----------
 // 低频功能，收在设置页而不是播放器：漏检时用户自己最清楚关键词是什么，手动补一条即可。
 // 补录即时生效——词条进入生效语料 → 语料哈希变 → 向量缓存自动重算，无需手动清缓存。
@@ -399,6 +470,45 @@ onMounted(loadUserCorpus)
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
+        <section class="card" aria-labelledby="profiles-title">
+          <h2 id="profiles-title" class="card-title">配置方案</h2>
+          <p class="card-note">
+            把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
+          </p>
+          <div class="profile-row">
+            <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
+              <option value="" disabled>暂无方案，先在下面保存一个</option>
+              <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
+                {{ profile.name }}
+              </option>
+            </select>
+            <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onApplyProfile">
+              应用
+            </button>
+            <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
+              删除
+            </button>
+          </div>
+          <div class="profile-row">
+            <input
+              v-model="profileName"
+              type="text"
+              placeholder="方案名，如：硅基流动·本地直连"
+              aria-label="方案名称"
+              class="grow"
+            />
+            <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
+              存为方案
+            </button>
+          </div>
+          <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">
+            <span class="badge" aria-hidden="true">
+              {{ profileHint.kind === 'ok' ? '✓' : profileHint.kind === 'warn' ? '!' : '✕' }}
+            </span>
+            <span>{{ profileHint.text }}</span>
+          </div>
+        </section>
+
         <section class="card" aria-labelledby="chat-endpoint-title">
           <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
           <p v-if="!localEndpointsInUse" class="card-note">
@@ -417,6 +527,17 @@ onMounted(loadUserCorpus)
               本地 Ollama / LM Studio 需开启跨域允许；云端被拦时改走下方「服务器转发」。
             </span>
           </div>
+          <div class="field">
+            <span class="field-label">API 协议</span>
+            <select v-model="form.apiFormat" aria-label="API 协议">
+              <option value="openai">OpenAI 兼容（chat/completions）</option>
+              <option value="anthropic">Anthropic Messages（messages）</option>
+            </select>
+            <span class="field-hint">
+              Claude 官方 API 与部分中转走 Anthropic 协议——模型拉不到、探测不通时先切这里试试。
+              只影响浏览器直连；服务器转发由服务端自身配置决定。
+            </span>
+          </div>
           <label class="field">
             <span class="field-label">Base URL</span>
             <input v-model.trim="form.apiUrl" type="url" placeholder="https://api.openai.com/v1" />
@@ -428,15 +549,13 @@ onMounted(loadUserCorpus)
           <div class="field">
             <span class="field-label">模型</span>
             <div class="combo-row">
-              <input
-                v-model.trim="form.model"
-                list="chat-model-options"
+              <ModelCombo
+                v-model="form.model"
+                :options="chatModelOptions"
+                :loading="chatModelsLoading"
                 :placeholder="chatModelPlaceholder"
-                class="grow"
+                label="对话模型"
               />
-              <datalist id="chat-model-options">
-                <option v-for="id in chatModelOptions" :key="id" :value="id" />
-              </datalist>
               <button
                 type="button"
                 class="ghost"
@@ -667,6 +786,11 @@ onMounted(loadUserCorpus)
           </button>
           <p class="card-note">
             三项全留空即继承上方对话端点——多数人不需要展开。只有对话与向量走不同服务商时才拆。
+            向量端点只需要 embed（/embeddings）；rerank 用不上，无需配置。
+            <template v-if="form.apiFormat === 'anthropic'">
+              注意：Anthropic 协议没有向量接口——对话走 Anthropic 时，这里必须单独配一个 OpenAI
+              兼容的向量服务（如硅基流动的 bge-m3），否则去广告识别退化为纯词表检索。
+            </template>
           </p>
           <div v-show="advancedOpen" id="advanced-embed">
             <label class="field">
@@ -693,16 +817,13 @@ onMounted(loadUserCorpus)
             <div class="field">
               <span class="field-label">嵌入模型</span>
               <div class="combo-row">
-                <input
-                  v-model.trim="form.embedModel"
-                  list="embed-model-options"
+                <ModelCombo
+                  v-model="form.embedModel"
+                  :options="embedModelOptions"
+                  :loading="embedModelsLoading"
                   placeholder="留空则继承对话端点"
-                  class="grow"
-                  :class="{ inheriting: embedModelInherits }"
+                  label="嵌入模型"
                 />
-                <datalist id="embed-model-options">
-                  <option v-for="id in embedModelOptions" :key="id" :value="id" />
-                </datalist>
                 <button
                   type="button"
                   class="ghost"
@@ -1125,6 +1246,19 @@ input:focus-visible {
 .switch input:focus-visible ~ .switch-track {
   outline: 2px solid #7c5cfc;
   outline-offset: 2px;
+}
+
+/* ---------- 配置方案 ---------- */
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.profile-row select {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ---------- 一键体检：卡片头（标题 + 汇总徽标）、结果行（徽标 + 文案）、探测骨架 ---------- */

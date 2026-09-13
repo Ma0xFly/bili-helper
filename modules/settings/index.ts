@@ -1,15 +1,21 @@
 // settings 单一来源：AI 配置只存 chrome.storage.sync 的 aiAssistantSettings 键，
 // 唯一读写走 readAiSettings()/writeAiSettings()；其他层禁止直接 storage.get 该键自造形状。
 
+import type { ApiFormat } from '../ai/llm/client'
+
+export type { ApiFormat }
+
 export const STORAGE_KEY = 'aiAssistantSettings'
 
 export type AiMode = 'local' | 'server' | 'auto'
 
 export interface AiSettings {
-  /** 对话端点（OpenAI 兼容）。 */
+  /** 对话端点（OpenAI 兼容或 Anthropic Messages）。 */
   apiUrl: string
   model: string
   apiKey: string
+  /** 对话协议：openai（默认）/ anthropic。仅浏览器直连消费；服务器转发由服务端自身配置决定。 */
+  apiFormat: ApiFormat
   /** 向量端点；三项为空时读取侧继承对话端点（不写回存储）。 */
   embedBaseUrl: string
   embedModel: string
@@ -41,6 +47,7 @@ export const DEFAULT_SETTINGS: AiSettings = {
   apiUrl: '',
   model: '',
   apiKey: '',
+  apiFormat: 'openai',
   embedBaseUrl: '',
   embedModel: '',
   embedKey: '',
@@ -66,6 +73,7 @@ function normalizeSettings(raw: unknown): AiSettings {
     apiUrl: asString(source.apiUrl, DEFAULT_SETTINGS.apiUrl),
     model: asString(source.model, DEFAULT_SETTINGS.model),
     apiKey: asString(source.apiKey, DEFAULT_SETTINGS.apiKey),
+    apiFormat: source.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
     embedBaseUrl: asString(source.embedBaseUrl, DEFAULT_SETTINGS.embedBaseUrl),
     embedModel: asString(source.embedModel, DEFAULT_SETTINGS.embedModel),
     embedKey: asString(source.embedKey, DEFAULT_SETTINGS.embedKey),

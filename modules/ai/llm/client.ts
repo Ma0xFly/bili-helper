@@ -1,6 +1,8 @@
-// OpenAI 兼容直连客户端：直连层的唯一网络出口，流量只发往 settings 指定的 baseUrl/model/key。
+// 直连客户端：直连层的唯一网络出口，流量只发往 settings 指定的 baseUrl/model/key。
+// 支持两种 API 协议（settings.apiFormat）：OpenAI 兼容（chat/completions）与
+// Anthropic Messages（messages，x-api-key 头 + system 顶层字段 + max_tokens 必填）。
 // 统一 fetch + 错误映射：fetch 抛错→network、401/403→auth、其余非 2xx→http（带 status）、
-// 坏 JSON/形状不符→parse、未配置→config。凭据只进 Authorization 头，不落日志。
+// 坏 JSON/形状不符→parse、未配置→config。凭据只进鉴权头，不落日志。
 
 import { AiError } from '../../shared/error'
 
@@ -9,10 +11,15 @@ export interface OpenAiChatMessage {
   content: string
 }
 
+/** 对话协议模式：OpenAI 兼容 / Anthropic Messages（向量接口只有 OpenAI 形态）。 */
+export type ApiFormat = 'openai' | 'anthropic'
+
 export interface ChatEndpoint {
   baseUrl: string
   model: string
   apiKey: string
+  /** 省略即 openai（向后兼容旧调用点）。 */
+  format?: ApiFormat
 }
 
 export interface ChatCompletionParams {
@@ -99,6 +106,61 @@ function authHeaders(apiKey: string, withContentType = true): Record<string, str
   return headers
 }
 
+const ANTHROPIC_VERSION = '2023-06-01'
+/** Anthropic Messages 的 max_tokens 必填：给足总结/定界/问答的输出预算，又不越过旧模型上限。 */
+const ANTHROPIC_MAX_TOKENS = 4096
+
+function isAnthropic(endpoint: ChatEndpoint): boolean {
+  return endpoint.format === 'anthropic'
+}
+
+/** Anthropic 鉴权头：x-api-key + 固定版本号（不用 Authorization: Bearer）。 */
+function anthropicHeaders(apiKey: string, withContentType = true): Record<string, string> {
+  const headers: Record<string, string> = { 'anthropic-version': ANTHROPIC_VERSION }
+  if (withContentType) headers['Content-Type'] = 'application/json'
+  const key = apiKey.trim()
+  if (key) headers['x-api-key'] = key
+  return headers
+}
+
+/**
+ * OpenAI 消息 → Anthropic Messages 体：system 角色提到顶层 system 字段（Anthropic 不收 system 消息），
+ * user/assistant 轮次原样搬移；max_tokens 是必填项。
+ */
+function anthropicBody(
+  endpoint: ChatEndpoint,
+  messages: OpenAiChatMessage[],
+  stream: boolean,
+): Record<string, unknown> {
+  const system = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content)
+    .join('\n\n')
+  const rounds = messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({ role: message.role, content: message.content }))
+  return {
+    model: endpoint.model,
+    max_tokens: ANTHROPIC_MAX_TOKENS,
+    messages: rounds,
+    ...(system === '' ? {} : { system }),
+    ...(stream ? { stream: true } : {}),
+  }
+}
+
+/** Anthropic 补全响应 → 文本：content 是分块数组，取全部 text 块拼接。 */
+function parseAnthropicContent(data: unknown): string {
+  const root = isRecord(data) ? data : undefined
+  const blocks = root && Array.isArray(root.content) ? root.content : undefined
+  if (!blocks) {
+    throw new AiError('parse', '补全响应缺少 content 数组，请确认端点是否 Anthropic Messages 兼容')
+  }
+  const text = blocks
+    .map((block) => (isRecord(block) && block.type === 'text' && typeof block.text === 'string' ? block.text : ''))
+    .join('')
+  return text
+}
+
 async function requestJson(url: string, init: RequestInit): Promise<unknown> {
   let response: Response
   try {
@@ -117,12 +179,27 @@ async function requestJson(url: string, init: RequestInit): Promise<unknown> {
 export async function chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
-  const data = await requestJson(joinApiUrl(params.endpoint.baseUrl, 'chat/completions'), {
-    method: 'POST',
-    headers: authHeaders(params.endpoint.apiKey),
-    body: JSON.stringify({ model: params.endpoint.model, messages: params.messages }),
-    signal: withDeadline(params.signal, REQUEST_TIMEOUT_MS),
-  })
+  const anthropic = isAnthropic(params.endpoint)
+  const data = await requestJson(
+    joinApiUrl(params.endpoint.baseUrl, anthropic ? 'messages' : 'chat/completions'),
+    {
+      method: 'POST',
+      headers: anthropic
+        ? anthropicHeaders(params.endpoint.apiKey)
+        : authHeaders(params.endpoint.apiKey),
+      body: anthropic
+        ? JSON.stringify(anthropicBody(params.endpoint, params.messages, false))
+        : JSON.stringify({ model: params.endpoint.model, messages: params.messages }),
+      signal: withDeadline(params.signal, REQUEST_TIMEOUT_MS),
+    },
+  )
+  const content = anthropic
+    ? parseAnthropicContent(data)
+    : parseOpenAiContent(data)
+  return { content }
+}
+
+function parseOpenAiContent(data: unknown): string {
   const root = isRecord(data) ? data : undefined
   const choices = root && Array.isArray(root.choices) ? root.choices : undefined
   const message = choices && choices.length > 0 && isRecord(choices[0]) ? choices[0].message : undefined
@@ -130,16 +207,16 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
   if (typeof content !== 'string') {
     throw new AiError('parse', '补全响应缺少 choices[0].message.content，请确认端点是否 OpenAI 兼容')
   }
-  return { content }
+  return content
 }
 
 const STREAM_DONE = Symbol('stream-done')
 
 type SseLineResult = string | typeof STREAM_DONE | null
 
-// 解析一行 SSE data：返回增量文本；非 data 行/脏 JSON/无增量时返回 null；[DONE] 返回终止标记；
+// 解析一行 OpenAI SSE data：返回增量文本；非 data 行/脏 JSON/无增量时返回 null；[DONE] 返回终止标记；
 // 事件携带 error 对象（OpenAI 流内错误约定）时抛 http，由上层以 end{error} 收束。
-function parseSseLine(line: string): SseLineResult {
+function parseOpenAiSseLine(line: string): SseLineResult {
   const trimmed = line.trim()
   if (!trimmed.startsWith('data:')) return null
   const payload = trimmed.slice('data:'.length).trim()
@@ -164,6 +241,37 @@ function parseSseLine(line: string): SseLineResult {
   return typeof chunk === 'string' && chunk !== '' ? chunk : null
 }
 
+// Anthropic SSE：content_block_delta.delta.text 是增量；message_stop 是终止；
+// error 事件抛 http。event: 行（事件名）与 ping 等杂项忽略。
+function parseAnthropicSseLine(line: string): SseLineResult {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('data:')) return null
+  const payload = trimmed.slice('data:'.length).trim()
+  let event: unknown
+  try {
+    event = JSON.parse(payload)
+  } catch {
+    return null
+  }
+  if (!isRecord(event)) return null
+  if (event.type === 'error') {
+    const message =
+      isRecord(event.error) && typeof event.error.message === 'string'
+        ? event.error.message
+        : '流式响应返回错误'
+    throw new AiError('http', message)
+  }
+  if (event.type === 'message_stop') return STREAM_DONE
+  if (event.type !== 'content_block_delta') return null
+  const delta = isRecord(event.delta) ? event.delta : undefined
+  const chunk = isRecord(delta) && delta.type === 'text_delta' ? delta.text : undefined
+  return typeof chunk === 'string' && chunk !== '' ? chunk : null
+}
+
+function parseSseLine(line: string, anthropic: boolean): SseLineResult {
+  return anthropic ? parseAnthropicSseLine(line) : parseOpenAiSseLine(line)
+}
+
 async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal?: AbortSignal,
@@ -181,14 +289,22 @@ export async function chatCompletionStream(
 ): Promise<ChatCompletionResult> {
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
+  const anthropic = isAnthropic(params.endpoint)
   let response: Response
   try {
-    response = await fetch(joinApiUrl(params.endpoint.baseUrl, 'chat/completions'), {
-      method: 'POST',
-      headers: authHeaders(params.endpoint.apiKey),
-      body: JSON.stringify({ model: params.endpoint.model, messages: params.messages, stream: true }),
-      signal: params.signal,
-    })
+    response = await fetch(
+      joinApiUrl(params.endpoint.baseUrl, anthropic ? 'messages' : 'chat/completions'),
+      {
+        method: 'POST',
+        headers: anthropic
+          ? anthropicHeaders(params.endpoint.apiKey)
+          : authHeaders(params.endpoint.apiKey),
+        body: anthropic
+          ? JSON.stringify(anthropicBody(params.endpoint, params.messages, true))
+          : JSON.stringify({ model: params.endpoint.model, messages: params.messages, stream: true }),
+        signal: params.signal,
+      },
+    )
   } catch (cause) {
     throw mapNetworkError(cause)
   }
@@ -213,16 +329,16 @@ export async function chatCompletionStream(
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
-        const delta = parseSseLine(line)
+        const delta = parseSseLine(line, anthropic)
         if (delta === STREAM_DONE) return { content }
         if (delta === null) continue
         content += delta
         params.onChunk(delta)
       }
     }
-    // 收尾兜底：部分实现省略 [DONE] 直接关流（按正常收束）；末行无换行时补解析一次。
+    // 收尾兜底：部分实现省略 [DONE]/message_stop 直接关流（按正常收束）；末行无换行时补解析一次。
     if (buffer.trim() !== '') {
-      const delta = parseSseLine(buffer)
+      const delta = parseSseLine(buffer, anthropic)
       if (delta === STREAM_DONE) return { content }
       if (delta !== null) {
         content += delta
@@ -269,23 +385,94 @@ function indexOfVector(item: unknown): number {
   return typeof index === 'number' ? index : 0
 }
 
+export interface ListModelsParams {
+  baseUrl: string
+  apiKey: string
+  signal?: AbortSignal
+  /** 省略即 openai。Anthropic 同样有 GET /models，但鉴权头不同。 */
+  format?: ApiFormat
+}
+
+/**
+ * 拉取模型列表（设置页「拉取模型」）。
+ * 容错对齐开源客户端的通行做法：
+ * - 401/403 且带了鉴权头 → 摘掉鉴权再试一次（部分中转/本地服务的 /models 不收 Key）；
+ * - 响应形状多认几种：{data:[{id}]}、{data:["id"]}、{models:[{name|model|id}]}、裸数组；
+ * - 失败时把 HTTP 状态码带进文案，用户能判断是「不支持 /models」还是「Key/网络」问题。
+ */
 export async function listModels(params: ListModelsParams): Promise<string[]> {
   requireBaseUrl(params.baseUrl)
-  const data = await requestJson(joinApiUrl(params.baseUrl, 'models'), {
-    method: 'GET',
-    headers: authHeaders(params.apiKey, false),
-    signal: withDeadline(params.signal, PROBE_TIMEOUT_MS),
-  })
-  const root = isRecord(data) ? data : undefined
-  const list = root && Array.isArray(root.data) ? root.data : undefined
-  if (!list) throw new AiError('parse', '模型列表响应缺少 data 数组，请确认端点是否支持 /models')
-  const ids: string[] = []
-  for (const item of list) {
-    if (!isRecord(item) || typeof item.id !== 'string') {
-      throw new AiError('parse', '模型列表响应形状不符合 OpenAI 约定')
+  const anthropic = params.format === 'anthropic'
+  const url = joinApiUrl(params.baseUrl, 'models')
+  const signal = withDeadline(params.signal, PROBE_TIMEOUT_MS)
+
+  const attempt = async (withAuth: boolean): Promise<Response> => {
+    const headers: Record<string, string> = {}
+    const key = params.apiKey.trim()
+    if (key && withAuth) {
+      if (anthropic) {
+        headers['x-api-key'] = key
+        headers['anthropic-version'] = ANTHROPIC_VERSION
+      } else {
+        headers.Authorization = `Bearer ${key}`
+      }
     }
-    // 去重保序：datalist 的 option 以 id 为 key，重复会触发 Vue 重复 key 告警。
-    if (!ids.includes(item.id)) ids.push(item.id)
+    let response: Response
+    try {
+      response = await fetch(url, { method: 'GET', headers, signal })
+    } catch (cause) {
+      throw mapNetworkError(cause)
+    }
+    return response
+  }
+
+  let response = await attempt(true)
+  if ((response.status === 401 || response.status === 403) && params.apiKey.trim() !== '') {
+    response = await attempt(false)
+  }
+  if (!response.ok) {
+    throw new AiError('http', `模型列表拉取失败（HTTP ${response.status}）`, {
+      status: response.status,
+    })
+  }
+  let data: unknown
+  try {
+    data = await response.json()
+  } catch (cause) {
+    throw mapJsonFailure(cause)
+  }
+  const ids = parseModelIds(data)
+  if (ids.length === 0) {
+    throw new AiError('parse', '模型列表响应里没有可用条目：该端点可能不支持 /models，可手动输入模型名')
+  }
+  // 去重保序：下拉列表以 id 为 key，重复会触发 Vue 重复 key 告警。
+  const seen: string[] = []
+  for (const id of ids) if (!seen.includes(id)) seen.push(id)
+  return seen
+}
+
+function parseModelIds(data: unknown): string[] {
+  // isRecord 不排除数组：裸数组形态要先按数组取，不能被当成 record 吞掉。
+  const root = isRecord(data) && !Array.isArray(data) ? data : undefined
+  const candidates = root
+    ? Array.isArray(root.data)
+      ? root.data
+      : Array.isArray(root.models)
+        ? root.models
+        : undefined
+    : Array.isArray(data)
+      ? data
+      : undefined
+  if (!candidates) return []
+  const ids: string[] = []
+  for (const item of candidates) {
+    if (typeof item === 'string') {
+      ids.push(item)
+      continue
+    }
+    if (!isRecord(item)) continue
+    const id = typeof item.id === 'string' ? item.id : typeof item.name === 'string' ? item.name : typeof item.model === 'string' ? item.model : ''
+    if (id !== '') ids.push(id)
   }
   return ids
 }

@@ -203,6 +203,7 @@ export async function runRagDetect(
     baseUrl: chatUrl,
     model: chatModel,
     apiKey: settings.apiKey.trim(),
+    format: settings.apiFormat,
   }
   const resolvedEmbed = resolveEmbeddingEndpoint(settings)
   const embedEndpoint: ChatEndpoint = {
