@@ -124,10 +124,12 @@ describe('PanelApp（面板壳）', () => {
     expect(wrapper.find('.bh-panel-empty-title').exists()).toBe(true)
   })
 
-  it('折叠：收起换玻璃胶囊（v-show 不卸载），展开恢复且内容保留', async () => {
+  it('折叠：经 tab 条收起（面板隐藏、tab 条保留），展开恢复且内容保留', async () => {
     panel.session = makeSession()
     panelActions.summarize = vi.fn(async () => ({ summary: '折叠前的总结', segments: [] }))
     const wrapper = mount(PanelApp)
+    // tab 条是常驻的 tab 供续：AI 助手页签 + 收起钮。
+    expect(wrapper.find('.bh-strip-tab').text()).toContain('AI 助手')
     await wrapper.find('.bh-btn-primary').trigger('click')
     await flushPromises()
     expect(wrapper.find('.bh-markdown').text()).toContain('折叠前的总结')
@@ -135,11 +137,13 @@ describe('PanelApp（面板壳）', () => {
 
     await wrapper.find('.bh-panel-collapse-btn').trigger('click')
     expect(wrapper.find('.bh-panel').attributes('style') ?? '').toContain('display: none')
-    expect(wrapper.find('.bh-panel-collapsed').attributes('style') ?? '').not.toContain('display: none')
+    // tab 条仍在（收起不消失，作为右栏页签驻留）。
+    expect(wrapper.find('.bh-tab-strip').exists()).toBe(true)
+    expect(wrapper.find('.bh-strip-toggle').text()).toBe('展开')
 
-    await wrapper.find('.bh-panel-collapsed').trigger('click')
+    await wrapper.find('.bh-strip-toggle').trigger('click')
     expect(wrapper.find('.bh-panel').attributes('style') ?? '').not.toContain('display: none')
-    expect(wrapper.find('.bh-panel-collapsed').attributes('style') ?? '').toContain('display: none')
+    expect(wrapper.find('.bh-strip-toggle').text()).toBe('收起')
     // 折叠往返不卸载 tab 子树：总结内容原样保留。
     expect(wrapper.find('.bh-markdown').text()).toContain('折叠前的总结')
   })

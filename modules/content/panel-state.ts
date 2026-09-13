@@ -35,13 +35,6 @@ export const panel = reactive({
   fullscreen: false,
   /** 设置读回完成前保持隐藏：panelEnabled=false 用户不会看到面板闪现。 */
   ready: false,
-  /**
-   * 面板停靠（文档坐标）：由接线层读右栏矩形换算（静止时钉在 up 卡下缘、右缘对齐），
-   * 随页面滚动（原版观感）；只读页面几何、不改页面 DOM。width 由右栏宽度钳制生成。
-   */
-  top: 96,
-  right: 20,
-  width: 380,
   /** 当前视频会话；null = 尚未采集完成（组件按 session.bvid 键控，变化即自复位）。 */
   session: null as PanelSession | null,
   /**

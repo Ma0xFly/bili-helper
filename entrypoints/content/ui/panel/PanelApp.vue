@@ -97,26 +97,33 @@ function onTabKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <!-- 独立宿主后自带 token 作用域：.bh-root 承载 --bh-* 变量与字体，data-dark 随 B 站夜间模式。
-       文档流内联（右栏），不再做视口定位。 -->
+  <!-- 文档流内联（原版同款）：面板是右栏里的一个 tab——tab 条 + 面板本体插在 up 卡之后，
+       随页面滚动、把原生内容往下推，不覆盖弹幕/合集/推荐任何原生模块。
+       .bh-root 承载 --bh-* token 与字体，data-dark 随 B 站夜间模式。 -->
   <div class="bh-root" :data-dark="ui.dark ? '' : undefined">
-    <!-- 覆盖层停靠：宿主是 body 下的零尺寸 fixed 锚点，面板本体在此定位（右栏锚定坐标来自 panel 状态）。
-         绝不进入 B 站文档流（页面 hydration 对陌生节点敏感）。 -->
-    <div
-      v-show="visible"
-      class="bh-panel-root"
-      :style="{ top: `${panel.top}px`, right: `${panel.right}px`, width: `${panel.width}px` }"
-    >
-      <button
-        v-show="collapsed"
-        type="button"
-        class="bh-panel-collapsed"
-        aria-label="展开 AI 面板"
-        @click="collapsed = false"
-      >
-        <span class="bh-ai-orb" aria-hidden="true">AI</span>
-        <span class="bh-panel-collapsed-text">AI 助手</span>
-      </button>
+    <div v-show="visible" class="bh-panel-root">
+      <div class="bh-tab-strip" role="tablist" aria-label="右栏面板">
+        <button
+          type="button"
+          role="tab"
+          class="bh-strip-tab"
+          :class="{ active: !collapsed }"
+          :aria-selected="!collapsed ? 'true' : 'false'"
+          :aria-expanded="!collapsed ? 'true' : 'false'"
+          @click="collapsed = false"
+        >
+          <span class="bh-ai-orb" aria-hidden="true">AI</span>
+          <span>AI 助手</span>
+        </button>
+        <button
+          type="button"
+          class="bh-strip-toggle"
+          :aria-label="collapsed ? '展开 AI 面板' : '收起 AI 面板'"
+          @click="collapsed = !collapsed"
+        >
+          {{ collapsed ? '展开' : '收起' }}
+        </button>
+      </div>
 
       <section
         v-show="!collapsed"

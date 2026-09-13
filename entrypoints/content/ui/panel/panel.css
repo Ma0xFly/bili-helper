@@ -4,13 +4,72 @@
    与 key-ask-tab.html（视觉以脊柱为准）。 */
 
 /* ---------- 面板定位与壳 ---------- */
-/* 覆盖层文档锚定：宿主是 body 下零尺寸 absolute 锚点（钉在文档原点），本元素
-   以文档坐标定位（top/right/width 由 panel 状态驱动）——随页面滚动，原版观感；
-   不进入 B 站文档流，对页面 DOM 零改动。 */
+/* 文档流内联（原版同款）：tab 条 + 面板插在右栏 up 卡之后，随页面滚动、
+   把原生内容往下推——面板是右栏的一个 tab，不覆盖任何原生模块。 */
 .bh-panel-root {
-  position: absolute;
-  pointer-events: none;
-  z-index: 2147483000;
+  position: static;
+  width: 100%;
+}
+
+/* ---------- 右栏 tab 条（AI 助手页签 + 收起钮） ---------- */
+.bh-tab-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 4px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 12px;
+  pointer-events: auto;
+}
+
+.bh-strip-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 5px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--bh-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bh-strip-tab .bh-ai-orb {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.bh-strip-tab.active {
+  background: var(--bh-purple-soft);
+  border-color: var(--bh-glass-border);
+  color: var(--bh-primary-deep);
+}
+
+.bh-strip-toggle {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--bh-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bh-strip-toggle:hover {
+  color: var(--bh-primary);
+}
+
+.bh-root[data-dark] .bh-strip-tab.active {
+  background: var(--bh-purple-soft);
+  color: var(--bh-primary-bright);
 }
 
 .bh-panel {
@@ -18,8 +77,8 @@
   flex-direction: column;
   width: 100%;
   min-width: 0;
-  /* 顶部停靠：不高于视口太多，超出走内部滚动（.bh-panel-body overflow-y:auto） */
-  max-height: calc(100vh - 96px);
+  /* 内联面板：限高走内部滚动（.bh-panel-body overflow-y:auto），不无限顶长右栏 */
+  max-height: calc(100vh - 160px);
   overflow: hidden;
   background: var(--bh-surface-glass);
   backdrop-filter: blur(24px) saturate(1.4);
@@ -52,28 +111,6 @@
 }
 
 /* 折叠态：玻璃胶囊钮 */
-.bh-panel-collapsed {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px 6px 6px;
-  background: var(--bh-surface-glass-strong);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid var(--bh-glass-border);
-  border-radius: 999px;
-  box-shadow: 0 10px 30px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
-  cursor: pointer;
-  pointer-events: auto;
-  font-family: inherit;
-}
-
-.bh-panel-collapsed-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--bh-text-primary);
-}
-
 /* ---------- 面板头部 ---------- */
 .bh-panel-head {
   padding: 18px 20px 0;
@@ -870,11 +907,6 @@
 .bh-seg-item:focus-visible,
 .bh-btn-send:focus-visible,
 .bh-panel-collapse-btn:focus-visible,
-.bh-panel-collapsed:focus-visible {
-  outline: 2px solid var(--bh-primary);
-  outline-offset: 2px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .bh-panel {
     animation: none;
