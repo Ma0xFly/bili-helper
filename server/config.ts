@@ -36,6 +36,20 @@ function envInt(env: Record<string, string | undefined>, key: string, fallback: 
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback
 }
 
+/**
+ * 端口必须显式合法：调优参数写错回落默认值还能接受，端口写错还静默落到 8787，
+ * 用户只会看到「服务没在预期的端口上」却查不出原因。直接拒绝启动并点名变量。
+ */
+function envPort(env: Record<string, string | undefined>): number {
+  const raw = env.PORT
+  if (raw === undefined || raw.trim() === '') return DEFAULT_PORT
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`环境变量 PORT 无效：「${raw}」不是 1–65535 之间的整数`)
+  }
+  return parsed
+}
+
 export function readServerConfig(
   env: Record<string, string | undefined> = process.env,
 ): ServerConfig {
@@ -59,7 +73,7 @@ export function readServerConfig(
     token: envString(env, 'AI_SERVER_TOKEN'),
     allowOrigin: envString(env, 'AI_SERVER_ORIGIN', '*'),
     maxBodyBytes: envInt(env, 'AI_SERVER_MAX_BODY_BYTES', DEFAULT_MAX_BODY_BYTES),
-    port: envInt(env, 'PORT', DEFAULT_PORT),
+    port: envPort(env),
     host: envString(env, 'AI_SERVER_HOST', DEFAULT_HOST),
     storageFile: envString(env, 'AI_SERVER_STORAGE_FILE'),
   }

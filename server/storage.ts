@@ -5,7 +5,8 @@
 // 语义对齐 Chrome StorageArea.get 的四种入参：字符串键、键数组、对象形（带默认值）、null（全量）。
 // cache.ts 的 pruneStaleWindowVectors 依赖 null 全量读，必须支持。
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 type Store = Record<string, unknown>
@@ -36,8 +37,11 @@ function pick(store: Store, keys: GetKeys): Record<string, unknown> {
   return out
 }
 
-/** 内存存储：测试与「不落盘」部署用。 */
-export function createMemoryStorage(initial: Store = {}): StorageAreaShim {
+/**
+ * 内存存储：测试与「不落盘」部署用。flush 是无操作——统一两个实现的接口形状，
+ * 调用方（index.ts 的退出钩子）不必按落盘与否分支。
+ */
+export function createMemoryStorage(initial: Store = {}): FileStorage {
   const store: Store = { ...initial }
   return {
     async get(keys) {
@@ -53,6 +57,9 @@ export function createMemoryStorage(initial: Store = {}): StorageAreaShim {
     async clear() {
       for (const key of Object.keys(store)) delete store[key]
     },
+    async flush() {
+      /* 内存存储没有落盘窗口，无可冲刷 */
+    },
   }
 }
 
@@ -60,28 +67,72 @@ export interface FileStorageOptions {
   file: string
   /** 读写盘失败的上报口（只报状态与原因，绝不带值——缓存里可能有向量与词条，日志里不要）。 */
   onError?: (phase: 'read' | 'write', error: unknown) => void
+  /** 落盘去抖窗口：一次识别会连着写语料向量与窗口向量，合并成一轮写。 */
+  persistDebounceMs?: number
 }
+
+/** 可等待落盘的存储：进程退出前要把去抖窗口里的变更冲出去，否则白算一次向量。 */
+export interface FileStorage extends StorageAreaShim {
+  /** 立即落盘并等待完成（关闭钩子与测试用）。 */
+  flush(): Promise<void>
+}
+
+const DEFAULT_PERSIST_DEBOUNCE_MS = 500
 
 /**
  * 文件存储：整份 JSON 落盘，写入走「临时文件 + rename」保证原子性
  * （进程在写一半时被杀不会留下截断的 JSON 让下次启动全量重算）。
- * 落盘是同步的：向量缓存写入本身很低频（语料/窗口各算一次才写一次），
- * 换来的是「写完即退出」不丢数据，以及调用方 await 之后文件必然已更新。
+ *
+ * 落盘是**异步 + 去抖 + 单飞**的：缓存值是 MB 级向量，同步整份写会把事件循环卡住几十到几百毫秒，
+ * 期间所有并发 SSE 流与请求一起停摆。去抖把一次识别里的多次写合并成一轮，
+ * 单飞保证并发写不互相交叠，退出前用 flush() 兜住最后一轮。
  */
-export function createFileStorage(options: FileStorageOptions): StorageAreaShim {
+export function createFileStorage(options: FileStorageOptions): FileStorage {
   const store: Store = loadFromDisk(options)
+  const debounceMs = options.persistDebounceMs ?? DEFAULT_PERSIST_DEBOUNCE_MS
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let drainPromise: Promise<void> | null = null
+  let pendingWrite = false
 
-  function persist(): void {
+  async function writeSnapshot(): Promise<void> {
+    const snapshot = JSON.stringify(store)
     try {
-      mkdirSync(dirname(options.file), { recursive: true })
+      await mkdir(dirname(options.file), { recursive: true })
       const tmp = `${options.file}.tmp`
-      writeFileSync(tmp, JSON.stringify(store), 'utf8')
-      renameSync(tmp, options.file)
+      await writeFile(tmp, snapshot, 'utf8')
+      await rename(tmp, options.file)
     } catch (error) {
       // 落盘失败只上报不抛：缓存写不进去的代价是下次重算，不该把检索链路带崩
       // （与端上 cache.ts 的「写失败静默」语义一致）。
       options.onError?.('write', error)
     }
+  }
+
+  function drain(): Promise<void> {
+    if (drainPromise) return drainPromise
+    drainPromise = (async () => {
+      try {
+        while (pendingWrite) {
+          pendingWrite = false
+          await writeSnapshot()
+        }
+      } finally {
+        drainPromise = null
+      }
+    })()
+    return drainPromise
+  }
+
+  function schedulePersist(): void {
+    pendingWrite = true
+    // 已有写入在跑：它会在循环里带走这次变更，不必再排定时器。
+    if (timer !== undefined || drainPromise !== null) return
+    timer = setTimeout(() => {
+      timer = undefined
+      void drain()
+    }, debounceMs)
+    // 别让落盘定时器吊住进程退出。
+    timer.unref?.()
   }
 
   return {
@@ -91,15 +142,24 @@ export function createFileStorage(options: FileStorageOptions): StorageAreaShim 
     async set(items) {
       if (!isRecord(items)) throw new Error('storage.set 需要对象入参')
       Object.assign(store, items)
-      persist()
+      schedulePersist()
     },
     async remove(keys) {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete store[key]
-      persist()
+      schedulePersist()
     },
     async clear() {
       for (const key of Object.keys(store)) delete store[key]
-      persist()
+      schedulePersist()
+    },
+    async flush() {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      if (drainPromise !== null) await drainPromise
+      // 上一轮可能在本次变更之前就开始了，这里再排一轮把余量带走。
+      if (pendingWrite) await drain()
     },
   }
 }
@@ -123,8 +183,8 @@ export interface StorageShimOptions {
   onError?: (phase: 'read' | 'write', error: unknown) => void
 }
 
-/** 安装全局 chrome.storage 替身（local 真实存储，sync/session 内存占位）。 */
-export function installStorageShim(options: StorageShimOptions = {}): StorageAreaShim {
+/** 安装全局 chrome.storage 替身（local 真实存储，sync/session 内存占位）。返回值带 flush，退出钩子用。 */
+export function installStorageShim(options: StorageShimOptions = {}): FileStorage {
   const local =
     options.file && options.file !== ''
       ? createFileStorage({ file: options.file, onError: options.onError })

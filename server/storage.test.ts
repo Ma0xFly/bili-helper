@@ -59,11 +59,12 @@ describe('createMemoryStorage（get 四种入参语义）', () => {
 })
 
 describe('createFileStorage（落盘与重启）', () => {
-  it('写入即落盘，重新打开能读回（await 之后文件必然已更新）', async () => {
+  it('flush 后落盘，重新打开能读回（去抖窗口里的变更不丢）', async () => {
     const { file, dir } = tempFile()
     try {
       const first = createFileStorage({ file })
       await first.set({ 'biliHelperRagVectorCache:corpus:m:b:h': { vectors: [[1, 0]] } })
+      await first.flush()
       expect(existsSync(file)).toBe(true)
 
       const reopened = createFileStorage({ file })
@@ -77,12 +78,38 @@ describe('createFileStorage（落盘与重启）', () => {
     }
   })
 
+  it('落盘是去抖异步的：set 后立刻查盘还没写，等过窗口才落', async () => {
+    const { file, dir } = tempFile()
+    try {
+      const storage = createFileStorage({ file, persistDebounceMs: 20 })
+      await storage.set({ k: 'v' })
+      expect(existsSync(file)).toBe(false)
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ k: 'v' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('flush 不等去抖窗口：立即把待写变更冲出去', async () => {
+    const { file, dir } = tempFile()
+    try {
+      const storage = createFileStorage({ file, persistDebounceMs: 60_000 })
+      await storage.set({ k: 'v' })
+      await storage.flush()
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ k: 'v' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('目录不存在时自动创建', async () => {
     const { dir } = tempFile()
     const nested = join(dir, 'a', 'b', 'cache.json')
     try {
       const storage = createFileStorage({ file: nested })
       await storage.set({ k: 'v' })
+      await storage.flush()
       expect(JSON.parse(readFileSync(nested, 'utf8'))).toEqual({ k: 'v' })
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -123,6 +150,7 @@ describe('createFileStorage（落盘与重启）', () => {
       writeFileSync(file, '{}', 'utf8')
       const storage = createFileStorage({ file: join(file, 'nested.json'), onError })
       await expect(storage.set({ k: 'v' })).resolves.toBeUndefined()
+      await storage.flush()
       expect(onError.mock.calls.map((call) => call[0])).toContain('write')
       // 内存态仍然可用：本次进程内缓存照常命中。
       expect(await storage.get('k')).toEqual({ k: 'v' })
@@ -133,7 +161,7 @@ describe('createFileStorage（落盘与重启）', () => {
 })
 
 describe('installStorageShim', () => {
-  it('装上 chrome.storage 三个区，local 按 file 选项决定落盘或内存', async () => {
+  it('装上 chrome.storage 三个区，local 按 file 选项决定落盘或内存，返回值带 flush', async () => {
     const { file, dir } = tempFile()
     try {
       const local = installStorageShim({ file })
@@ -143,15 +171,17 @@ describe('installStorageShim', () => {
       expect(chrome.storage.session).toBeDefined()
 
       await local.set({ k: 'v' })
+      await local.flush()
       expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ k: 'v' })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('未给 file 时用内存存储（重启后重算，不写盘）', async () => {
+  it('未给 file 时用内存存储（重启后重算，不写盘），flush 是无操作', async () => {
     const local = installStorageShim()
     await local.set({ k: 'v' })
+    await expect(local.flush()).resolves.toBeUndefined()
     expect(await local.get('k')).toEqual({ k: 'v' })
   })
 })

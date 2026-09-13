@@ -47,14 +47,21 @@ describe('readServerConfig（环境变量 → 设置）', () => {
     expect(config.storageFile).toBe('')
   })
 
-  it('非法数字（0/负数/非数字）回落默认，不产生 0 端口或 0 上限', () => {
-    const config = readServerConfig({
-      PORT: '0',
-      AI_SERVER_MAX_BODY_BYTES: '-5',
-    })
-    expect(config.port).toBe(DEFAULT_PORT)
+  it('非法数字（0/负数/非数字）回落默认，不产生 0 上限', () => {
+    const config = readServerConfig({ AI_SERVER_MAX_BODY_BYTES: '-5' })
     expect(config.maxBodyBytes).toBe(DEFAULT_MAX_BODY_BYTES)
     expect(readServerConfig({ PORT: '9000' }).port).toBe(9000)
+  })
+
+  it('PORT 写错直接拒绝启动并点名变量，而不是静默落到默认端口', () => {
+    // 端口写错还悄悄用 8787，用户只会看到「服务没在预期的端口上」却查不出原因。
+    expect(() => readServerConfig({ PORT: 'abc' })).toThrow(/PORT/)
+    expect(() => readServerConfig({ PORT: '0' })).toThrow(/PORT/)
+    expect(() => readServerConfig({ PORT: '65536' })).toThrow(/PORT/)
+    expect(() => readServerConfig({ PORT: '3.5' })).toThrow(/PORT/)
+    // 合法值照常生效；空白等同未设置。
+    expect(readServerConfig({ PORT: ' 8080 ' }).port).toBe(8080)
+    expect(readServerConfig({ PORT: '   ' }).port).toBe(DEFAULT_PORT)
   })
 
   it('空白字符串等同未设置（不会把 "  " 当成端点地址）', () => {

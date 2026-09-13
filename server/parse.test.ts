@@ -34,7 +34,7 @@ describe('parseVideoMeta', () => {
 })
 
 describe('parseSubtitles / parseDanmaku / parseComments（单条脏数据丢弃，不整批 400）', () => {
-  it('字幕：丢空文本、丢 end ≤ start，字符串时间能转就转', () => {
+  it('字幕：丢空文本、丢 end ≤ start、丢负/缺 start，字符串时间能转就转', () => {
     expect(
       parseSubtitles([
         { start: 0, end: 5, text: '正常' },
@@ -42,6 +42,8 @@ describe('parseSubtitles / parseDanmaku / parseComments（单条脏数据丢弃�
         { start: 10, end: 3, text: '起止颠倒' },
         { start: '20', end: '25', text: '字符串时间' },
         { start: 30, end: 'abc', text: '转不动' },
+        { start: -5, end: 3, text: '负起点' },
+        { end: 5, text: '缺起点' },
         'junk',
         null,
       ]),

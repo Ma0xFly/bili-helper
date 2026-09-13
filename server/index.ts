@@ -3,6 +3,7 @@
 
 import { createServer } from 'node:http'
 import { missingConfigReasons, readServerConfig } from './config'
+import type { ServerConfig } from './config'
 import { createRequestHandler } from './handler'
 import { installStorageShim } from './storage'
 
@@ -16,9 +17,20 @@ function log(line: string): void {
   process.stdout.write(`[bili-helper-ai] ${line}\n`)
 }
 
-const config = readServerConfig()
+function exitWithError(message: string): never {
+  process.stderr.write(`[bili-helper-ai] ${message}\n`)
+  process.exit(1)
+}
 
-installStorageShim({
+let config: ServerConfig
+try {
+  config = readServerConfig()
+} catch (error) {
+  // 目前只有 PORT 校验会走这里；变量名与原因已在 message 里。
+  exitWithError(`配置无效：${error instanceof Error ? error.message : String(error)}`)
+}
+
+const storage = installStorageShim({
   file: config.storageFile,
   onError: (phase, error) => {
     log(
@@ -31,24 +43,24 @@ installStorageShim({
 
 const missing = missingConfigReasons(config)
 if (missing.length > 0) {
-  process.stderr.write(`[bili-helper-ai] 缺少必要配置：${missing.join('、')}\n`)
-  process.exit(1)
+  exitWithError(`缺少必要配置：${missing.join('、')}`)
 }
 
-const server = createServer(
-  createRequestHandler({
-    settings: config.settings,
-    token: config.token,
-    allowOrigin: config.allowOrigin,
-    maxBodyBytes: config.maxBodyBytes,
-    onWarn: log,
-    version,
-  }),
-)
+const handler = createRequestHandler({
+  settings: config.settings,
+  token: config.token,
+  allowOrigin: config.allowOrigin,
+  maxBodyBytes: config.maxBodyBytes,
+  onWarn: log,
+  version,
+})
 
-// 长 LLM 调用（尤其 SSE 流式）不能被 Node 默认的请求/头超时掐断。
-server.requestTimeout = 0
-server.headersTimeout = 0
+const server = createServer(handler)
+
+// 收请求阶段的超时保持 Node 默认（requestTimeout 300s / headersTimeout 60s）。
+// 不要为了「长 LLM 调用」把它们关掉：这两个超时只管收完请求，与响应时长无关，SSE 长流不受影响；
+// 关掉等于给 slow-loris 开门——半截 body 或半截 headers 挂着不收尾，连接永不释放，fd 耗尽即拒服。
+// 响应侧的时长由上游模型端点自己的死线（modules/ai/llm/client 的 REQUEST_TIMEOUT_MS）管。
 
 server.listen(config.port, config.host, () => {
   log(
@@ -61,11 +73,28 @@ server.listen(config.port, config.host, () => {
   }
 })
 
+// 端口被占/地址不可绑这类启动失败：说出原因再退出，别让进程带着 unhandled 'error' 静默崩掉。
+server.on('error', (error) => {
+  const code = (error as NodeJS.ErrnoException).code
+  if (code === 'EADDRINUSE') {
+    exitWithError(`端口 ${config.port} 已被占用（换个 PORT，或停掉占用它的进程）`)
+    return
+  }
+  exitWithError(`服务启动失败：${error.message}`)
+})
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     log(`收到 ${signal}，关闭中`)
-    server.close(() => process.exit(0))
-    // 连接迟迟不放（长流）也要能退出去，别让进程挂着。
+    // 契约「end 必然收尾」不因进程退出破例：先给进行中的 SSE 流补终止事件，
+    // 再停收新连接、放掉空闲 keep-alive 连接；去抖中的缓存落盘冲出去再退。
+    const closed = handler.shutdownStreams('服务正在关闭')
+    if (closed > 0) log(`已向 ${closed} 条进行中的流补发收尾事件`)
+    server.close(() => {
+      void storage.flush().finally(() => process.exit(0))
+    })
+    server.closeIdleConnections?.()
+    // 连接迟迟不放（对端挂起的长流）也要能退出去，别让进程挂着。
     setTimeout(() => process.exit(0), 3000).unref()
   })
 }

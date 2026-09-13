@@ -2,6 +2,7 @@
 // 除了逐条路由/鉴权/错误映射，最后用扩展端真实的 server 适配器（createServerBackend）
 // 打这个服务做契约互通验证——客户端解析器与服务端序列化器必须对得上，否则模式一切就废。
 import { createServer } from 'node:http'
+import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServerBackend } from '../modules/ai/backend/server'
@@ -15,8 +16,8 @@ import type {
 import { DEFAULT_SETTINGS } from '../modules/settings'
 import type { AiSettings } from '../modules/settings'
 import { AiError } from '../modules/shared/error'
-import type { ServerDeps } from './handler'
-import { PayloadTooLargeError, createRequestHandler, statusOfError } from './handler'
+import type { RequestHandler, ServerDeps } from './handler'
+import { PayloadTooLargeError, RequestAbortedError, createRequestHandler, statusOfError } from './handler'
 
 const CONTEXT = {
   video: { bvid: 'BV1xx411c7mD', cid: 7, title: '设备横评', duration: 600 },
@@ -27,6 +28,7 @@ const CONTEXT = {
 
 interface Harness {
   baseUrl: string
+  handler: RequestHandler
   calls: { detect: DetectAdsInput[]; summary: SummarizeInput[]; chat: ChatInput[] }
   close(): Promise<void>
 }
@@ -60,13 +62,13 @@ const started: Harness[] = []
 
 async function start(overrides: Partial<ServerDeps> = {}): Promise<Harness> {
   const { capabilities, calls } = makeCapabilities()
-  const server = createServer(
-    createRequestHandler({ settings: DEFAULT_SETTINGS, capabilities, ...overrides }),
-  )
+  const handler = createRequestHandler({ settings: DEFAULT_SETTINGS, capabilities, ...overrides })
+  const server = createServer(handler)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   const harness: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,
+    handler,
     calls,
     close: () =>
       new Promise<void>((resolve) => {
@@ -89,19 +91,28 @@ function post(baseUrl: string, path: string, body: unknown, token?: string): Pro
   })
 }
 
+/** SSE 原始响应 → data 载荷序列（[DONE] 原样保留在末位）。 */
+function sseEvents(raw: string): string[] {
+  return raw
+    .split('\n\n')
+    .filter((block) => block.startsWith('data: '))
+    .map((block) => block.slice('data: '.length))
+}
+
 afterEach(async () => {
   while (started.length > 0) await started.pop()?.close()
   vi.unstubAllGlobals()
 })
 
 describe('statusOfError（AiError → HTTP 状态）', () => {
-  it('五类 kind 各有归属，请求体超限是 413', () => {
+  it('五类 kind 各有归属，请求体超限是 413、半途断开是 400', () => {
     expect(statusOfError(new AiError('parse', '坏 JSON'))).toBe(400)
     expect(statusOfError(new AiError('config', '没配端点'))).toBe(500)
     expect(statusOfError(new AiError('auth', '上游 401', { status: 401 }))).toBe(502)
     expect(statusOfError(new AiError('http', '上游 500', { status: 500 }))).toBe(502)
     expect(statusOfError(new AiError('network', '超时'))).toBe(504)
     expect(statusOfError(new PayloadTooLargeError(10))).toBe(413)
+    expect(statusOfError(new RequestAbortedError())).toBe(400)
     expect(statusOfError(new Error('意外'))).toBe(500)
   })
 })
@@ -136,6 +147,31 @@ describe('路由与探活', () => {
     expect(preflight.status).toBe(204)
     expect(preflight.headers.get('access-control-allow-origin')).toBe('https://www.bilibili.com')
     expect(preflight.headers.get('access-control-allow-headers')).toContain('Authorization')
+  })
+
+  it('HEAD /ai/health 也 200（负载均衡与 curl -I 探活常用 HEAD）', async () => {
+    const { baseUrl } = await start()
+    const response = await fetch(`${baseUrl}/ai/health`, { method: 'HEAD' })
+    expect(response.status).toBe(200)
+  })
+
+  it('404 不回显请求路径，鉴权在 404 之前（路由表不可枚举）', async () => {
+    const { baseUrl } = await start({ token: 'sekret' })
+    // 没鉴权时未知路径只给 401：拿 404/405 差异枚举不出路由表。
+    expect((await fetch(`${baseUrl}/ai/nope?secret=leet`)).status).toBe(401)
+
+    const response = await fetch(`${baseUrl}/ai/nope?secret=leet`, {
+      headers: { Authorization: 'Bearer sekret' },
+    })
+    expect(response.status).toBe(404)
+    // 固定文案：调用方送来的路径与查询串一个字都不反射（反射/日志注入面）。
+    expect(await response.text()).toBe(JSON.stringify({ error: { kind: 'http', message: '未知路径' } }))
+  })
+
+  it('前导 BOM 的 JSON 也能收（Windows 工具导出的请求体天然带 BOM）', async () => {
+    const { baseUrl } = await start()
+    const response = await post(baseUrl, '/ai/ad-detection', `\uFEFF${JSON.stringify(CONTEXT)}`)
+    expect(response.status).toBe(200)
   })
 
   it('JSON 响应也带 CORS 头（扩展内容脚本从 bilibili.com 发起跨源请求）', async () => {
@@ -212,11 +248,7 @@ describe('三条契约路径', () => {
     expect(response.headers.get('content-type')).toContain('text/event-stream')
     expect(response.headers.get('x-accel-buffering')).toBe('no')
 
-    const raw = await response.text()
-    const events = raw
-      .split('\n\n')
-      .filter((block) => block.startsWith('data: '))
-      .map((block) => block.slice('data: '.length))
+    const events = sseEvents(await response.text())
     expect(events.at(-1)).toBe('[DONE]')
     expect(events.slice(0, -1).map((item) => JSON.parse(item) as AiChatEvent)).toEqual([
       { type: 'start' },
@@ -227,7 +259,9 @@ describe('三条契约路径', () => {
     expect(harness.calls.chat[0]?.messages).toEqual([{ role: 'user', content: '讲了什么' }])
   })
 
-  it('chat 里能力层以 end{error} 收束时原样透传（客户端据此渲染错误）', async () => {
+  it('chat：首块之前收 end{error} → 回 HTTP 错误而非 SSE（auto 模式的回退前提）', async () => {
+    // 服务器上游挂了恰恰是最该回退的场景：如果这时还发 200+SSE，
+    // 客户端就认为「流已开始」而永远不回退浏览器直连。
     const capabilities: AiCapabilities = {
       async detectAds() {
         return { ads: [], source: 'none' }
@@ -241,11 +275,68 @@ describe('三条契约路径', () => {
       },
     }
     const { baseUrl } = await start({ capabilities })
-    const raw = await (
-      await post(baseUrl, '/ai/chat', { messages: [{ role: 'user', content: 'x' }], context: CONTEXT })
-    ).text()
-    expect(raw).toContain('"type":"end"')
-    expect(raw).toContain('上游 Key 无效')
+    const response = await post(baseUrl, '/ai/chat', {
+      messages: [{ role: 'user', content: 'x' }],
+      context: CONTEXT,
+    })
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: { kind: 'http', message: '上游 Key 无效' } })
+  })
+
+  it('chat：首块之后再收 end{error} → SSE 内联透传（流已开始，只能 in-band 收束）', async () => {
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(_input, handlers) {
+        handlers.onEvent({ type: 'start' })
+        handlers.onEvent({ type: 'message', chunk: '正在回答' })
+        handlers.onEvent({ type: 'end', error: { kind: 'network', message: '上游断了' } })
+      },
+    }
+    const { baseUrl } = await start({ capabilities })
+    const response = await post(baseUrl, '/ai/chat', {
+      messages: [{ role: 'user', content: 'x' }],
+      context: CONTEXT,
+    })
+    expect(response.status).toBe(200)
+    const events = sseEvents(await response.text()).map((item) =>
+      item === '[DONE]' ? item : (JSON.parse(item) as AiChatEvent),
+    )
+    expect(events).toEqual([
+      { type: 'start' },
+      { type: 'message', chunk: '正在回答' },
+      { type: 'end', error: { kind: 'network', message: '上游断了' } },
+      '[DONE]',
+    ])
+  })
+
+  it('chat：无 message 的干净收束 → 仍是完整 SSE（start+end+[DONE]），客户端不悬挂', async () => {
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(_input, handlers) {
+        handlers.onEvent({ type: 'start' })
+        handlers.onEvent({ type: 'end' })
+      },
+    }
+    const { baseUrl } = await start({ capabilities })
+    const response = await post(baseUrl, '/ai/chat', {
+      messages: [{ role: 'user', content: 'x' }],
+      context: CONTEXT,
+    })
+    expect(response.status).toBe(200)
+    const events = sseEvents(await response.text()).map((item) =>
+      item === '[DONE]' ? item : (JSON.parse(item) as AiChatEvent),
+    )
+    expect(events).toEqual([{ type: 'start' }, { type: 'end' }, '[DONE]'])
   })
 })
 
@@ -427,6 +518,149 @@ describe('客户端断开', () => {
     await vi.waitFor(() => expect(seen?.aborted).toBe(true), { timeout: 2000 })
     release?.()
   })
+
+  it('请求体半途断开：不进「上游失败」告警，服务紧接着仍可用', async () => {
+    const onWarn = vi.fn()
+    const harness = await start({ onWarn })
+    // fetch 发不出半截请求体，得用原生 http 客户端：声明 Content-Length 但只送一半就掐断。
+    await new Promise<void>((resolve) => {
+      const req = httpRequest(`${harness.baseUrl}/ai/ad-detection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': '1000' },
+      })
+      req.on('error', () => resolve()) // 掐断后客户端侧的 ECONNRESET 是预期内结果
+      req.end(JSON.stringify(CONTEXT).slice(0, 20), () => {
+        setTimeout(() => {
+          req.destroy()
+          resolve()
+        }, 20)
+      })
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    const logged = onWarn.mock.calls.map((call) => String(call[0])).join('\n')
+    // 客户端侧问题 ≠ 上游故障：告警把运维引向模型端点就错了。
+    expect(logged).not.toContain('上游失败')
+    expect((await post(harness.baseUrl, '/ai/ad-detection', CONTEXT)).status).toBe(200)
+  })
+
+  it('客户端断开被能力层包成 AiError 也不误报「上游失败」（cause 链下钻）', async () => {
+    const onWarn = vi.fn()
+    const capabilities: AiCapabilities = {
+      async detectAds(input) {
+        // 模拟真实链路：signal 中止后把原始 AbortError 包成 AiError 抛出
+        // （llm/client.mapNetworkError 的形状）——顶层 name 是 'AiError'，判据必须下钻 cause。
+        return new Promise((_resolve, reject) => {
+          input.signal?.addEventListener('abort', () => {
+            reject(
+              new AiError('network', '请求已中止', {
+                cause: new DOMException('This operation was aborted', 'AbortError'),
+              }),
+            )
+          })
+        })
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat() {
+        /* 本用例不涉及 */
+      },
+    }
+    const harness = await start({ capabilities, onWarn })
+
+    const controller = new AbortController()
+    const pending = fetch(`${harness.baseUrl}/ai/ad-detection`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(CONTEXT),
+      signal: controller.signal,
+    }).then(
+      () => undefined,
+      () => undefined,
+    )
+    // 先让请求真正进到能力层（挂在 abort 监听上），再模拟用户切视频断开。
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    controller.abort()
+    await pending
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    const logged = onWarn.mock.calls.map((call) => String(call[0])).join('\n')
+    expect(logged).not.toContain('上游失败')
+    // 服务仍可用。
+    expect((await fetch(`${harness.baseUrl}/ai/health`)).status).toBe(200)
+  })
+})
+
+describe('优雅停机（shutdownStreams）', () => {
+  it('进行中的 SSE 流补 end{error} + [DONE] 收尾，而不是 socket 被硬掐', async () => {
+    let answering = false
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(_input, handlers) {
+        handlers.onEvent({ type: 'start' })
+        handlers.onEvent({ type: 'message', chunk: '开头' })
+        answering = true
+        await gate
+        handlers.onEvent({ type: 'end' })
+      },
+    }
+    const harness = await start({ capabilities })
+    const pending = post(harness.baseUrl, '/ai/chat', {
+      messages: [{ role: 'user', content: 'x' }],
+      context: CONTEXT,
+    }).then((response) => response.text())
+    await vi.waitFor(() => expect(answering).toBe(true))
+
+    const closed = harness.handler.shutdownStreams('服务正在关闭')
+    expect(closed).toBe(1)
+    release?.()
+
+    const raw = await pending
+    expect(raw).toContain('开头')
+    expect(raw).toContain('服务正在关闭')
+    expect(raw.trimEnd().endsWith('data: [DONE]')).toBe(true)
+    // 流收束后服务进程仍能响应探活。
+    expect((await fetch(`${harness.baseUrl}/ai/health`)).status).toBe(200)
+  })
+
+  it('流开始前停机：没有进行中的流可收束，返回 0，请求按原路径收场', async () => {
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(_input, handlers) {
+        handlers.onEvent({ type: 'start' })
+        await gate // 一直不出首块：head 未发，不在 activeStreams 里
+      },
+    }
+    const harness = await start({ capabilities })
+    void post(harness.baseUrl, '/ai/chat', {
+      messages: [{ role: 'user', content: 'x' }],
+      context: CONTEXT,
+    }).catch(() => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(harness.handler.shutdownStreams('服务正在关闭')).toBe(0)
+    release?.()
+    await harness.close()
+  })
 })
 
 describe('契约互通：扩展端 server 适配器 ↔ 本服务', () => {
@@ -490,6 +724,28 @@ describe('契约互通：扩展端 server 适配器 ↔ 本服务', () => {
       kind: 'http',
       status: 504,
     })
+  })
+
+  it('chat 上游在首块前失败：服务端回 HTTP 504，客户端 reject——auto 回退本地直连的前提成立', async () => {
+    const capabilities: AiCapabilities = {
+      async detectAds() {
+        return { ads: [], source: 'none' }
+      },
+      async summarize() {
+        return { summary: '', segments: [] }
+      },
+      async chat(_input, handlers) {
+        handlers.onEvent({ type: 'end', error: { kind: 'network', message: '服务器连不上模型端点' } })
+      },
+    }
+    const { baseUrl } = await start({ capabilities })
+    const backend = createServerBackend(clientSettings(baseUrl))
+    await expect(
+      backend.chat(
+        { messages: [{ role: 'user', content: 'x' }], context: CONTEXT },
+        { onEvent: () => undefined },
+      ),
+    ).rejects.toMatchObject({ kind: 'http', status: 504 })
   })
 
   it('token 不匹配：客户端抛 auth 类 AiError', async () => {

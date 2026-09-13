@@ -43,7 +43,7 @@ export function parseVideoMeta(value: unknown): VideoMeta {
   }
 }
 
-/** 字幕行：起止时间非法（end ≤ start）或文本为空的行直接丢弃。 */
+/** 字幕行：起止时间非法（start 缺失/为负、end ≤ start）或文本为空的行直接丢弃。 */
 export function parseSubtitles(value: unknown): Subtitle[] {
   if (!Array.isArray(value)) return []
   const subtitles: Subtitle[] = []
@@ -51,8 +51,9 @@ export function parseSubtitles(value: unknown): Subtitle[] {
     if (!isRecord(item)) continue
     const text = asText(item.text).trim()
     if (text === '') continue
-    const start = Math.max(0, asFiniteNumber(item.start, -1))
-    const end = Math.max(0, asFiniteNumber(item.end, -1))
+    // 不先钳到 0：钳完再判负数就永远判不出来，缺失/为负的 start 会被悄悄改成 0 混进窗口切块。
+    const start = asFiniteNumber(item.start, -1)
+    const end = asFiniteNumber(item.end, -1)
     if (start < 0 || end <= start) continue
     subtitles.push({ start, end, text })
   }

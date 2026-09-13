@@ -15,7 +15,8 @@ export function sseDone(): string {
 export const SSE_HEADERS: Record<string, string> = {
   'Content-Type': 'text/event-stream; charset=utf-8',
   'Cache-Control': 'no-cache, no-transform',
-  Connection: 'keep-alive',
+  // 不硬编码 Connection：客户端发 Connection: close 时必须照办（RFC 7230），
+  // 写死 keep-alive 会让对方收完 [DONE] 后一直挂着等关连接。交给 Node 自行协商。
   // 反向代理（nginx 等）默认会缓冲响应，流式会被攒到结束才下发，必须显式关掉。
   'X-Accel-Buffering': 'no',
 }
