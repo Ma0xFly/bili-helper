@@ -81,15 +81,16 @@ export default defineContentScript({
         anchor: 'body',
         append: 'last',
         onMount(container, _shadow, shadowHost) {
-          // 覆盖层停靠（重要）：面板绝不插进 B 站的文档流——页面自身的 hydration/
-          // 粘性布局对陌生兄弟节点敏感（实测会把右栏 tab 与评论区挤断）。
-          // 宿主只是 body 下的零尺寸 fixed 锚点，面板本体在 shadow 内以视口坐标
-          // 定位（panel.top/right/width 响应式驱动，右栏几何锚定），对页面 DOM 零改动。
+          // 覆盖层文档锚定（重要）：面板绝不插进 B 站的文档流——页面自身的 hydration/
+          // 粘性布局对陌生兄弟节点敏感（实测早插入会把右栏 tab 与评论区挤断）。
+          // 宿主是 body 下的零尺寸 absolute 锚点（钉在文档原点、随页面滚动），
+          // 面板本体在 shadow 内以**文档坐标**定位（panel.top/right 响应式驱动）：
+          // 观感 = 原版的「固定在页面右栏上方」，但对页面 DOM 零改动。
           Object.assign(shadowHost.style, {
-            position: 'fixed',
+            position: 'absolute',
             top: '0',
             left: '0',
-            width: '0',
+            width: '100%',
             height: '0',
             pointerEvents: 'none',
             zIndex: '2147483000',
@@ -315,25 +316,16 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    // ---------- 面板停靠：视口层锚定右栏（读而不写） ----------
-    // 面板位置只由右栏矩形的实时读数决定：静止时贴 up 卡下方、与右栏右缘对齐（即
-    // 「固定在右侧上方」）；滚动后 up 卡离屏，钳到页头之下保持可见。B 站右栏自身
-    // 粘性布局，getBoundingClientRect 天然给出吸附后的位置，面板跟着走。
+    // ---------- 面板停靠：文档坐标锚定右栏（读而不写） ----------
+    // 面板位置 = 页面位置（原版观感）：静止时钉在 up 卡下缘、与右栏右缘对齐，
+    // 随页面一起滚动（不再钉屏幕）。坐标换算：文档坐标 = 视口坐标 + 滚动量，
+    // 因此垂直方向不需要监听 scroll；横向换行/窗口变化由 resize + ResizeObserver
+    // 重锚，SPA 换视频由 1.5s 周期检查兜底。
     // 关键纪律：对页面 DOM 只读不写，绝不插入/移动节点——实测早插入会打断 B 站
     // 的 hydration，右栏 tab 与评论区直接消失（覆盖层方案从机制上排除这类破坏）。
     const PANEL_COLUMN_SELECTORS = ['.right-container', '.right-container-inner']
     const PANEL_UP_ANCHOR_SELECTOR = '.up-panel-container'
     const PANEL_DOCK_INSET = 12
-
-    let panelRafPending = false
-    function schedulePanelMeasure(): void {
-      if (panelRafPending) return
-      panelRafPending = true
-      window.requestAnimationFrame(() => {
-        panelRafPending = false
-        measurePanelPosition()
-      })
-    }
 
     function findPanelColumn(): HTMLElement | null {
       for (const selector of PANEL_COLUMN_SELECTORS) {
@@ -350,26 +342,27 @@ export default defineContentScript({
       if (rect.width <= 0 || rect.height <= 0) return
       panel.width = Math.max(320, Math.min(440, Math.round(rect.width)))
       panel.right = Math.max(PANEL_DOCK_INSET, Math.round(window.innerWidth - rect.right))
-      // 顶部锚：up 卡下缘（无 up 卡时用右栏顶部）；滚动离屏后钳到安全边距。
+      // 顶部锚：up 卡下缘的**文档坐标**（视口读数 + 滚动量）；无 up 卡时用右栏顶部。
       const upPanel = window.document.querySelector<HTMLElement>(PANEL_UP_ANCHOR_SELECTOR)
       const anchorTop = upPanel ? upPanel.getBoundingClientRect().bottom : rect.top
-      panel.top = Math.max(PANEL_DOCK_INSET, Math.min(Math.round(anchorTop), window.innerHeight - 120))
+      panel.top = Math.max(PANEL_DOCK_INSET, Math.round(anchorTop + window.scrollY))
     }
 
-    // 滚动/窗口变化/右栏尺寸变化（弹幕条展开、合集加载）即时重锚；rAF 合帧防抖。
-    window.addEventListener('scroll', schedulePanelMeasure, { passive: true })
-    window.addEventListener('resize', schedulePanelMeasure)
-    const panelColumnObserver = new ResizeObserver(schedulePanelMeasure)
+    // 窗口变化与右栏尺寸变化（弹幕条展开、合集加载、字体/图片回流）即时重锚。
+    window.addEventListener('resize', measurePanelPosition)
+    const panelColumnObserver = new ResizeObserver(measurePanelPosition)
     let observedColumn: Element | null = null
     function observePanelColumn(): void {
       const column = findPanelColumn()
       if (column && column !== observedColumn) {
         panelColumnObserver.disconnect()
         panelColumnObserver.observe(column)
+        const upPanel = window.document.querySelector(PANEL_UP_ANCHOR_SELECTOR)
+        if (upPanel) panelColumnObserver.observe(upPanel)
         observedColumn = column
       }
     }
-    // 首次测量并把观测挂上；SPA 换视频由 1.5s 周期检查兜底换观测目标。
+    // 首次测量并把观测挂上；SPA 换视频由 1.5s 周期检查兜底换锚目标。
     measurePanelPosition()
     observePanelColumn()
 
