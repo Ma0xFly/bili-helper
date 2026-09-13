@@ -73,7 +73,11 @@ export default defineContentScript({
       return
     }
 
-    // 面板宿主：文档流内联，挂进 B 站右栏（插入点由 ensurePanelPlacement 维护）。
+    // 面板宿主：WXT mount 只占位（body 末尾、隐藏），落位成功才挂载面板应用——
+    // 原版同款生命周期：先落位、后挂应用；落位插入的是原版同款普通 div 宿主
+    // （.bili-helper-ai-panel-host），WXT 的 shadow 宿主作为其子节点。
+    let panelContainer: HTMLElement | null = null
+    let panelAppMounted = false
     try {
       panelMount = await createShadowRootUi<HTMLElement>(ctx, {
         name: 'bili-helper-panel-anchor',
@@ -81,11 +85,9 @@ export default defineContentScript({
         anchor: 'body',
         append: 'last',
         onMount(container, _shadow, shadowHost) {
-          // 文档流内联（原版同款）：面板 = 右栏里的一个 tab（tab 条 + 面板本体）。
-          // 落位时机由 ensurePanelPlacement 纪律管理（等 hydration 稳定才插入），
-          // 落位前宿主保持 display:none。
+          // 落位前隐藏（WXT 把宿主暂挂在 body 末尾）；移进右栏 wrapper 时恢复。
+          panelContainer = container
           Object.assign(shadowHost.style, { display: 'none' })
-          createApp(PanelApp).mount(container)
           return shadowHost
         },
       })
@@ -306,20 +308,42 @@ export default defineContentScript({
       void syncPanelSession()
     }
 
-    // ---------- 面板落位：等右栏挂载稳定后再插入（原版同款语义 + 时机纪律） ----------
-    // 面板 = 右栏的一个 tab：宿主（tab 条 + 面板）插在 up 卡之后，随页面滚动。
-    //
-    // 时机纪律（三轮构建的实测结论）：文档流插入本身无害（晚插入从未破坏页面），
-    // 但真实扩展在 B 站 hydration 进行中就插入/搬动节点 → 右栏 tab 与评论区挂载
-    // 失败。因此：
-    //   1) 锚点（up 卡）首次出现或更换（SPA 换视频）后，必须等右栏尾部模块
-    //      （弹幕条 + 推荐位）都挂载完（或 4s 超时兜底）才插入；
-    //   2) 插入后绝不再因「同级顺序变化」搬动节点——只在宿主被 B 站移除/换父时
-    //      才重新落位； hydration 期间宿主处于隐藏态（display:none），不占位不干扰。
-    const PANEL_UP_ANCHOR_SELECTOR = '.up-panel-container'
-    const PANEL_COLUMN_SELECTORS = ['.right-container-inner', '.right-container']
-    const PANEL_SETTLE_SELECTORS = ['.video-pod-above-modules', '.rcmd-tab']
-    const PANEL_SETTLE_TIMEOUT_MS = 4000
+    // ---------- 面板落位：原版（bili-helper 旧产物）同款方法 ----------
+    // 从旧产物 content.js 完整还原（vg/hg/bg/yg/kn/fg/mg/Sg 一族）：
+    //   1) 就绪三重门——等整页 load（readyState complete）→ 等评论区挂载
+    //      （#commentapp bili-comments 探针，8s 超时）→ 等右栏 600ms 无 childList
+    //      变化（静止，12s 超时）——都过了才插入；落位失败 500ms 重试（周期检查驱动）。
+    //   2) 落位成功才挂载面板应用（先落位、后挂应用）。
+    //   3) 插入的是原版同款普通 div（#bili-helper-ai-panel-host），opacity:0 →
+    //      800ms 淡入；WXT 的 shadow 宿主作为其子节点（B 站容器只见得到原版形态的 div）。
+    //   4) 宽屏模式（.bpx-player-ctrl-wide.bpx-state-entered）插在 #danmukuBox 之后，
+    //      否则插在 up 卡之后；容器四级回退到 .playlist-container--right。
+    //   5) 插入后只校验「被移除/换父」，绝不动同级顺序。
+    const PANEL_HOST_ID = 'bili-helper-ai-panel-host'
+    const PANEL_HOST_CLASS = 'bili-helper-ai-panel-host'
+    const PANEL_COLUMN_SELECTORS = [
+      '.right-container-inner.scroll-sticky',
+      '.right-container-inner',
+      '.right-container',
+      '.playlist-container--right',
+    ]
+    const PANEL_UP_SELECTOR = '.up-panel-container'
+    const PANEL_COMMENTS_PROBE = '#commentapp bili-comments'
+    const PANEL_WIDE_SELECTOR = '.bpx-player-ctrl-wide.bpx-state-entered'
+    const PANEL_DANMAKU_SELECTOR = '#danmukuBox'
+    const PANEL_COMMENTS_TIMEOUT_MS = 8_000
+    const PANEL_QUIET_TIMEOUT_MS = 12_000
+    const PANEL_QUIET_WINDOW_MS = 600
+    const PANEL_FADE_IN_MS = 800
+
+    let panelWrapper: HTMLDivElement | null = null
+    let panelPlacedParent: HTMLElement | null = null
+    let panelAnchor: Element | null = null
+    let panelAnchorAt: number | null = null
+    let panelCommentsSeen = false
+    let panelRightQuietAt: number | null = null
+    let panelColumnObserver: MutationObserver | null = null
+    let panelObservedColumn: Element | null = null
 
     function findPanelColumn(): HTMLElement | null {
       for (const selector of PANEL_COLUMN_SELECTORS) {
@@ -329,46 +353,104 @@ export default defineContentScript({
       return null
     }
 
-    let panelAnchor: Element | null = null
-    let panelAnchorSightedAt: number | null = null
+    /** 右栏静止探针：childList 变化即重置计时，周期检查拍点距上次变化 ≥600ms 视为静止。 */
+    function observePanelColumn(column: Element): void {
+      if (panelObservedColumn === column && panelColumnObserver) return
+      panelColumnObserver?.disconnect()
+      panelColumnObserver = new MutationObserver(() => {
+        panelRightQuietAt = Date.now()
+      })
+      panelColumnObserver.observe(column, { childList: true, subtree: true })
+      panelObservedColumn = column
+      panelRightQuietAt = Date.now()
+    }
+
+    function detachPanel(): void {
+      panelWrapper?.remove()
+      panelWrapper = null
+      panelPlacedParent = null
+      const wxtHost = panelMount?.shadowHost
+      if (wxtHost) wxtHost.style.display = 'none'
+    }
 
     function ensurePanelPlacement(): void {
-      const host = panelMount?.shadowHost
-      if (!host) return
+      const wxtHost = panelMount?.shadowHost
+      if (!wxtHost || !panelContainer) return
+      // 门 1：整页 load 完成（原版 ug）。
+      if (window.document.readyState !== 'complete') {
+        detachPanel()
+        return
+      }
       const column = findPanelColumn()
-      const up = column?.querySelector<HTMLElement>(PANEL_UP_ANCHOR_SELECTOR) ?? null
-      if (!column || !up) {
+      const up = column?.querySelector<HTMLElement>(PANEL_UP_SELECTOR) ?? null
+      if (!column || !up || !column.contains(up)) {
+        // 非视频页 / SPA 过渡：宿主整体移除（原版 xg 语义），锚点状态复位。
         panelAnchor = null
-        panelAnchorSightedAt = null
-        host.style.display = 'none'
+        panelAnchorAt = null
+        panelCommentsSeen = false
+        detachPanel()
         return
       }
+      observePanelColumn(column)
       if (up !== panelAnchor) {
-        // 新锚点（首次出现或 SPA 换视频）：重置稳定等待窗口，本回合先不插入。
+        // 新锚点（首次出现 / SPA 换视频）：先摘除，重走就绪三重门。
         panelAnchor = up
-        panelAnchorSightedAt = Date.now()
-        host.style.display = 'none'
+        panelAnchorAt = Date.now()
+        panelCommentsSeen = window.document.querySelector(PANEL_COMMENTS_PROBE) !== null
+        panelRightQuietAt = Date.now()
+        detachPanel()
         return
       }
-      const settled =
-        PANEL_SETTLE_SELECTORS.every((selector) => column.querySelector(selector) !== null) ||
-        (panelAnchorSightedAt !== null && Date.now() - panelAnchorSightedAt > PANEL_SETTLE_TIMEOUT_MS)
-      if (!settled) {
-        host.style.display = 'none'
-        return
-      }
-      if (!host.isConnected || host.parentElement !== up.parentElement) {
-        try {
-          up.after(host)
-        } catch {
-          host.style.display = 'none'
+      // 门 2：评论区挂载（8s 超时兜底；原版 fg + Mh 探针）。
+      if (!panelCommentsSeen) {
+        panelCommentsSeen = window.document.querySelector(PANEL_COMMENTS_PROBE) !== null
+        if (
+          !panelCommentsSeen &&
+          (panelAnchorAt === null || Date.now() - panelAnchorAt < PANEL_COMMENTS_TIMEOUT_MS)
+        ) {
           return
         }
       }
-      host.style.display = 'block'
+      // 门 3：右栏 600ms 静止（12s 超时兜底；原版 mg）。
+      const quiet =
+        (panelRightQuietAt !== null && Date.now() - panelRightQuietAt >= PANEL_QUIET_WINDOW_MS) ||
+        (panelAnchorAt !== null && Date.now() - panelAnchorAt > PANEL_QUIET_TIMEOUT_MS)
+      if (!quiet) return
+
+      // 落位：已落位且未失位则只确保可见；否则（重）插入。
+      if (panelWrapper?.isConnected && panelPlacedParent !== null) {
+        wxtHost.style.display = ''
+        return
+      }
+      const wide = window.document.querySelector(PANEL_WIDE_SELECTOR) !== null
+      const ref = wide
+        ? window.document.querySelector<HTMLElement>(PANEL_DANMAKU_SELECTOR)
+        : up
+      if (!ref || ref.parentElement !== column) return
+      const wrapper = window.document.createElement('div')
+      wrapper.id = PANEL_HOST_ID
+      wrapper.className = PANEL_HOST_CLASS
+      wrapper.style.cssText =
+        'display:block;width:100%;margin:0 0 12px;opacity:0;transition:opacity 0.2s ease-in-out'
+      wrapper.appendChild(wxtHost)
+      ref.after(wrapper)
+      panelWrapper = wrapper
+      panelPlacedParent = wrapper.parentElement
+      wxtHost.style.display = ''
+      // 首次落位成功才挂载面板应用（原版：先落位后挂应用）。
+      if (!panelAppMounted) {
+        panelAppMounted = true
+        createApp(PanelApp).mount(panelContainer)
+      }
+      // 原版淡入：插入后 800ms 内无人再动 opacity 才现身。
+      window.setTimeout(() => {
+        if (panelWrapper === wrapper && wrapper.style.opacity !== '1') {
+          wrapper.style.opacity = '1'
+        }
+      }, PANEL_FADE_IN_MS)
     }
 
-    // 首次落位等待；SPA 换视频/右栏重渲染由 1.5s 周期检查兜底。
+    // 周期检查驱动就绪三重门与失位重插（原版为 500ms 重试链 + 观察器，这里以 1.5s 周期承担）。
     ensurePanelPlacement()
 
     // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
