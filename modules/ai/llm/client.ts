@@ -84,10 +84,29 @@ export function mapResponseError(response: Response): AiError {
   return statusError(response.status)
 }
 
-/** 非 2xx 的统一映射：401/403 → auth，其余 → http（带 status）。 */
-export function statusError(status: number): AiError {
+/** 非 2xx 的统一映射：401/403 → auth，其余 → http（带 status；能带上游原因就带上）。 */
+export function statusError(status: number, detail?: string): AiError {
   const kind = status === 401 || status === 403 ? 'auth' : 'http'
-  return new AiError(kind, `端点返回了 ${status}`, { status })
+  const message = detail ? `端点返回了 ${status}：${detail}` : `端点返回了 ${status}`
+  return new AiError(kind, message, { status })
+}
+
+/**
+ * 提取上游错误响应里的原因（OpenAI 形 {error:{message}} 与 Anthropic 形
+ * {type:'error', error:{message}} 都认）：400 这类被拒请求的具体原因（模型名不对、
+ * max_tokens 超限等）只在响应体里，不带出来用户就只能瞎猜。
+ */
+export function extractUpstreamMessage(text: string): string | undefined {
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(data)) return undefined
+  const error = isRecord(data.error) ? data.error : undefined
+  const message = error && typeof error.message === 'string' ? error.message : undefined
+  return message && message.trim() !== '' ? message.slice(0, 160) : undefined
 }
 
 export function mapJsonFailure(cause: unknown): AiError {
@@ -253,7 +272,7 @@ async function requestJson(
   signal?: AbortSignal,
 ): Promise<unknown> {
   const response = await performFetch(url, init, { timeoutMs, signal })
-  if (!response.ok) throw statusError(response.status)
+  if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
   let data: unknown
   try {
     data = JSON.parse(await response.text())
@@ -318,7 +337,7 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
     REQUEST_TIMEOUT_MS,
     params.signal,
   )
-  if (!response.ok) throw statusError(response.status)
+  if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
   let data: unknown
   try {
     data = JSON.parse(await response.text())
@@ -433,7 +452,7 @@ export async function chatCompletionStream(
     undefined,
     params.signal,
   )
-  if (!response.ok) throw statusError(response.status)
+  if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
   // 200 也可能是代理/网关的 HTML 错误页：按解析失败处理，而不是把空流当成功。
   if (response.contentType.toLowerCase().includes('text/html')) {
     throw new AiError('parse', '端点返回了 HTML 页面而不是流式响应，请确认端点地址是否正确')
@@ -581,9 +600,11 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
       lastStatus = response.status
       if (response.status === 401 || response.status === 403) continue // 换下一种鉴权头再试
       if (response.status === 404 || response.status === 405) break // 这段路由不存在，换下一段路径
-      throw new AiError('http', `模型列表拉取失败（HTTP ${response.status}）`, {
-        status: response.status,
-      })
+      throw new AiError(
+        'http',
+        `模型列表拉取失败（HTTP ${response.status}）${suffixOf(await response.text())}`,
+        { status: response.status },
+      )
     }
   }
   const hint =
@@ -593,6 +614,12 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
   throw new AiError('http', `模型列表拉取失败（HTTP ${lastStatus}）${hint}`, {
     status: lastStatus,
   })
+}
+
+/** 上游原因的短后缀（有就带，没有就空串）。 */
+function suffixOf(text: string): string {
+  const message = extractUpstreamMessage(text)
+  return message ? `：${message}` : ''
 }
 
 function parseModelIds(data: unknown): string[] {

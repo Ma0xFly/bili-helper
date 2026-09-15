@@ -72,6 +72,10 @@ export function describeTestFailure(error: unknown): string {
       if (error.status === 404) {
         return '端点返回 404：地址带/不带 /v1 两种拼法都试过仍未命中，请核对地址与协议（OpenAI / Anthropic）'
       }
+      if (error.message !== `端点返回了 ${error.status}`) {
+        // 带上游原因（模型名/参数被拒的具体信息只在响应体里）。
+        return error.message
+      }
       return `端点返回 ${error.status ?? '错误'}：请检查端点地址是否正确；5xx 可稍后重试`
     case 'parse':
       if (error.message === '端点返回了空回复') return error.message

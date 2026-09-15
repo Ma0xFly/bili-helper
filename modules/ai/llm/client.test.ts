@@ -561,6 +561,30 @@ describe('路径双拼法回退（base 带/不带 /v1）', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('非 2xx 带上游原因：400 的响应体 error.message 透传到错误文案', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          { error: { code: 'InvalidParameter', message: 'max_tokens exceeds the model limit 8192' } },
+          400,
+        ),
+      ),
+    )
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'http',
+      message: '端点返回了 400：max_tokens exceeds the model limit 8192',
+    })
+  })
+
+  it('非 2xx 无可读原因：维持「端点返回了 N」原始形状', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse('plain', 502)))
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'http',
+      message: '端点返回了 502',
+    })
+  })
+
   it('401 不触发路径回退（直接映射 auth，一次请求）', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({}, 401))
     vi.stubGlobal('fetch', fetchMock)

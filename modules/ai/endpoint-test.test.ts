@@ -92,6 +92,10 @@ describe('describeTestFailure（kind → 红灯文案映射）', () => {
     expect(describeTestFailure(new AiError('config', '先去设置页配置端点'))).toBe('先去设置页配置端点')
     expect(describeTestFailure(new AiError('auth', '端点返回了 403', { status: 403 }))).toContain('未授权')
     expect(describeTestFailure(new AiError('http', '端点返回了 502', { status: 502 }))).toContain('端点返回 502')
+    // 带上游原因（如 400 响应体里的 error.message）时直接透传，不再只报状态码。
+    expect(
+      describeTestFailure(new AiError('http', '端点返回了 400：max_tokens 超限', { status: 400 })),
+    ).toBe('端点返回了 400：max_tokens 超限')
     expect(describeTestFailure(new AiError('parse', '坏格式'))).toContain('协议')
     expect(describeTestFailure(new AiError('network', '断了'))).toContain('系统代理')
     expect(describeTestFailure(new Error('未知'))).toContain('未知错误')
