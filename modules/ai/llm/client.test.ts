@@ -570,6 +570,36 @@ describe('路径双拼法回退（base 带/不带 /v1）', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('anthropic：x-api-key 401 → 换 Bearer 头重试成功（方舟 Coding 网关只认 Bearer）', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      if ('x-api-key' in headers) return jsonResponse({}, 401)
+      if ('Authorization' in headers) {
+        return jsonResponse({ content: [{ type: 'text', text: '答' }] })
+      }
+      return jsonResponse({}, 401)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await chatCompletion({
+      endpoint: { baseUrl: 'https://ark.example/api/coding/v1', model: 'm-1', apiKey: 'k-1', format: 'anthropic' },
+      messages: MESSAGES,
+    })
+    expect(result.content).toBe('答')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const secondHeaders = (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.headers as Record<string, string>
+    expect(secondHeaders.Authorization).toBe('Bearer k-1')
+    expect(secondHeaders['x-api-key']).toBeUndefined()
+  })
+
+  it('anthropic：两种鉴权头都 401 → 映射 auth（最后一次的 status），共两次请求', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}, 401))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      chatCompletion({ endpoint: { ...ENDPOINT, apiKey: 'bad', format: 'anthropic' }, messages: MESSAGES }),
+    ).rejects.toMatchObject({ kind: 'auth', status: 401 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('流式请求同样回退：/messages 404 → /v1/messages 命中', async () => {
     const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
       String(url).endsWith('/v1/messages')

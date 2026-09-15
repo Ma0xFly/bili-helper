@@ -200,6 +200,14 @@ function anthropicHeaders(apiKey: string, withContentType = true): Record<string
   return headers
 }
 
+/** Anthropic 的 Bearer 形态：Claude Code 类网关（如火山方舟 Coding）只认 ANTHROPIC_AUTH_TOKEN 的 Bearer。 */
+function anthropicBearerHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = { 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' }
+  const key = apiKey.trim()
+  if (key) headers.Authorization = `Bearer ${key}`
+  return headers
+}
+
 /**
  * OpenAI 消息 → Anthropic Messages 体：system 角色提到顶层 system 字段（Anthropic 不收 system 消息），
  * user/assistant 轮次原样搬移；max_tokens 是必填项。
@@ -256,11 +264,13 @@ async function requestJson(
 }
 
 /**
- * 补全请求的路径拼法有两种并存约定：官方文档的 baseUrl 自带 /v1（…/v1/messages、
- * …/v1/chat/completions），而 Claude Code 类网关（如火山方舟 Coding 端点）按
- * ANTHROPIC_BASE_URL 不带 /v1、路由挂在 /v1/messages。两种拼法按序尝试：
- * 404/405 意味着「这一段路由不存在」，换下一段再试；其余状态（401/429/5xx）与路径无关，
- * 原样返回交给上层映射——这样用户粘贴两种形态的地址都能直接用。
+ * 补全请求按序尝试两个维度：
+ * - 路径拼法：官方文档的 baseUrl 自带 /v1（…/v1/messages、…/v1/chat/completions），
+ *   而 Claude Code 类网关（如火山方舟 Coding 端点）按 ANTHROPIC_BASE_URL 不带 /v1、
+ *   路由挂在 /v1/messages。404/405 意味着「这一段路由不存在」，换下一段；
+ * - 鉴权头（仅 anthropic）：官方是 x-api-key，Claude Code 类网关只认
+ *   ANTHROPIC_AUTH_TOKEN 的 Bearer 形态。401/403 换下一种头再试（未生成不烧 token）。
+ * 其余状态与两个维度无关，原样返回交给上层映射——用户粘贴哪种形态的地址和网关都能直接用。
  */
 async function postChat(
   endpoint: ChatEndpoint,
@@ -269,17 +279,27 @@ async function postChat(
   signal?: AbortSignal,
 ): Promise<HttpResponseLike> {
   const anthropic = isAnthropic(endpoint)
-  const headers = anthropic ? anthropicHeaders(endpoint.apiKey) : authHeaders(endpoint.apiKey)
+  const key = endpoint.apiKey.trim()
+  const headerVariants: Record<string, string>[] = anthropic
+    ? [anthropicHeaders(endpoint.apiKey), ...(key === '' ? [] : [anthropicBearerHeaders(endpoint.apiKey)])]
+    : [authHeaders(endpoint.apiKey)]
   const paths = anthropic ? ['messages', 'v1/messages'] : ['chat/completions', 'v1/chat/completions']
   let response: HttpResponseLike | undefined
   for (const path of paths) {
-    const attempt = await performFetch(
-      joinApiUrl(endpoint.baseUrl, path),
-      { method: 'POST', headers, body },
-      timeoutMs === undefined ? {} : { timeoutMs, signal },
-    )
-    response = attempt
-    if (attempt.status !== 404 && attempt.status !== 405) return attempt
+    for (let variant = 0; variant < headerVariants.length; variant++) {
+      const attempt = await performFetch(
+        joinApiUrl(endpoint.baseUrl, path),
+        { method: 'POST', headers: headerVariants[variant] as Record<string, string>, body },
+        timeoutMs === undefined ? {} : { timeoutMs, signal },
+      )
+      response = attempt
+      // 还有别的鉴权头形态可试时才在 401/403 上换头重试；只剩一种说明就是 Key 的问题。
+      if ((attempt.status === 401 || attempt.status === 403) && variant < headerVariants.length - 1) {
+        continue
+      }
+      if (attempt.status === 404 || attempt.status === 405) break // 这段路由不存在，换下一段路径
+      return attempt
+    }
   }
   return response as HttpResponseLike
 }
