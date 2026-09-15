@@ -43,10 +43,10 @@ describe('testChatEndpoint', () => {
     expect(result).toEqual({ ok: false, reason: '端点返回了空回复' })
   })
 
-  it('网络失败红灯：reason 覆盖 CORS 未放行排查提示', async () => {
+  it('网络失败红灯：reason 给出系统代理排查方向', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))))
     const result = await testChatEndpoint({ baseUrl: 'https://llm.example/v1', model: 'm-1', apiKey: 'k' })
-    if (!result.ok) expect(result.reason).toContain('CORS')
+    if (!result.ok) expect(result.reason).toContain('系统代理')
     else throw new Error('应当失败')
   })
 
@@ -93,7 +93,7 @@ describe('describeTestFailure（kind → 红灯文案映射）', () => {
     expect(describeTestFailure(new AiError('auth', '端点返回了 403', { status: 403 }))).toContain('未授权')
     expect(describeTestFailure(new AiError('http', '端点返回了 502', { status: 502 }))).toContain('端点返回 502')
     expect(describeTestFailure(new AiError('parse', '坏格式'))).toContain('协议')
-    expect(describeTestFailure(new AiError('network', '断了'))).toContain('CORS')
+    expect(describeTestFailure(new AiError('network', '断了'))).toContain('系统代理')
     expect(describeTestFailure(new Error('未知'))).toContain('未知错误')
   })
 })

@@ -540,8 +540,9 @@ onMounted(loadUserCorpus)
               </option>
             </select>
             <span class="field-hint">
-              选中即填入对应地址，模型可点「拉取模型」取真实列表。浏览器直连要求服务商放行跨域（CORS）：
-              本地 Ollama / LM Studio 需开启跨域允许；云端被拦时改走下方「服务器转发」。
+              选中即填入对应地址，模型可点「拉取模型」取真实列表。请求经扩展后台发起，
+              不受页面跨域（CORS）限制；但会走系统代理——本地代理工具（如 Clash）
+              需放行端点域名，被拦时可在代理里配直连规则或改走「服务器转发」。
             </span>
           </div>
           <div class="field">

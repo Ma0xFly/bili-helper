@@ -7,6 +7,109 @@ import {
   listModels,
   withDeadline,
 } from './client'
+import { attachNetRelay, setNetRelayConnect } from './net-relay'
+import type { RelayPort } from './net-relay'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  setNetRelayConnect(undefined)
+})
+
+describe('内容脚本经后台中继（net-relay）', () => {
+  /** 客户端 ⇄ 宿主内存端口对：宿主侧绑定全局 fetch 桩，模拟后台代取。
+   *  每次连接生成全新端口对（真实 runtime.connect 每次也是新端口，不复用断开态）。 */
+  function enableRelayWithHostFetch(): void {
+    const mk = (): {
+      messageListeners: Array<(message: unknown) => void>
+      disconnectListeners: Array<() => void>
+      disconnected: boolean
+    } => ({ messageListeners: [], disconnectListeners: [], disconnected: false })
+    const endOf = (self: ReturnType<typeof mk>, peer: ReturnType<typeof mk>): RelayPort => ({
+      postMessage(message: unknown): void {
+        if (self.disconnected) return
+        queueMicrotask(() => {
+          if (self.disconnected) return
+          for (const listener of peer.messageListeners) listener(message)
+        })
+      },
+      disconnect(): void {
+        if (self.disconnected) return
+        self.disconnected = true
+        for (const listener of self.disconnectListeners) listener()
+        if (!peer.disconnected) {
+          peer.disconnected = true
+          for (const listener of peer.disconnectListeners) listener()
+        }
+      },
+      onMessage: { addListener: (listener: (message: unknown) => void) => self.messageListeners.push(listener) },
+      onDisconnect: { addListener: (listener: () => void) => self.disconnectListeners.push(listener) },
+    })
+    setNetRelayConnect(() => {
+      const a = mk()
+      const b = mk()
+      attachNetRelay(endOf(b, a))
+      return endOf(a, b)
+    })
+  }
+
+  it('chatCompletion 经中继成功：请求由宿主发出（URL/头/体一致），结果同直连', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(OPEN_AI_COMPLETION('中继答案')))
+    vi.stubGlobal('fetch', fetchMock)
+    enableRelayWithHostFetch()
+    const result = await chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })
+    expect(result.content).toBe('中继答案')
+    const { url, init } = fetchCall(fetchMock)
+    expect(url).toBe('https://llm.example/v1/chat/completions')
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer k-1')
+    expect(JSON.parse(String(init?.body))).toMatchObject({ model: 'm-1', messages: MESSAGES })
+  })
+
+  it('中继路径回退同样生效：/messages 404 → /v1/messages 命中（方舟 Coding 形态）', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/v1/messages')
+        ? jsonResponse({ content: [{ type: 'text', text: '答' }] })
+        : new Response('not found', { status: 404 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    enableRelayWithHostFetch()
+    const result = await chatCompletion({
+      endpoint: { baseUrl: 'https://ark.example/api/coding', model: 'm-1', apiKey: 'k-1', format: 'anthropic' },
+      messages: MESSAGES,
+    })
+    expect(result.content).toBe('答')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('中继流式：SSE 分块经端口桥接逐段下发', async () => {
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"content":"你"}}]}',
+        'data: {"choices":[{"delta":{"content":"好"}}]}',
+        'data: [DONE]',
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    enableRelayWithHostFetch()
+    const chunks: string[] = []
+    const result = await chatCompletionStream({
+      endpoint: ENDPOINT,
+      messages: MESSAGES,
+      onChunk: (chunk) => chunks.push(chunk),
+    })
+    expect(chunks).toEqual(['你', '好'])
+    expect(result.content).toBe('你好')
+  })
+
+  it('中继宿主网络失败 → AiError network（与直连同口径）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))))
+    enableRelayWithHostFetch()
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'network',
+      message: '请求发不出去，请检查端点地址与网络',
+    })
+  })
+})
+
 
 const ENDPOINT = { baseUrl: 'https://llm.example/v1', model: 'm-1', apiKey: 'k-1' }
 const MESSAGES = [{ role: 'user' as const, content: '你好' }]

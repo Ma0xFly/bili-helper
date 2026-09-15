@@ -79,6 +79,7 @@ export function describeTestFailure(error: unknown): string {
     case 'network':
       return error.message === '请求超时'
         ? '请求超时：端点未在限定时间内响应，请检查端点是否可用'
-        : '请求没发出去：请检查端点地址与网络；浏览器直连时请确认端点已放行 B 站域名 CORS'
+        : '请求没发出去：请检查网络与系统代理——浏览器流量可能经过本地代理（如 Clash），'
+          + '需为该端点域名放行或配置直连规则；请求经扩展后台发起，不受页面跨域限制'
   }
 }

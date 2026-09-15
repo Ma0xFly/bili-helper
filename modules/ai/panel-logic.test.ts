@@ -172,7 +172,7 @@ describe('panelErrorCopy（EXPERIENCE 文案表）', () => {
   it('network', () => {
     const copy = panelErrorCopy({ kind: 'network', message: 'x' })
     expect(copy.title).toBe('AI 掉线了，去看看端点设置？')
-    expect(copy.hint).toContain('CORS')
+    expect(copy.hint).toContain('系统代理')
   })
 
   it('http 带状态码且 5xx 提示稍后重试', () => {

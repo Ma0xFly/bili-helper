@@ -5,6 +5,7 @@
 // 坏 JSON/形状不符→parse、未配置→config。凭据只进鉴权头，不落日志。
 
 import { AiError } from '../../shared/error'
+import { netRelayEnabled, netRelayFetch } from './net-relay'
 
 export interface OpenAiChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -80,12 +81,94 @@ export function mapNetworkError(cause: unknown): AiError {
 }
 
 export function mapResponseError(response: Response): AiError {
-  const kind = response.status === 401 || response.status === 403 ? 'auth' : 'http'
-  return new AiError(kind, `端点返回了 ${response.status}`, { status: response.status })
+  return statusError(response.status)
+}
+
+/** 非 2xx 的统一映射：401/403 → auth，其余 → http（带 status）。 */
+export function statusError(status: number): AiError {
+  const kind = status === 401 || status === 403 ? 'auth' : 'http'
+  return new AiError(kind, `端点返回了 ${status}`, { status })
 }
 
 export function mapJsonFailure(cause: unknown): AiError {
   return new AiError('parse', '响应不是合法 JSON，请确认端点是否 OpenAI 兼容', { cause })
+}
+
+/** 统一的响应形状：直连取自 fetch Response；中继路径为端口桥接流（body/text 语义一致）。 */
+interface HttpResponseLike {
+  ok: boolean
+  status: number
+  contentType: string
+  body: ReadableStream<Uint8Array> | undefined
+  text(): Promise<string>
+}
+
+interface PerformFetchInit {
+  method: string
+  headers: Record<string, string>
+  body?: string
+}
+
+/**
+ * 直连层的唯一网络出口：内容脚本里装配了中继（setNetRelayConnect）就走后台代取
+ * （后台带 host_permissions，不受页面 CORS 约束）；扩展页/后台/测试里未装配则直接
+ * fetch（这些上下文本就豁免 CORS）。timeoutMs：直连路径折进 fetch 死线 signal，
+ * 中继路径由宿主侧死线兜底；省略即不限时（流式请求，由消费方 abort）。
+ */
+async function performFetch(
+  url: string,
+  init: PerformFetchInit,
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<HttpResponseLike> {
+  if (netRelayEnabled()) {
+    const result = await netRelayFetch(
+      {
+        url,
+        method: init.method,
+        headers: init.headers,
+        ...(init.body === undefined ? {} : { body: init.body }),
+        ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+      },
+      opts.signal,
+    )
+    return {
+      ok: result.ok,
+      status: result.status,
+      contentType: result.contentType,
+      body: result.body,
+      text: () => streamToText(result.body),
+    }
+  }
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: init.method,
+      headers: init.headers,
+      ...(init.body === undefined ? {} : { body: init.body }),
+      signal: opts.timeoutMs === undefined ? opts.signal : withDeadline(opts.signal, opts.timeoutMs),
+    })
+  } catch (cause) {
+    throw mapNetworkError(cause)
+  }
+  return {
+    ok: response.ok,
+    status: response.status,
+    contentType: response.headers.get('content-type') ?? '',
+    body: response.body ?? undefined,
+    text: () => response.text(),
+  }
+}
+
+async function streamToText(body: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let text = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value !== undefined) text += decoder.decode(value, { stream: true })
+  }
+  return text + decoder.decode()
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -155,19 +238,21 @@ function parseAnthropicContent(data: unknown): string {
   return text
 }
 
-async function requestJson(url: string, init: RequestInit): Promise<unknown> {
-  let response: Response
+async function requestJson(
+  url: string,
+  init: PerformFetchInit,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const response = await performFetch(url, init, { timeoutMs, signal })
+  if (!response.ok) throw statusError(response.status)
+  let data: unknown
   try {
-    response = await fetch(url, init)
-  } catch (cause) {
-    throw mapNetworkError(cause)
-  }
-  if (!response.ok) throw mapResponseError(response)
-  try {
-    return await response.json()
+    data = JSON.parse(await response.text())
   } catch (cause) {
     throw mapJsonFailure(cause)
   }
+  return data
 }
 
 /**
@@ -180,23 +265,23 @@ async function requestJson(url: string, init: RequestInit): Promise<unknown> {
 async function postChat(
   endpoint: ChatEndpoint,
   body: string,
+  timeoutMs: number | undefined,
   signal?: AbortSignal,
-): Promise<Response> {
+): Promise<HttpResponseLike> {
   const anthropic = isAnthropic(endpoint)
   const headers = anthropic ? anthropicHeaders(endpoint.apiKey) : authHeaders(endpoint.apiKey)
   const paths = anthropic ? ['messages', 'v1/messages'] : ['chat/completions', 'v1/chat/completions']
-  let response: Response | undefined
+  let response: HttpResponseLike | undefined
   for (const path of paths) {
-    let attempt: Response
-    try {
-      attempt = await fetch(joinApiUrl(endpoint.baseUrl, path), { method: 'POST', headers, body, signal })
-    } catch (cause) {
-      throw mapNetworkError(cause)
-    }
+    const attempt = await performFetch(
+      joinApiUrl(endpoint.baseUrl, path),
+      { method: 'POST', headers, body },
+      timeoutMs === undefined ? {} : { timeoutMs, signal },
+    )
     response = attempt
     if (attempt.status !== 404 && attempt.status !== 405) return attempt
   }
-  return response as Response
+  return response as HttpResponseLike
 }
 
 export async function chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
@@ -210,12 +295,13 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
         ? anthropicBody(params.endpoint, params.messages, false)
         : { model: params.endpoint.model, messages: params.messages },
     ),
-    withDeadline(params.signal, REQUEST_TIMEOUT_MS),
+    REQUEST_TIMEOUT_MS,
+    params.signal,
   )
-  if (!response.ok) throw mapResponseError(response)
+  if (!response.ok) throw statusError(response.status)
   let data: unknown
   try {
-    data = await response.json()
+    data = JSON.parse(await response.text())
   } catch (cause) {
     throw mapJsonFailure(cause)
   }
@@ -324,12 +410,12 @@ export async function chatCompletionStream(
         ? anthropicBody(params.endpoint, params.messages, true)
         : { model: params.endpoint.model, messages: params.messages, stream: true },
     ),
+    undefined,
     params.signal,
   )
-  if (!response.ok) throw mapResponseError(response)
+  if (!response.ok) throw statusError(response.status)
   // 200 也可能是代理/网关的 HTML 错误页：按解析失败处理，而不是把空流当成功。
-  const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
-  if (contentType.includes('text/html')) {
+  if (response.contentType.toLowerCase().includes('text/html')) {
     throw new AiError('parse', '端点返回了 HTML 页面而不是流式响应，请确认端点地址是否正确')
   }
   const body = response.body
@@ -376,12 +462,16 @@ export async function chatCompletionStream(
 export async function embeddings(params: EmbeddingsParams): Promise<number[][]> {
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
-  const data = await requestJson(joinApiUrl(params.endpoint.baseUrl, 'embeddings'), {
-    method: 'POST',
-    headers: authHeaders(params.endpoint.apiKey),
-    body: JSON.stringify({ model: params.endpoint.model, input: params.inputs }),
-    signal: withDeadline(params.signal, REQUEST_TIMEOUT_MS),
-  })
+  const data = await requestJson(
+    joinApiUrl(params.endpoint.baseUrl, 'embeddings'),
+    {
+      method: 'POST',
+      headers: authHeaders(params.endpoint.apiKey),
+      body: JSON.stringify({ model: params.endpoint.model, input: params.inputs }),
+    },
+    REQUEST_TIMEOUT_MS,
+    params.signal,
+  )
   const root = isRecord(data) ? data : undefined
   const list = root && Array.isArray(root.data) ? root.data : undefined
   if (!list || list.length !== params.inputs.length) {
@@ -426,7 +516,6 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
   requireBaseUrl(params.baseUrl)
   const anthropic = params.format === 'anthropic'
   const key = params.apiKey.trim()
-  const signal = withDeadline(params.signal, PROBE_TIMEOUT_MS)
 
   const authVariants: Record<string, string>[] = []
   if (key !== '') {
@@ -439,10 +528,10 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
   }
   authVariants.push({})
 
-  const parse = async (response: Response): Promise<string[]> => {
+  const parse = async (response: HttpResponseLike): Promise<string[]> => {
     let data: unknown
     try {
-      data = await response.json()
+      data = JSON.parse(await response.text())
     } catch (cause) {
       throw mapJsonFailure(cause)
     }
@@ -453,15 +542,16 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
     return ids
   }
 
+  // 一条死线覆盖整条探测链（两个路径 × 若干鉴权头变体），超时算一次失败。
+  const deadline = withDeadline(params.signal, PROBE_TIMEOUT_MS)
   let lastStatus = 0
   for (const path of ['models', 'v1/models']) {
     for (const headers of authVariants) {
-      let response: Response
-      try {
-        response = await fetch(joinApiUrl(params.baseUrl, path), { method: 'GET', headers, signal })
-      } catch (cause) {
-        throw mapNetworkError(cause)
-      }
+      const response = await performFetch(
+        joinApiUrl(params.baseUrl, path),
+        { method: 'GET', headers },
+        { signal: deadline },
+      )
       if (response.ok) {
         // 去重保序：下拉列表以 id 为 key，重复会触发 Vue 重复 key 告警。
         const seen: string[] = []

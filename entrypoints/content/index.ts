@@ -35,6 +35,7 @@ import type {
   PanelToggleResponse,
 } from '../../modules/content/protocol'
 import { extractBvidFromUrl } from '../../modules/video/collectors'
+import { NET_RELAY_PORT_NAME, setNetRelayConnect } from '../../modules/ai/llm/net-relay'
 
 // 一切注入 UI 寄居 Shadow DOM。cssInjectionMode:"ui" 让引入的 overlay.css/uno.css
 // 经 createShadowRootUi 注入 shadow root，与 B 站页面样式完全隔离。
@@ -43,6 +44,10 @@ export default defineContentScript({
   matches: ['https://www.bilibili.com/video/*'],
   cssInjectionMode: 'ui',
   async main(ctx) {
+    // AI 直连流量改走后台代取：内容脚本运行在页面源上，跨域 fetch 受页面 CORS 约束
+    // （端点不放行 B 站源就永远连不上）；后台 SW 带 host_permissions 豁免 CORS。
+    // 必须在任何 AI 调用发生前装配（import 期即可，main 开头做同样保险）。
+    setNetRelayConnect(() => browser.runtime.connect({ name: NET_RELAY_PORT_NAME }))
     let uiMount: Awaited<ReturnType<typeof createShadowRootUi<HTMLElement>>> | null = null
     // 面板独立宿主：文档流内联（插进 B 站右栏），与覆盖层 host（fixed 铺满视口）分开。
     let panelMount: Awaited<ReturnType<typeof createShadowRootUi<HTMLElement>>> | null = null
