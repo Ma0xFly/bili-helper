@@ -301,7 +301,7 @@ describe('options AI 助手表单', () => {
     expect((await storedSettings()).apiUrl).toBe('https://my-proxy.example/v1')
   })
 
-  it('一键体检（local）：只探对话+向量端点，不碰服务器；继承态不单独报绿', async () => {
+  it('内联对话测试：只发对话请求，就地报绿；不碰服务器与向量', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: {
         mode: 'local',
@@ -314,57 +314,37 @@ describe('options AI 助手表单', () => {
 
     const wrapper = mount(App)
     await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
+    await wrapper.find('button[aria-label="测试对话端点"]').trigger('click')
     await flushPromises()
 
     expect(calls).toContain('https://chat.example/v1/chat/completions')
-    expect(calls).toContain('https://chat.example/v1/embeddings')
-    expect(calls.some((url) => url.includes('/ai/health'))).toBe(false)
-    // 向量端点继承对话端点且探测通过 → 只报一条绿灯，不重复噪音。
+    expect(calls.some((url) => url.includes('/embeddings') || url.includes('/ai/health'))).toBe(false)
     const feedback = wrapper.findAll('.feedback')
     expect(feedback).toHaveLength(1)
-    expect(feedback[0]?.text()).toContain('对话端点连接成功')
+    expect(feedback[0]?.classes()).toContain('ok')
+    expect(feedback[0]?.text()).toContain('连接成功')
+    expect(feedback[0]?.text()).toContain('m-1')
   })
 
-  it('一键体检（server）：只探服务器，不探本机端点', async () => {
+  it('内联服务器测试：探 /ai/health，开关没开时按钮不存在', async () => {
     await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example', serverToken: 'tok' },
+      aiAssistantSettings: { mode: 'local', serverBaseUrl: 'https://srv.example', serverToken: 'tok' },
     })
     const calls = stubProbeFetch()
 
     const wrapper = mount(App)
     await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
+    expect(wrapper.find('button[aria-label="测试服务器连接"]').exists()).toBe(false)
+
+    await wrapper.find('input[aria-label="使用自己的服务器"]').setValue(true)
+    await wrapper.find('button[aria-label="测试服务器连接"]').trigger('click')
     await flushPromises()
 
     expect(calls).toEqual(['https://srv.example/ai/health'])
-    expect(wrapper.findAll('.feedback')[0]?.text()).toContain('服务器连接成功')
+    expect(wrapper.find('.feedback.ok')?.text()).toContain('连接成功')
   })
 
-  it('一键体检（auto）：服务器与回退端点都探——回退路径必须真的可用', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: {
-        mode: 'auto',
-        apiUrl: 'https://chat.example/v1',
-        model: 'm-1',
-        apiKey: 'k-1',
-        serverBaseUrl: 'https://srv.example',
-      },
-    })
-    const calls = stubProbeFetch()
-
-    const wrapper = mount(App)
-    await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    expect(calls).toContain('https://srv.example/ai/health')
-    expect(calls).toContain('https://chat.example/v1/chat/completions')
-    expect(calls).toContain('https://chat.example/v1/embeddings')
-    expect(wrapper.findAll('.feedback')).toHaveLength(2)
-  })
-
-  it('一键体检：服务器未实现体检接口报黄灯，不当成失败', async () => {
+  it('内联服务器测试：未提供体检接口报黄灯，不当成失败', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example' },
     })
@@ -372,17 +352,22 @@ describe('options AI 助手表单', () => {
 
     const wrapper = mount(App)
     await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
+    await wrapper.find('button[aria-label="测试服务器连接"]').trigger('click')
     await flushPromises()
 
-    const feedback = wrapper.findAll('.feedback')
-    expect(feedback[0]?.classes()).toContain('warn')
-    expect(feedback[0]?.text()).toContain('未提供体检接口')
+    const feedback = wrapper.find('.feedback')
+    expect(feedback.classes()).toContain('warn')
+    expect(feedback.text()).toContain('未提供体检接口')
   })
 
-  it('体检运行中按钮禁用；结果只反映最新一轮，不累积', async () => {
+  it('内联测试运行中按钮禁用；结果只反映最新一轮，不累积', async () => {
     await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example' },
+      aiAssistantSettings: {
+        mode: 'local',
+        apiUrl: 'https://chat.example/v1',
+        model: 'm-1',
+        apiKey: 'k',
+      },
     })
     let releaseFirst: ((response: Response) => void) | undefined
     let invocation = 0
@@ -392,67 +377,140 @@ describe('options AI 助手表单', () => {
         invocation += 1
         // 第一轮挂住，验证按钮进入禁用态（防重入，也就防住了迟到结果覆盖新一轮）。
         if (invocation === 1) return new Promise<Response>((resolve) => { releaseFirst = resolve })
-        return new Response('', { status: 404 })
+        return new Response('{"error":"nope"}', { status: 401 })
       }),
     )
 
     const wrapper = mount(App)
     await flushPromises()
-    const button = findButton(wrapper, '开始体检')
+    const button = wrapper.find('button[aria-label="测试对话端点"]')
     await button.trigger('click')
-    expect(button.text()).toContain('体检中')
+    expect(button.text()).toContain('测试中')
     expect((button.element as HTMLButtonElement).disabled).toBe(true)
 
-    releaseFirst?.(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    releaseFirst?.(new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: 200 }))
     await flushPromises()
     expect(wrapper.findAll('.feedback')).toHaveLength(1)
-    expect(wrapper.find('.feedback.ok')?.text()).toContain('服务器连接成功')
-    expect((findButton(wrapper, '开始体检').element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.find('.feedback.ok')?.text()).toContain('连接成功')
+    expect((wrapper.find('button[aria-label="测试对话端点"]').element as HTMLButtonElement).disabled).toBe(false)
 
-    // 第二轮（404 → 黄灯）：旧绿灯必须被替换，而不是两条并排堆着。
-    await findButton(wrapper, '开始体检').trigger('click')
+    // 第二轮（401）：旧绿灯必须被替换，而不是两条并排堆着。
+    await wrapper.find('button[aria-label="测试对话端点"]').trigger('click')
     await flushPromises()
     const feedback = wrapper.findAll('.feedback')
     expect(feedback).toHaveLength(1)
-    expect(feedback[0]?.classes()).toContain('warn')
+    expect(feedback[0]?.classes()).toContain('fail')
   })
 
-  it('体检汇总徽标：全绿「全部通过」，有失败时红色计数', async () => {
+  it('内联对话测试：红灯给出可执行原因，按钮从「测试中…」恢复', async () => {
     await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1' },
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1', apiKey: 'bad' },
     })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"nope"}', { status: 401 })))
+
     const wrapper = mount(App)
     await flushPromises()
+    await wrapper.find('button[aria-label="测试对话端点"]').trigger('click')
+    await flushPromises()
 
-    // 全绿：chat + embeddings 都 200。
+    const feedback = wrapper.find('.feedback')
+    expect(feedback.classes()).toContain('fail')
+    expect(feedback.text()).toContain('未授权')
+    const button = wrapper.find('button[aria-label="测试对话端点"]')
+    expect(button.text()).toBe('测试连接')
+    expect((button.element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('内联对话测试：没填 Base URL / 模型时直接提示，不发网络请求', async () => {
+    const calls = stubProbeFetch()
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.find('button[aria-label="测试对话端点"]').trigger('click')
+    await flushPromises()
+
+    expect(calls).toHaveLength(0)
+    expect(wrapper.find('.feedback.fail')?.text()).toContain('请先填写 Base URL 和模型')
+  })
+
+  it('内联向量测试：继承对话端点配置就地探测，通过报绿', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: {
+        mode: 'local',
+        apiUrl: 'https://chat.example/v1',
+        model: 'm-1',
+        apiKey: 'k',
+        embedBaseUrl: 'https://emb.example',
+        embedModel: 'bge-m3',
+      },
+    })
+    const calls = stubProbeFetch()
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.find('button[aria-controls="advanced-embed"]').trigger('click')
+    await wrapper.find('button[aria-label="测试向量端点"]').trigger('click')
+    await flushPromises()
+
+    expect(calls).toContain('https://emb.example/embeddings')
+    expect(wrapper.find('.feedback.ok')?.text()).toContain('bge-m3')
+  })
+
+  it('内联向量测试：失败报红并给出原因', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: {
+        mode: 'local',
+        apiUrl: 'https://chat.example/v1',
+        model: 'm-1',
+        apiKey: 'k',
+      },
+    })
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (url: RequestInfo | URL) =>
-        String(url).includes('/embeddings')
-          ? new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1] }] }), { status: 200 })
-          : new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: 200 }),
-      ),
+      vi.fn(async () => new Response('{"error":"boom"}', { status: 500 })),
     )
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-    let summary = wrapper.find('.diag-summary')
-    expect(summary.classes()).toContain('ok')
-    expect(summary.text()).toContain('全部通过')
 
-    // 对话端点 401（向量仍 200 且继承不单独报）：汇总转红并计数。
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: RequestInfo | URL) =>
-        String(url).includes('/embeddings')
-          ? new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1] }] }), { status: 200 })
-          : new Response('{"error":"nope"}', { status: 401 }),
-      ),
-    )
-    await findButton(wrapper, '开始体检').trigger('click')
+    const wrapper = mount(App)
     await flushPromises()
-    summary = wrapper.find('.diag-summary')
-    expect(summary.classes()).toContain('fail')
-    expect(summary.text()).toContain('1 项失败')
+    await wrapper.find('button[aria-controls="advanced-embed"]').trigger('click')
+    await wrapper.find('button[aria-label="测试向量端点"]').trigger('click')
+    await flushPromises()
+
+    const feedback = wrapper.find('.feedback')
+    expect(feedback.classes()).toContain('fail')
+    expect(feedback.text()).toContain('连接失败')
+  })
+
+  it('内联服务器测试：红灯给出可执行原因', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example', serverToken: 'bad' },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.find('button[aria-label="测试服务器连接"]').trigger('click')
+    await flushPromises()
+
+    const feedback = wrapper.find('.feedback')
+    expect(feedback.classes()).toContain('fail')
+    expect(feedback.text()).toContain('连接失败')
+    expect(feedback.text()).toContain('Server Token')
+  })
+
+  it('内联测试用表单当前值：改了地址没保存也测新地址', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { mode: 'local', apiUrl: 'https://old.example/v1', model: 'm-1', apiKey: 'k' },
+    })
+    const calls = stubProbeFetch()
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.find('input[type="url"]').setValue('https://new.example/v1')
+    await wrapper.find('button[aria-label="测试对话端点"]').trigger('click')
+    await flushPromises()
+
+    expect(calls).toContain('https://new.example/v1/chat/completions')
+    expect(calls.some((url) => url.includes('old.example'))).toBe(false)
   })
 
   it('AI 去广告总开关回填并写回 schema', async () => {
@@ -495,111 +553,6 @@ describe('options AI 助手表单', () => {
 
     const checkbox = wrapper.find('input[aria-label="AI 面板显示总开关"]')
     expect((checkbox.element as HTMLInputElement).checked).toBe(false)
-  })
-
-  it('一键体检：对话端点红灯 + 按钮从「体检中…」恢复', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1', apiKey: 'bad' },
-    })
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"nope"}', { status: 401 })))
-
-    const wrapper = mount(App)
-    await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    const feedback = wrapper.findAll('.feedback')
-    expect(feedback.some((item) => item.classes().includes('fail'))).toBe(true)
-    expect(wrapper.text()).toContain('未授权')
-    // 探测失败也必须解锁按钮，否则配置台卡在「体检中…」。
-    expect(findButton(wrapper, '开始体检').text()).toBe('开始体检')
-    expect((findButton(wrapper, '开始体检').element as HTMLButtonElement).disabled).toBe(false)
-  })
-
-  it('一键体检：继承态向量端点失败要单独报红并自动展开高级区', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'local', apiUrl: 'https://chat.example/v1', model: 'm-1', apiKey: 'k' },
-    })
-    // 对话成功、向量失败：这正是「继承态不报绿」规则的反面——出问题必须报，还得指到该改的字段。
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: RequestInfo | URL) =>
-        String(url).includes('/embeddings')
-          ? new Response('{"error":"boom"}', { status: 500 })
-          : new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: 200 }),
-      ),
-    )
-
-    const wrapper = mount(App)
-    await flushPromises()
-    expect((wrapper.find('#advanced-embed').element as HTMLElement).style.display).toBe('none')
-
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    const feedback = wrapper.findAll('.feedback')
-    expect(feedback.some((item) => item.classes().includes('ok'))).toBe(true)
-    const failure = feedback.find((item) => item.classes().includes('fail'))
-    expect(failure?.text()).toContain('向量端点连接失败')
-    expect((wrapper.find('#advanced-embed').element as HTMLElement).style.display).not.toBe('none')
-  })
-
-  it('一键体检：向量端点拆开配置且通过时报两条绿灯', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: {
-        mode: 'local',
-        apiUrl: 'https://chat.example/v1',
-        model: 'm-1',
-        apiKey: 'k',
-        embedBaseUrl: 'https://emb.example',
-        embedModel: 'bge-m3',
-      },
-    })
-    const calls = stubProbeFetch()
-
-    const wrapper = mount(App)
-    await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    expect(calls).toContain('https://emb.example/embeddings')
-    const feedback = wrapper.findAll('.feedback')
-    expect(feedback).toHaveLength(2)
-    expect(feedback.every((item) => item.classes().includes('ok'))).toBe(true)
-    expect(feedback[1]?.text()).toContain('向量端点连接成功')
-  })
-
-  it('一键体检：服务器红灯给出可执行原因', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'server', serverBaseUrl: 'https://srv.example', serverToken: 'bad' },
-    })
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
-
-    const wrapper = mount(App)
-    await flushPromises()
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    const feedback = wrapper.findAll('.feedback')
-    expect(feedback[0]?.classes()).toContain('fail')
-    expect(feedback[0]?.text()).toContain('服务器连接失败')
-    expect(feedback[0]?.text()).toContain('Server Token')
-  })
-
-  it('一键体检用表单当前值：改了地址没保存也测新地址', async () => {
-    await chrome.storage.sync.set({
-      aiAssistantSettings: { mode: 'local', apiUrl: 'https://old.example/v1', model: 'm-1', apiKey: 'k' },
-    })
-    const calls = stubProbeFetch()
-
-    const wrapper = mount(App)
-    await flushPromises()
-    await wrapper.find('input[type="url"]').setValue('https://new.example/v1')
-    await findButton(wrapper, '开始体检').trigger('click')
-    await flushPromises()
-
-    expect(calls).toContain('https://new.example/v1/chat/completions')
-    expect(calls.some((url) => url.includes('old.example'))).toBe(false)
   })
 
   it('导出成功路径：写入剪贴板并报绿灯', async () => {

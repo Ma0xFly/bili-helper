@@ -69,6 +69,9 @@ export function describeTestFailure(error: unknown): string {
     case 'auth':
       return `${error.status ?? '401'} 未授权：请检查 API Key 是否正确，向量端点请确认是否继承了对话 Key`
     case 'http':
+      if (error.status === 404) {
+        return '端点返回 404：地址带/不带 /v1 两种拼法都试过仍未命中，请核对地址与协议（OpenAI / Anthropic）'
+      }
       return `端点返回 ${error.status ?? '错误'}：请检查端点地址是否正确；5xx 可稍后重试`
     case 'parse':
       if (error.message === '端点返回了空回复') return error.message

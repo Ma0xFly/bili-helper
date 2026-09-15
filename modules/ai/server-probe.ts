@@ -1,4 +1,4 @@
-// 设置页「一键体检」的服务器探测：按转发契约探活 {serverBaseUrl}/ai/health。
+// 设置页服务器卡片「测试连接」的探测：按转发契约探活 {serverBaseUrl}/ai/health。
 // 只判定「地址可达 + 鉴权通过」，不代替真实业务请求；第三方实现若没提供 /ai/health，
 // 按「可达但未体检」上报（healthSupported=false），不当成失败——否则老实现会被误判为坏地址。
 

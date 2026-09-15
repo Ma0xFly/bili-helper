@@ -415,6 +415,76 @@ describe('chatCompletionStream（Anthropic SSE）', () => {
   })
 })
 
+describe('路径双拼法回退（base 带/不带 /v1）', () => {
+  it('anthropic：/messages 404 时自动改试 /v1/messages（方舟 Coding 形态）', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/v1/messages')
+        ? jsonResponse({ content: [{ type: 'text', text: '答' }] })
+        : new Response('not found', { status: 404 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await chatCompletion({
+      endpoint: { baseUrl: 'https://ark.example/api/coding', model: 'm-1', apiKey: 'k-1', format: 'anthropic' },
+      messages: MESSAGES,
+    })
+    expect(result.content).toBe('答')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://ark.example/api/coding/messages')
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe('https://ark.example/api/coding/v1/messages')
+  })
+
+  it('openai：/chat/completions 404 时自动改试 /v1/chat/completions', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/v1/chat/completions')
+        ? jsonResponse(OPEN_AI_COMPLETION('好'))
+        : new Response('not found', { status: 404 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await chatCompletion({
+      endpoint: { baseUrl: 'https://relay.example', model: 'm-1', apiKey: 'k-1' },
+      messages: MESSAGES,
+    })
+    expect(result.content).toBe('好')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('两种拼法都 404 → http 错误（带 status），不会无限重试', async () => {
+    const fetchMock = vi.fn(async () => new Response('not found', { status: 404 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'http',
+      status: 404,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('401 不触发路径回退（直接映射 auth，一次请求）', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}, 401))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'auth',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('流式请求同样回退：/messages 404 → /v1/messages 命中', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/v1/messages')
+        ? sseResponse(['data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}', 'data: {"type":"message_stop"}'])
+        : new Response('not found', { status: 404 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const chunks: string[] = []
+    const result = await chatCompletionStream({
+      endpoint: { baseUrl: 'https://ark.example/api/coding', model: 'm-1', apiKey: 'k-1', format: 'anthropic' },
+      messages: MESSAGES,
+      onChunk: (chunk) => chunks.push(chunk),
+    })
+    expect(result.content).toBe('好')
+    expect(chunks).toEqual(['好'])
+  })
+})
+
 describe('listModels（容错对齐开源客户端做法）', () => {
   it('anthropic 格式：x-api-key 头 + 同一 /models 路径', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ data: [{ id: 'claude-sonnet-4' }] }))
@@ -444,6 +514,38 @@ describe('listModels（容错对齐开源客户端做法）', () => {
 
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(['m-1', 'm-2'])))
     expect(await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: '' })).toEqual(['m-1', 'm-2'])
+  })
+
+  it('anthropic：x-api-key 401 → 换 Bearer 再试（Claude Code 类网关只认 Bearer 形态）', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      if ('x-api-key' in headers) return new Response('no', { status: 401 })
+      if ('Authorization' in headers) return jsonResponse({ data: [{ id: 'claude-sonnet-4' }] })
+      return new Response('no', { status: 401 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: 'k-1', format: 'anthropic' })).toEqual([
+      'claude-sonnet-4',
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('路径回退：/models 404 → /v1/models 命中（base 不带 /v1 的用户粘贴）', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/v1/models')
+        ? jsonResponse({ data: [{ id: 'm-1' }] })
+        : new Response('no', { status: 404 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await listModels({ baseUrl: 'https://relay.example', apiKey: 'k-1' })).toEqual(['m-1'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('全部拼法 404 → 文案明说「手动填写模型名」（专用 Messages 网关不提供列表）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('no', { status: 404 })))
+    await expect(
+      listModels({ baseUrl: 'https://ark.example/api/coding', apiKey: 'k-1', format: 'anthropic' }),
+    ).rejects.toThrow(/手动填写模型名/)
   })
 
   it('HTTP 状态码透出（404 → 文案带状态，提示可能不支持 /models）', async () => {

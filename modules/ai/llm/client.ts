@@ -42,12 +42,6 @@ export interface EmbeddingsParams {
   signal?: AbortSignal
 }
 
-export interface ListModelsParams {
-  baseUrl: string
-  apiKey: string
-  signal?: AbortSignal
-}
-
 const CONFIG_HINT = '先去设置页配置端点'
 
 /** 探测类请求（测试连接/拉取模型）的默认超时：配置台交互不能无限悬挂。 */
@@ -176,23 +170,55 @@ async function requestJson(url: string, init: RequestInit): Promise<unknown> {
   }
 }
 
+/**
+ * 补全请求的路径拼法有两种并存约定：官方文档的 baseUrl 自带 /v1（…/v1/messages、
+ * …/v1/chat/completions），而 Claude Code 类网关（如火山方舟 Coding 端点）按
+ * ANTHROPIC_BASE_URL 不带 /v1、路由挂在 /v1/messages。两种拼法按序尝试：
+ * 404/405 意味着「这一段路由不存在」，换下一段再试；其余状态（401/429/5xx）与路径无关，
+ * 原样返回交给上层映射——这样用户粘贴两种形态的地址都能直接用。
+ */
+async function postChat(
+  endpoint: ChatEndpoint,
+  body: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const anthropic = isAnthropic(endpoint)
+  const headers = anthropic ? anthropicHeaders(endpoint.apiKey) : authHeaders(endpoint.apiKey)
+  const paths = anthropic ? ['messages', 'v1/messages'] : ['chat/completions', 'v1/chat/completions']
+  let response: Response | undefined
+  for (const path of paths) {
+    let attempt: Response
+    try {
+      attempt = await fetch(joinApiUrl(endpoint.baseUrl, path), { method: 'POST', headers, body, signal })
+    } catch (cause) {
+      throw mapNetworkError(cause)
+    }
+    response = attempt
+    if (attempt.status !== 404 && attempt.status !== 405) return attempt
+  }
+  return response as Response
+}
+
 export async function chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
   const anthropic = isAnthropic(params.endpoint)
-  const data = await requestJson(
-    joinApiUrl(params.endpoint.baseUrl, anthropic ? 'messages' : 'chat/completions'),
-    {
-      method: 'POST',
-      headers: anthropic
-        ? anthropicHeaders(params.endpoint.apiKey)
-        : authHeaders(params.endpoint.apiKey),
-      body: anthropic
-        ? JSON.stringify(anthropicBody(params.endpoint, params.messages, false))
-        : JSON.stringify({ model: params.endpoint.model, messages: params.messages }),
-      signal: withDeadline(params.signal, REQUEST_TIMEOUT_MS),
-    },
+  const response = await postChat(
+    params.endpoint,
+    JSON.stringify(
+      anthropic
+        ? anthropicBody(params.endpoint, params.messages, false)
+        : { model: params.endpoint.model, messages: params.messages },
+    ),
+    withDeadline(params.signal, REQUEST_TIMEOUT_MS),
   )
+  if (!response.ok) throw mapResponseError(response)
+  let data: unknown
+  try {
+    data = await response.json()
+  } catch (cause) {
+    throw mapJsonFailure(cause)
+  }
   const content = anthropic
     ? parseAnthropicContent(data)
     : parseOpenAiContent(data)
@@ -290,24 +316,16 @@ export async function chatCompletionStream(
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
   const anthropic = isAnthropic(params.endpoint)
-  let response: Response
-  try {
-    response = await fetch(
-      joinApiUrl(params.endpoint.baseUrl, anthropic ? 'messages' : 'chat/completions'),
-      {
-        method: 'POST',
-        headers: anthropic
-          ? anthropicHeaders(params.endpoint.apiKey)
-          : authHeaders(params.endpoint.apiKey),
-        body: anthropic
-          ? JSON.stringify(anthropicBody(params.endpoint, params.messages, true))
-          : JSON.stringify({ model: params.endpoint.model, messages: params.messages, stream: true }),
-        signal: params.signal,
-      },
-    )
-  } catch (cause) {
-    throw mapNetworkError(cause)
-  }
+  // 流式不加死线：由消费方 abort；路径回退与一次性请求同规则。
+  const response = await postChat(
+    params.endpoint,
+    JSON.stringify(
+      anthropic
+        ? anthropicBody(params.endpoint, params.messages, true)
+        : { model: params.endpoint.model, messages: params.messages, stream: true },
+    ),
+    params.signal,
+  )
   if (!response.ok) throw mapResponseError(response)
   // 200 也可能是代理/网关的 HTML 错误页：按解析失败处理，而不是把空流当成功。
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
@@ -395,60 +413,76 @@ export interface ListModelsParams {
 
 /**
  * 拉取模型列表（设置页「拉取模型」）。
- * 容错对齐开源客户端的通行做法：
- * - 401/403 且带了鉴权头 → 摘掉鉴权再试一次（部分中转/本地服务的 /models 不收 Key）；
+ * 容错对齐开源客户端的通行做法（LibreChat / Cherry Studio 的探测链）：
+ * - 路径两种拼法按序试：/models 与 /v1/models（base 带 /v1 与不带都覆盖）；
+ * - 鉴权头按序试：anthropic 先 x-api-key（官方约定）再 Bearer（Claude Code 类网关只认
+ *   ANTHROPIC_AUTH_TOKEN 的 Bearer 形态），openai 只试 Bearer；401/403 换下一种，
+ *   最后再试一次无鉴权（部分中转/本地服务的 /models 不收 Key）；
  * - 响应形状多认几种：{data:[{id}]}、{data:["id"]}、{models:[{name|model|id}]}、裸数组；
- * - 失败时把 HTTP 状态码带进文案，用户能判断是「不支持 /models」还是「Key/网络」问题。
+ * - 失败时把 HTTP 状态码带进文案；404 明说「专用 Messages 网关常不提供列表接口」，
+ *   用户能判断是该手动填模型名，还是 Key/网络问题。
  */
 export async function listModels(params: ListModelsParams): Promise<string[]> {
   requireBaseUrl(params.baseUrl)
   const anthropic = params.format === 'anthropic'
-  const url = joinApiUrl(params.baseUrl, 'models')
+  const key = params.apiKey.trim()
   const signal = withDeadline(params.signal, PROBE_TIMEOUT_MS)
 
-  const attempt = async (withAuth: boolean): Promise<Response> => {
-    const headers: Record<string, string> = {}
-    const key = params.apiKey.trim()
-    if (key && withAuth) {
-      if (anthropic) {
-        headers['x-api-key'] = key
-        headers['anthropic-version'] = ANTHROPIC_VERSION
-      } else {
-        headers.Authorization = `Bearer ${key}`
-      }
+  const authVariants: Record<string, string>[] = []
+  if (key !== '') {
+    if (anthropic) {
+      authVariants.push({ 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION })
+      authVariants.push({ Authorization: `Bearer ${key}` })
+    } else {
+      authVariants.push({ Authorization: `Bearer ${key}` })
     }
-    let response: Response
+  }
+  authVariants.push({})
+
+  const parse = async (response: Response): Promise<string[]> => {
+    let data: unknown
     try {
-      response = await fetch(url, { method: 'GET', headers, signal })
+      data = await response.json()
     } catch (cause) {
-      throw mapNetworkError(cause)
+      throw mapJsonFailure(cause)
     }
-    return response
+    const ids = parseModelIds(data)
+    if (ids.length === 0) {
+      throw new AiError('parse', '模型列表响应里没有可用条目：该端点可能不支持 /models，可手动输入模型名')
+    }
+    return ids
   }
 
-  let response = await attempt(true)
-  if ((response.status === 401 || response.status === 403) && params.apiKey.trim() !== '') {
-    response = await attempt(false)
+  let lastStatus = 0
+  for (const path of ['models', 'v1/models']) {
+    for (const headers of authVariants) {
+      let response: Response
+      try {
+        response = await fetch(joinApiUrl(params.baseUrl, path), { method: 'GET', headers, signal })
+      } catch (cause) {
+        throw mapNetworkError(cause)
+      }
+      if (response.ok) {
+        // 去重保序：下拉列表以 id 为 key，重复会触发 Vue 重复 key 告警。
+        const seen: string[] = []
+        for (const id of await parse(response)) if (!seen.includes(id)) seen.push(id)
+        return seen
+      }
+      lastStatus = response.status
+      if (response.status === 401 || response.status === 403) continue // 换下一种鉴权头再试
+      if (response.status === 404 || response.status === 405) break // 这段路由不存在，换下一段路径
+      throw new AiError('http', `模型列表拉取失败（HTTP ${response.status}）`, {
+        status: response.status,
+      })
+    }
   }
-  if (!response.ok) {
-    throw new AiError('http', `模型列表拉取失败（HTTP ${response.status}）`, {
-      status: response.status,
-    })
-  }
-  let data: unknown
-  try {
-    data = await response.json()
-  } catch (cause) {
-    throw mapJsonFailure(cause)
-  }
-  const ids = parseModelIds(data)
-  if (ids.length === 0) {
-    throw new AiError('parse', '模型列表响应里没有可用条目：该端点可能不支持 /models，可手动输入模型名')
-  }
-  // 去重保序：下拉列表以 id 为 key，重复会触发 Vue 重复 key 告警。
-  const seen: string[] = []
-  for (const id of ids) if (!seen.includes(id)) seen.push(id)
-  return seen
+  const hint =
+    lastStatus === 404 || lastStatus === 405
+      ? '：该端点可能不提供模型列表接口（专用 Messages 网关常见，如火山方舟 Coding），请手动填写模型名'
+      : ''
+  throw new AiError('http', `模型列表拉取失败（HTTP ${lastStatus}）${hint}`, {
+    status: lastStatus,
+  })
 }
 
 function parseModelIds(data: unknown): string[] {

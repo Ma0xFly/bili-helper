@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// AI 助手组真实表单：对话端点、服务器开关（含回退子开关）、一键体检、功能开关，
+// AI 助手组真实表单：对话端点、服务器开关（含回退子开关）、功能开关，
 // 向量端点折叠进「高级」（默认继承对话端点，绝大多数用户不需要展开）。
+// 连通性测试内联在对应端点卡片里（测试按钮贴着字段，就地出结果），不设独立体检区。
 // 运行模式不暴露 local/server/auto 术语：开关关=local，开关开=server，回退勾上=auto。
 // 端点读写只经 modules/settings 助手。其余分组（服务器独立页签/过滤/净化/布局/增强）仍为占位。
 
@@ -134,7 +135,8 @@ const embedModelHint = computed(() =>
   resolvedEmbed.value.model ? `继承：${resolvedEmbed.value.model}` : '继承：尚未配置对话端点',
 )
 
-const FETCH_MODELS_HINT = '拉不到模型列表，直接手动输入模型名也行'
+const FETCH_MODELS_HINT =
+  '拉不到模型列表：该端点可能不提供列表接口（如火山方舟 Coding 这类专用网关），直接手动输入模型名即可'
 
 const chatModelOptions = ref<string[]>([])
 const embedModelOptions = ref<string[]>([])
@@ -183,6 +185,7 @@ const CHAT_PRESETS: { name: string; url: string; model?: string }[] = [
   { name: 'Kimi（月之暗面）', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2-0711-preview' },
   { name: '通义千问（兼容模式）', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
   { name: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.5-air' },
+  { name: '火山方舟（豆包）', url: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1-6-flash' },
   { name: 'Ollama（本机）', url: 'http://localhost:11434/v1', model: 'qwen3:8b' },
   { name: 'LM Studio（本机）', url: 'http://localhost:1234/v1' },
 ]
@@ -200,104 +203,90 @@ function applyChatPreset(event: Event): void {
   if (preset) form.apiUrl = preset.url
 }
 
-const testing = ref(false)
-const diagResults = ref<Feedback[]>([])
-/** 自增运行号：只有最后一次体检的结果允许写回界面（迟到结果不得覆盖新状态）。 */
+/** 自增运行号：内联测试共用一个计数器，迟到的旧结果不得覆盖新状态。 */
 let diagnosticsRunId = 0
 
-/** 汇总徽标：体检完成后给一眼可见的结论（X 项 · 失败/警告/全过）。 */
-const diagSummary = computed(() => {
-  const results = diagResults.value
-  if (results.length === 0) return null
-  const fail = results.filter((item) => item.kind === 'fail').length
-  const warn = results.filter((item) => item.kind === 'warn').length
-  const kind = fail > 0 ? 'fail' : warn > 0 ? 'warn' : 'ok'
-  const parts =
-    fail > 0
-      ? `${fail} 项失败`
-      : warn > 0
-        ? `${warn} 项警告`
-        : '全部通过'
-  return { kind, text: `${results.length} 项检查 · ${parts}` }
-})
+// ---------- 内联连通性测试（贴着对应端点配置，测的就是眼前这套表单值） ----------
+// 每个目标一份独立状态：按钮就在字段后面，结果就地显示；测试用表单当前值而非已存值
+// （改了地址没保存也测新地址）。运行号守卫：迟到结果不得覆盖新一轮的状态。
+interface InlineTestState {
+  running: boolean
+  result: Feedback | null
+}
+function newTestState(): InlineTestState {
+  return { running: false, result: null }
+}
+const chatTest = reactive(newTestState())
+const embedTest = reactive(newTestState())
+const serverTest = reactive(newTestState())
 
-function renderFeedback(label: string, result: EndpointTestResult): Feedback {
-  if (result.ok) return { kind: 'ok', text: `${label}连接成功 · ${result.model} 响应 ${result.ms}ms` }
-  return { kind: 'fail', text: `${label}连接失败 · ${result.reason}` }
+function asFeedback(result: EndpointTestResult): Feedback {
+  if (result.ok) return { kind: 'ok', text: `连接成功 · ${result.model} 响应 ${result.ms}ms` }
+  return { kind: 'fail', text: `连接失败 · ${result.reason}` }
 }
 
-/**
- * 一键体检：按当前模式只测真正会被用到的通道，不测用不上的（纯 server 模式不测本机端点，
- * 纯 local 模式不测服务器）。auto 两边都测——回退路径必须真的可用，否则「智能回退」是空话。
- * 结果逐项实时上屏（体感不再是一段黑箱等待），迟到结果由 runId 守卫挡掉。
- */
-async function runDiagnostics(): Promise<void> {
-  // 迟到结果守卫：体检要几秒，期间用户可能切走侧栏分组或再点一次体检；
-  // 只有最后一次运行的结果才允许写回界面，否则上一轮的结果会突然盖到新页面上。
+async function runInlineTest(
+  state: InlineTestState,
+  probe: () => Promise<Feedback>,
+): Promise<void> {
   const runId = (diagnosticsRunId += 1)
-  testing.value = true
-  diagResults.value = []
+  state.running = true
+  state.result = null
   try {
-    const results: Feedback[] = []
-    const push = (item: Feedback): void => {
-      results.push(item)
-      if (runId === diagnosticsRunId) diagResults.value = [...results]
-    }
-    if (form.mode !== 'local') {
-      const probe = await probeServerEndpoint({
-        baseUrl: form.serverBaseUrl,
-        token: form.serverToken,
-      })
-      if (!probe.ok) push({ kind: 'fail', text: `服务器连接失败 · ${probe.reason}` })
-      else if (probe.healthSupported) push({ kind: 'ok', text: `服务器连接成功 · 响应 ${probe.ms}ms` })
-      else push({ kind: 'warn', text: '服务器可达，但未提供体检接口（不影响转发）' })
-    }
-    if (form.mode !== 'server') {
-      const embed = resolveEmbeddingEndpoint(form)
-      const chatConfigured = form.apiUrl.trim() !== '' && form.model.trim() !== ''
-      const embedExplicit = form.embedBaseUrl.trim() !== '' && form.embedModel.trim() !== ''
-      if (!chatConfigured && !embedExplicit) {
-        push({
-          kind: 'fail',
-          text: '还没配置端点：对话端点（总结/提问/LLM 定界）或向量端点（极速匹配）至少配一个',
-        })
-        advancedOpen.value = true
-      } else {
-        if (chatConfigured) {
-          const chatResult = await testChatEndpoint({
-            baseUrl: form.apiUrl,
-            model: form.model,
-            apiKey: form.apiKey,
-            format: form.apiFormat,
-          })
-          push(renderFeedback('对话端点', chatResult))
-        } else {
-          // 极速模式：去广告不依赖对话端点，如实告知能力边界。
-          push({
-            kind: 'warn',
-            text: '对话端点未配置：去广告走极速匹配（仅向量+词表检索），总结/提问不可用',
-          })
-        }
-        const embedResult = await testEmbeddingEndpoint({
-          baseUrl: embed.baseUrl,
-          model: embed.model,
-          apiKey: embed.apiKey,
-        })
-        // 向量端点继承对话端点时不单独报绿（同一条链路，避免噪音）；拆开了或出问题才报，
-        // 出问题顺带展开高级区，让用户直接看到该改哪三个字段。
-        const embedConfiguredSeparately =
-          form.embedBaseUrl.trim() !== '' || form.embedModel.trim() !== '' || form.embedKey.trim() !== ''
-        if (!embedResult.ok) advancedOpen.value = true
-        if (embedConfiguredSeparately || !embedResult.ok) {
-          push(renderFeedback('向量端点', embedResult))
-        }
-      }
-    }
-    if (runId === diagnosticsRunId) diagResults.value = results
+    const feedback = await probe()
+    if (runId === diagnosticsRunId) state.result = feedback
   } finally {
-    // 无论探测结果如何，按钮都要从「体检中…」恢复（且只由最后一次运行恢复）。
-    if (runId === diagnosticsRunId) testing.value = false
+    if (runId === diagnosticsRunId) state.running = false
   }
+}
+
+async function testChatInline(): Promise<void> {
+  if (form.apiUrl.trim() === '' || form.model.trim() === '') {
+    chatTest.result = { kind: 'fail', text: '请先填写 Base URL 和模型，再测试连接' }
+    return
+  }
+  await runInlineTest(chatTest, async () =>
+    asFeedback(
+      await testChatEndpoint({
+        baseUrl: form.apiUrl,
+        model: form.model,
+        apiKey: form.apiKey,
+        format: form.apiFormat,
+      }),
+    ),
+  )
+}
+
+async function testEmbedInline(): Promise<void> {
+  const endpoint = resolveEmbeddingEndpoint(form)
+  if (endpoint.baseUrl.trim() === '' || endpoint.model.trim() === '') {
+    embedTest.result = { kind: 'fail', text: '请先填写（或继承对话端点的）Base URL 与嵌入模型' }
+    return
+  }
+  await runInlineTest(embedTest, async () =>
+    asFeedback(
+      await testEmbeddingEndpoint({
+        baseUrl: endpoint.baseUrl,
+        model: endpoint.model,
+        apiKey: endpoint.apiKey,
+      }),
+    ),
+  )
+}
+
+async function testServerInline(): Promise<void> {
+  if (form.serverBaseUrl.trim() === '') {
+    serverTest.result = { kind: 'fail', text: '请先填写 Server Base URL' }
+    return
+  }
+  await runInlineTest(serverTest, async () => {
+    const probe = await probeServerEndpoint({ baseUrl: form.serverBaseUrl, token: form.serverToken })
+    if (probe.ok && probe.healthSupported) {
+      return { kind: 'ok', text: `连接成功 · 响应 ${probe.ms}ms` }
+    }
+    if (probe.ok) return { kind: 'warn', text: '服务器可达，但未提供体检接口（不影响转发）' }
+    return { kind: 'fail', text: `连接失败 · ${probe.reason}` }
+  })
 }
 
 let saveTimer: number | undefined
@@ -562,8 +551,9 @@ onMounted(loadUserCorpus)
               <option value="anthropic">Anthropic Messages（messages）</option>
             </select>
             <span class="field-hint">
-              Claude 官方 API 与部分中转走 Anthropic 协议——模型拉不到、探测不通时先切这里试试。
-              只影响浏览器直连；服务器转发由服务端自身配置决定。
+              Claude 官方 API 与部分中转/网关（如火山方舟 Coding 端点
+              https://ark.cn-beijing.volces.com/api/coding）走 Anthropic 协议。地址带不带 /v1
+              都可以，两种拼法会自动尝试。只影响浏览器直连；服务器转发由服务端自身配置决定。
             </span>
           </div>
           <label class="field">
@@ -594,6 +584,28 @@ onMounted(loadUserCorpus)
               </button>
             </div>
             <span v-if="chatModelsHint" class="field-hint">{{ chatModelsHint }}</span>
+          </div>
+          <div class="field">
+            <button
+              type="button"
+              class="ghost"
+              :disabled="chatTest.running"
+              aria-label="测试对话端点"
+              @click="testChatInline"
+            >
+              {{ chatTest.running ? '测试中…' : '测试连接' }}
+            </button>
+            <div
+              v-if="chatTest.result"
+              class="feedback"
+              :class="chatTest.result.kind"
+              aria-live="polite"
+            >
+              <span class="badge" aria-hidden="true">
+                {{ chatTest.result.kind === 'ok' ? '✓' : chatTest.result.kind === 'warn' ? '!' : '✕' }}
+              </span>
+              <span>{{ chatTest.result.text }}</span>
+            </div>
           </div>
         </section>
 
@@ -646,44 +658,29 @@ onMounted(loadUserCorpus)
                 <span class="switch-knob" aria-hidden="true" />
               </span>
             </label>
+            <div class="field">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="serverTest.running"
+                aria-label="测试服务器连接"
+                @click="testServerInline"
+              >
+                {{ serverTest.running ? '测试中…' : '测试连接' }}
+              </button>
+              <div
+                v-if="serverTest.result"
+                class="feedback"
+                :class="serverTest.result.kind"
+                aria-live="polite"
+              >
+                <span class="badge" aria-hidden="true">
+                  {{ serverTest.result.kind === 'ok' ? '✓' : serverTest.result.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ serverTest.result.text }}</span>
+              </div>
+            </div>
           </template>
-        </section>
-
-        <section class="card" aria-labelledby="test-title">
-          <div class="card-head-row">
-            <h2 id="test-title" class="card-title">一键体检</h2>
-            <span v-if="diagSummary" class="diag-summary" :class="diagSummary.kind">
-              {{ diagSummary.text }}
-            </span>
-          </div>
-          <p class="card-note">
-            按当前配置实际探测会被用到的通道：{{
-              useServer
-                ? useFallback
-                  ? '服务器 + 浏览器直连的两个端点（回退路径也要可用）'
-                  : '只探服务器'
-                : '只探浏览器直连的端点'
-            }}。
-          </p>
-          <button type="button" class="ghost" :disabled="testing" @click="runDiagnostics">
-            {{ testing ? '体检中…' : '开始体检' }}
-          </button>
-          <div aria-live="polite" class="diag-results">
-            <div v-if="testing && diagResults.length === 0" class="diag-skeleton" aria-hidden="true">
-              正在逐项探测，请稍候…
-            </div>
-            <div
-              v-for="(item, index) in diagResults"
-              :key="index"
-              class="feedback"
-              :class="item.kind"
-            >
-              <span class="badge" aria-hidden="true">
-                {{ item.kind === 'ok' ? '✓' : item.kind === 'warn' ? '!' : '✕' }}
-              </span>
-              <span>{{ item.text }}</span>
-            </div>
-          </div>
         </section>
 
         <section class="card" aria-labelledby="features-title">
@@ -865,6 +862,28 @@ onMounted(loadUserCorpus)
                 {{ embedModelHint }}
               </span>
               <span v-if="embedModelsHint" class="field-hint">{{ embedModelsHint }}</span>
+            </div>
+            <div class="field">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="embedTest.running"
+                aria-label="测试向量端点"
+                @click="testEmbedInline"
+              >
+                {{ embedTest.running ? '测试中…' : '测试连接' }}
+              </button>
+              <div
+                v-if="embedTest.result"
+                class="feedback"
+                :class="embedTest.result.kind"
+                aria-live="polite"
+              >
+                <span class="badge" aria-hidden="true">
+                  {{ embedTest.result.kind === 'ok' ? '✓' : embedTest.result.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ embedTest.result.text }}</span>
+              </div>
             </div>
           </div>
         </section>
@@ -1289,45 +1308,7 @@ input:focus-visible {
   min-width: 0;
 }
 
-/* ---------- 一键体检：卡片头（标题 + 汇总徽标）、结果行（徽标 + 文案）、探测骨架 ---------- */
-.card-head-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.diag-summary {
-  flex: none;
-  padding: 3px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.6;
-}
-
-.diag-summary.ok {
-  background: #e9f6ee;
-  color: #2fa96b;
-  border: 1px solid rgba(85, 212, 143, 0.35);
-}
-
-.diag-summary.fail {
-  background: #fdecee;
-  color: #e5484d;
-  border: 1px solid rgba(255, 143, 163, 0.35);
-}
-
-.diag-summary.warn {
-  background: #fdf5e6;
-  color: #b5822a;
-  border: 1px solid rgba(240, 196, 120, 0.4);
-}
-
-.diag-results:empty {
-  display: none;
-}
-
+/* ---------- 反馈行（内联测试 / 方案 / 词库共用：徽标 + 文案） ---------- */
 .feedback {
   display: flex;
   align-items: center;
@@ -1351,22 +1332,6 @@ input:focus-visible {
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
-}
-
-.diag-skeleton {
-  margin-top: 12px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  color: #857fa0;
-  background: #f4f1fb;
-  animation: diag-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes diag-pulse {
-  50% {
-    opacity: 0.55;
-  }
 }
 
 .feedback.ok {
