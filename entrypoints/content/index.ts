@@ -23,6 +23,7 @@ import { panel, panelActions, panelBackoffMs, panelVisibleNow } from '../../modu
 import {
   MSG_AD_SKIP_PAGE_STATE,
   MSG_AD_SKIP_PAGE_TOGGLE,
+  MSG_OPEN_OPTIONS,
   MSG_PANEL_PAGE_STATE,
   MSG_PANEL_PAGE_TOGGLE,
   isKnownMessage,
@@ -36,6 +37,26 @@ import type {
 } from '../../modules/content/protocol'
 import { extractBvidFromUrl } from '../../modules/video/collectors'
 import { NET_RELAY_PORT_NAME, setNetRelayConnect } from '../../modules/ai/llm/net-relay'
+
+/**
+ * 打开扩展设置页：内容脚本上下文没有 runtime.openOptionsPage（仅扩展页/后台可用），
+ * 经后台代开；后台不可达或代开失败（极少见）时回退直接开设置页 URL。
+ * runtime.getURL 运行时在内容脚本可用，只是 wxt 的类型把它从该上下文抠掉了，断言补回。
+ */
+function openOptionsViaBackground(): void {
+  const optionsUrl = (browser.runtime as unknown as { getURL: (path: string) => string }).getURL(
+    '/options.html',
+  )
+  void browser.runtime
+    .sendMessage({ type: MSG_OPEN_OPTIONS })
+    .then((response: unknown) => {
+      if ((response as { ok?: unknown } | undefined)?.ok === true) return
+      window.open(optionsUrl, '_blank')
+    })
+    .catch(() => {
+      window.open(optionsUrl, '_blank')
+    })
+}
 
 // 一切注入 UI 寄居 Shadow DOM。cssInjectionMode:"ui" 让引入的 overlay.css/uno.css
 // 经 createShadowRootUi 注入 shadow root，与 B 站页面样式完全隔离。
@@ -191,11 +212,7 @@ export default defineContentScript({
       readSettings: readAiSettings,
       createBackend: (settings, hooks) => resolveBackend(settings, hooks),
       recordSkipped,
-      openOptions: () => {
-        void browser.runtime.openOptionsPage().catch(() => {
-          // 设置页不可打开时静默（提示条不受影响）。
-        })
-      },
+      openOptions: openOptionsViaBackground,
     })
 
     // ---------- 消息接线 ----------
@@ -209,11 +226,7 @@ export default defineContentScript({
         // 播放器拒绝 seek：静默忽略。
       }
     }
-    panelActions.openSettings = () => {
-      void browser.runtime.openOptionsPage().catch(() => {
-        // 设置页不可打开时静默。
-      })
-    }
+    panelActions.openSettings = openOptionsViaBackground
     panelActions.summarize = async (input) => {
       const settings = await readAiSettings()
       return resolveBackend(settings).summarize(input)

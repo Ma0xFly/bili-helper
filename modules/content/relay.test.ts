@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   MSG_AD_SKIP_PAGE_STATE,
   MSG_AD_SKIP_PAGE_TOGGLE,
+  MSG_OPEN_OPTIONS,
   MSG_PANEL_PAGE_STATE,
   MSG_PANEL_PAGE_TOGGLE,
   UNAVAILABLE_PANEL_STATE,
@@ -11,7 +12,7 @@ import {
   isPanelToggleResponse,
 } from './protocol'
 import type { AdSkipPageState } from './protocol'
-import { relayAdSkipMessage, relayPanelMessage, routeMessage } from './relay'
+import { relayAdSkipMessage, relayOpenOptions, relayPanelMessage, routeMessage } from './relay'
 import type { RelayDeps } from './relay'
 
 const PAGE_STATE: AdSkipPageState = { available: true, pageEnabled: true, masterEnabled: true }
@@ -20,6 +21,7 @@ function depsOf(overrides: Partial<RelayDeps>): RelayDeps {
   return {
     queryActiveTab: vi.fn(async () => 7),
     sendToTab: vi.fn(async () => PAGE_STATE),
+    openOptions: vi.fn(async () => undefined),
     ...overrides,
   }
 }
@@ -170,5 +172,22 @@ describe('routeMessage（background 单点接线）', () => {
   it('未知消息返回 undefined（background 不响应）', async () => {
     expect(await routeMessage({ type: 'unknown' }, depsOf({}))).toBeUndefined()
     expect(await routeMessage(null, depsOf({}))).toBeUndefined()
+  })
+})
+
+describe('relayOpenOptions（内容脚本请求代开设置页）', () => {
+  it('MSG_OPEN_OPTIONS 路由到代开，不转发给任何 tab', async () => {
+    const openOptions = vi.fn(async () => undefined)
+    const sendToTab = vi.fn(async () => PAGE_STATE)
+    const result = await routeMessage({ type: MSG_OPEN_OPTIONS }, depsOf({ openOptions, sendToTab }))
+    expect(result).toEqual({ ok: true })
+    expect(openOptions).toHaveBeenCalledTimes(1)
+    expect(sendToTab).not.toHaveBeenCalled()
+  })
+
+  it('代开失败回 ok:false（调用方回退直接开 URL），不向上抛', async () => {
+    expect(
+      await relayOpenOptions(depsOf({ openOptions: vi.fn(async () => Promise.reject(new Error('denied'))) })),
+    ).toEqual({ ok: false })
   })
 })

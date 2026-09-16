@@ -20,6 +20,8 @@ export default defineBackground(() => {
       return tab?.id
     },
     sendToTab: (tabId, payload) => browser.tabs.sendMessage(tabId, payload),
+    // 内容脚本没有 runtime.openOptionsPage（仅扩展页/后台可用），由这里代开。
+    openOptions: () => browser.runtime.openOptionsPage(),
   }
 
   browser.runtime.onMessage.addListener((message: unknown) => routeMessage(message, deps))

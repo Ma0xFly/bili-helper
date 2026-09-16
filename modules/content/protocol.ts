@@ -9,6 +9,25 @@ export const MSG_AD_SKIP_PAGE_STATE = 'bili-helper:ad-skip-page-state'
 export const MSG_PANEL_PAGE_TOGGLE = 'bili-helper:panel-page-toggle'
 export const MSG_PANEL_PAGE_STATE = 'bili-helper:panel-page-state'
 
+/**
+ * 内容脚本 → background：请求打开扩展设置页。内容脚本上下文里
+ * runtime.openOptionsPage 不存在（该 API 只在扩展页/后台可用），必须经后台代开。
+ */
+export const MSG_OPEN_OPTIONS = 'bili-helper:open-options'
+
+export interface OpenOptionsRequest {
+  type: typeof MSG_OPEN_OPTIONS
+}
+
+export interface OpenOptionsResponse {
+  ok: boolean
+}
+
+export function isOpenOptionsMessage(value: unknown): value is OpenOptionsRequest {
+  if (typeof value !== 'object' || value === null) return false
+  return (value as { type?: unknown }).type === MSG_OPEN_OPTIONS
+}
+
 export interface AdSkipPageState {
   /** 内容脚本是否挂在视频页并响应。 */
   available: boolean
