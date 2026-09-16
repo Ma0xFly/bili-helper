@@ -34,13 +34,17 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
    * 只记元信息与模型自己的回答文本，凭据永远不经过这里。记录失败静默。
    */
   function logFailure(feature: AiFailureFeature, error: unknown): void {
-    if (!(error instanceof AiError)) return
+    // 任何抛出物都入档（非 AiError 经 errorInfoFrom 归一）：排障时「没日志」比「日志多」更致命。
+    const info = errorInfoFrom(error)
+    const raw = error instanceof AiError ? error.rawResponse : undefined
+    const detail = error instanceof Error ? ` [${error.name}] ${error.stack?.split('\n')[1]?.trim() ?? ''}` : ''
+    console.error(`[bili-helper] ${feature} 失败:`, info.kind, info.message + detail)
     void recordAiFailure({
       time: Date.now(),
       feature,
-      kind: error.kind,
-      message: error.message,
-      ...(error.rawResponse === undefined ? {} : { rawExcerpt: error.rawResponse }),
+      kind: info.kind,
+      message: info.message + detail,
+      ...(raw === undefined ? {} : { rawExcerpt: raw }),
       ...(endpoint.baseUrl === '' ? {} : { endpoint: endpoint.baseUrl }),
       ...(endpoint.model === '' ? {} : { model: endpoint.model }),
     })

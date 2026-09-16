@@ -26,12 +26,31 @@ export type NetRelayClientMessage =
   | { t: 'keep' }
   | { t: 'abort' }
 
-/** 宿主 → 客户端：响应头（一次）、响应体分块（多次）、正常收束、上游失败。 */
+/**
+ * 宿主 → 客户端：响应头（一次）、响应体分块（多次）、正常收束、上游失败。
+ * 注意：runtime 端口消息只支持 JSON 序列化——二进制分块必须 base64 编码为字符串，
+ * 直接传 Uint8Array 会在过端口时退化成普通对象（TextDecoder 当场 TypeError）。
+ */
 export type NetRelayHostMessage =
   | { t: 'head'; status: number; contentType: string }
-  | { t: 'chunk'; data: Uint8Array }
+  | { t: 'chunk'; data: string }
   | { t: 'end' }
   | { t: 'error'; name: string; message: string }
+
+/** Uint8Array → base64（浏览器/SW 通用，不依赖 Buffer）。 */
+export function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] as number)
+  return btoa(binary)
+}
+
+/** base64 → Uint8Array。 */
+export function base64ToUint8(encoded: string): Uint8Array {
+  const binary = atob(encoded)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
 
 /** browser.runtime.Port 的最小面：两侧逻辑都只依赖这些，测试用内存管道即可。 */
 export interface RelayPort {
@@ -109,6 +128,7 @@ async function runRelayRequest(
       signal,
     })
   } catch (cause) {
+    console.error('[bili-helper/net-relay:sw] fetch 失败', req.url, String(cause))
     postHostError(port, cause)
     return
   }
@@ -127,10 +147,11 @@ async function runRelayRequest(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      if (value !== undefined) port.postMessage({ t: 'chunk', data: value })
+      if (value !== undefined) port.postMessage({ t: 'chunk', data: uint8ToBase64(value) })
     }
     port.postMessage({ t: 'end' })
   } catch (cause) {
+    console.error('[bili-helper/net-relay:sw] 流读取失败', req.url, String(cause))
     postHostError(port, cause)
   } finally {
     void reader.cancel().catch(() => {})
@@ -204,6 +225,7 @@ export async function netRelayFetch(
 
   let terminal = false
   let streamFailure: unknown
+  let chunksSeen = 0
   const pendingChunks: Uint8Array[] = []
   const waiters: ReadWaiter[] = []
 
@@ -230,9 +252,11 @@ export async function netRelayFetch(
       return
     }
     if (message?.t === 'chunk') {
+      chunksSeen += 1
+      const bytes = base64ToUint8(message.data)
       const waiter = waiters.shift()
-      if (waiter) waiter.resolve({ done: false, value: message.data })
-      else pendingChunks.push(message.data)
+      if (waiter) waiter.resolve({ done: false, value: bytes })
+      else pendingChunks.push(bytes)
       return
     }
     if (message?.t === 'end') {
@@ -247,6 +271,7 @@ export async function netRelayFetch(
     }
     if (message?.t === 'error') {
       finish()
+      console.error('[bili-helper/net-relay] 宿主报错', message.name, message.message)
       if (!headSettled) {
         headSettled = true
         rejectHead?.(transportErrorOf(message.name))
@@ -261,6 +286,7 @@ export async function netRelayFetch(
   const onDisconnect = (): void => {
     if (terminal) return
     finish()
+    console.error('[bili-helper/net-relay] 端口断开 ' + JSON.stringify({ headSettled, url: req.url, chunksSeen }))
     if (!headSettled) {
       headSettled = true
       // 后台连接中断多半是「构建更新了但扩展没重载」：陈旧扩展的 SW 起不来、无人应答。
@@ -278,6 +304,7 @@ export async function netRelayFetch(
 
   const onExternalAbort = (): void => {
     if (terminal) return
+    console.error('[bili-helper/net-relay] 外部信号中止', { headSettled, url: req.url, reason: String(external?.reason) })
     port.postMessage({ t: 'abort' })
     finish()
     const timeout = external?.reason instanceof Error && external.reason.name === 'TimeoutError'

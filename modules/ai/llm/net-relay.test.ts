@@ -24,9 +24,12 @@ function createPortPair(): { client: RelayPort; host: RelayPort } {
   const endOf = (self: ReturnType<typeof mk>, peer: ReturnType<typeof mk>): RelayPort => ({
     postMessage(message: unknown): void {
       if (self.disconnected) return
+      // 模拟 Chrome runtime 端口的 JSON 序列化语义：非 JSON 安全的值（Uint8Array 等）
+      // 过端口会变形——测试必须与真实通道同构，否则挡不住这类 bug。
+      const serialized = JSON.parse(JSON.stringify(message)) as unknown
       queueMicrotask(() => {
         if (self.disconnected) return
-        for (const listener of peer.messageListeners) listener(message)
+        for (const listener of peer.messageListeners) listener(serialized)
       })
     },
     disconnect(): void {

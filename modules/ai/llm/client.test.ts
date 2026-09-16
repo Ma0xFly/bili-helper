@@ -27,9 +27,11 @@ describe('内容脚本经后台中继（net-relay）', () => {
     const endOf = (self: ReturnType<typeof mk>, peer: ReturnType<typeof mk>): RelayPort => ({
       postMessage(message: unknown): void {
         if (self.disconnected) return
+        // 模拟 Chrome runtime 端口的 JSON 序列化语义（Uint8Array 过端口会变形）。
+        const serialized = JSON.parse(JSON.stringify(message)) as unknown
         queueMicrotask(() => {
           if (self.disconnected) return
-          for (const listener of peer.messageListeners) listener(message)
+          for (const listener of peer.messageListeners) listener(serialized)
         })
       },
       disconnect(): void {
