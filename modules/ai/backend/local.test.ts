@@ -67,11 +67,21 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('local summarize（直连补全）', () => {
-  it('直连补全成功且按端口形状返回', async () => {
+describe('local summarize（流式聚合）', () => {
+  function sseOfContent(content: string): Response {
+    // OpenAI 形 SSE：整段内容拆两个 delta，验证聚合与解析。
+    const half = Math.ceil(content.length / 2)
+    const chunks = [content.slice(0, half), content.slice(half)]
+    return sseResponse([
+      ...chunks.map((chunk) => `data: {"choices":[{"delta":{"content":${JSON.stringify(chunk)}}}]}`),
+      'data: [DONE]',
+    ])
+  }
+
+  it('流式聚合成功且按端口形状返回；请求体带总结 system 与字幕上下文', async () => {
     const fetchMock = vi.fn(
       async (_url: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
-        completionResponse(JSON.stringify({ summary: '这是一期测试', segments: [{ start: 0, end: 40, label: '开场' }] })),
+        sseOfContent(JSON.stringify({ summary: '这是一期测试', segments: [{ start: 0, end: 40, label: '开场' }] })),
       )
     vi.stubGlobal('fetch', fetchMock)
     const backend = createLocalBackend(settingsOf({}))
@@ -80,13 +90,14 @@ describe('local summarize（直连补全）', () => {
     expect(result.segments).toEqual([{ start: 0, end: 40, label: '开场' }])
 
     const sent = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(sent.stream).toBe(true)
     expect((sent.messages as { role: string; content: string }[])[0]?.role).toBe('system')
     expect((sent.messages as { role: string; content: string }[])[0]?.content).toContain('严禁编造')
     expect((sent.messages as { role: string; content: string }[])[1]?.content).toContain('[00:30] 感谢赞助商')
   })
 
   it('输出非 JSON 时退化：原文整体作为 summary、segments 空', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => completionResponse('模型直接输出的一段总结。')))
+    vi.stubGlobal('fetch', vi.fn(async () => sseOfContent('模型直接输出的一段总结。')))
     const backend = createLocalBackend(settingsOf({}))
     const result = await backend.summarize(SUMMARIZE_INPUT)
     expect(result).toEqual({ summary: '模型直接输出的一段总结。', segments: [] })
@@ -232,13 +243,17 @@ describe('local detectAds（RAG 链路接线）', () => {
   })
 })
 describe('local 失败落诊断日志（设置页「诊断记录」）', () => {
-  it('summarize 坏 JSON：parse 失败入档，含原始响应摘录与端点/模型', async () => {
+  it('summarize 流里解析不出内容：parse「空回复」失败入档', async () => {
+    // 200 + 非流式垃圾体：SSE 解析器跳过所有行 → 空内容 → 必须报错而不是空总结。
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('<html>not json</html>', { status: 200 })),
+      vi.fn(async () => new Response('<html>not sse</html>', { status: 200 })),
     )
     const backend = createLocalBackend(settingsOf({}))
-    await expect(backend.summarize(SUMMARIZE_INPUT)).rejects.toMatchObject({ kind: 'parse' })
+    await expect(backend.summarize(SUMMARIZE_INPUT)).rejects.toMatchObject({
+      kind: 'parse',
+      message: expect.stringContaining('空回复'),
+    })
     const log = await chrome.storage.local.get('aiFailureLog')
     const list = log.aiFailureLog as Array<Record<string, unknown>>
     expect(list).toHaveLength(1)
@@ -248,7 +263,6 @@ describe('local 失败落诊断日志（设置页「诊断记录」）', () => {
       endpoint: 'https://llm.example/v1',
       model: 'm-1',
     })
-    expect(String(list[0]?.rawExcerpt)).toContain('not json')
   })
 
   it('chat 流失败：end{error} 收束的同时入档', async () => {

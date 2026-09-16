@@ -14,9 +14,12 @@ import type {
   SummarizeResult,
 } from '../port'
 import { buildChatMessages, buildSummaryMessages, parseSummarizeResponse } from '../prompts'
-import { chatCompletion, chatCompletionStream, type ChatEndpoint } from '../llm/client'
+import { chatCompletionStream, type ChatEndpoint } from '../llm/client'
 import { runRagDetect, type DetectHooks } from '../rag/detect'
 import { recordAiFailure, type AiFailureFeature } from '../diagnostics-log'
+
+/** 总结的流式死线：流式靠持续分块保活，不再受非流式 120 秒限制，但仍要有界。 */
+const SUMMARIZE_STREAM_TIMEOUT_MS = 300_000
 
 export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}): AiCapabilities {
   const endpoint: ChatEndpoint = {
@@ -56,11 +59,22 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
 
     async summarize(input: SummarizeInput): Promise<SummarizeResult> {
       try {
-        const { content } = await chatCompletion({
+        // 走流式而非一次性补全：长回复的非流式连接会被部分网关中途掐断
+        // （症状一半截体 → parse 错、连接直切 → network 错）；流式有持续分块，
+        // Claude Code 类网关（方舟 Coding 等）按流式设计，不会掐。
+        // 面板暂不消费增量（onChunk 留空），只在收尾解析全文。
+        const deadline = AbortSignal.timeout(SUMMARIZE_STREAM_TIMEOUT_MS)
+        const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline
+        const { content } = await chatCompletionStream({
           endpoint,
           messages: buildSummaryMessages(input),
-          signal: input.signal,
+          signal,
+          onChunk: () => {},
         })
+        // 200 但流里解析不出任何内容（错误页/非流式体）：不算成功，别拿空总结糊弄面板。
+        if (content.trim() === '') {
+          throw new AiError('parse', '端点返回了空回复（可能回了错误页或非流式内容）')
+        }
         return parseSummarizeResponse(content)
       } catch (error) {
         logFailure('总结', error)

@@ -40,7 +40,8 @@ describe('testChatEndpoint', () => {
       vi.fn(async () => jsonResponse({ choices: [{ message: { content: '' } }] })),
     )
     const result = await testChatEndpoint({ baseUrl: 'https://llm.example/v1', model: 'm-1', apiKey: 'k' })
-    expect(result).toEqual({ ok: false, reason: '端点返回了空回复' })
+    expect(result).toMatchObject({ ok: false, reason: '端点返回了空回复' })
+    if (!result.ok) expect(result.failure).toMatchObject({ kind: 'parse' })
   })
 
   it('网络失败红灯：reason 给出系统代理排查方向', async () => {

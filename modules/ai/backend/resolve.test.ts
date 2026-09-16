@@ -29,8 +29,15 @@ function serverSummaryResponse(): Response {
 }
 
 function localCompletionResponse(): Response {
+  // summarize 走流式：本地通道用 SSE 回总结全文（两个 delta 验证聚合）。
+  const content = JSON.stringify({ summary: '本地总结', segments: [] })
+  const half = Math.ceil(content.length / 2)
   return new Response(
-    JSON.stringify({ choices: [{ message: { content: JSON.stringify({ summary: '本地总结', segments: [] }) } }] }),
+    [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(0, half) } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(half) } }] })}`,
+      'data: [DONE]',
+    ].join('\n') + '\n',
     { status: 200 },
   )
 }

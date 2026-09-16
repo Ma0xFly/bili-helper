@@ -5,7 +5,7 @@
 // 运行模式不暴露 local/server/auto 术语：开关关=local，开关开=server，回退勾上=auto。
 // 端点读写只经 modules/settings 助手。其余分组（服务器独立页签/过滤/净化/布局/增强）仍为占位。
 
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { testChatEndpoint, testEmbeddingEndpoint } from '../../modules/ai/endpoint-test'
 import type { EndpointTestResult } from '../../modules/ai/endpoint-test'
 import { listModels } from '../../modules/ai/llm/client'
@@ -197,9 +197,12 @@ function recordFetchFailure(feature: '模型列表', error: unknown): void {
   }).then(loadFailures)
 }
 
-// ---------- 诊断记录（AI 失败控制台） ----------
-// 总结/提问/去广告失败在 local 后端自动落档；这里展示 + 清空。
+// ---------- 诊断控制台（终端形式） ----------
+// 总结/提问/去广告/连通测试失败自动落档；这里以终端样式展示。
+// 展开（或点击终端本体）即刷新，展开期间每 5 秒自动刷新——失败发生时打开就能看到。
 const failures = ref<AiFailureEntry[]>([])
+const consoleOpen = ref(false)
+let consoleTimer: number | undefined
 
 async function loadFailures(): Promise<void> {
   try {
@@ -208,6 +211,22 @@ async function loadFailures(): Promise<void> {
     failures.value = []
   }
 }
+
+function toggleConsole(): void {
+  consoleOpen.value = !consoleOpen.value
+  if (consoleTimer !== undefined) {
+    window.clearInterval(consoleTimer)
+    consoleTimer = undefined
+  }
+  if (consoleOpen.value) {
+    void loadFailures()
+    consoleTimer = window.setInterval(() => void loadFailures(), 5000)
+  }
+}
+
+onUnmounted(() => {
+  if (consoleTimer !== undefined) window.clearInterval(consoleTimer)
+})
 
 async function onClearFailures(): Promise<void> {
   await clearAiFailures()
@@ -290,16 +309,34 @@ async function testChatInline(): Promise<void> {
     chatTest.result = { kind: 'fail', text: '请先填写 Base URL 和模型，再测试连接' }
     return
   }
-  await runInlineTest(chatTest, async () =>
-    asFeedback(
-      await testChatEndpoint({
-        baseUrl: form.apiUrl,
-        model: form.model,
-        apiKey: form.apiKey,
-        format: form.apiFormat,
-      }),
-    ),
-  )
+  await runInlineTest(chatTest, async () => {
+    const result = await testChatEndpoint({
+      baseUrl: form.apiUrl,
+      model: form.model,
+      apiKey: form.apiKey,
+      format: form.apiFormat,
+    })
+    recordTestFailure(result, form.apiUrl, form.model)
+    return asFeedback(result)
+  })
+}
+
+/** 连通测试失败落诊断日志（终端控制台直接可看）；成功不记，避免噪音。 */
+function recordTestFailure(
+  result: EndpointTestResult,
+  endpoint: string,
+  model: string,
+): void {
+  if (result.ok || result.failure === undefined) return
+  void recordAiFailure({
+    time: Date.now(),
+    feature: '连通测试',
+    kind: result.failure.kind,
+    message: result.failure.message,
+    ...(result.failure.rawResponse === undefined ? {} : { rawExcerpt: result.failure.rawResponse }),
+    ...(endpoint.trim() === '' ? {} : { endpoint }),
+    ...(model.trim() === '' ? {} : { model }),
+  }).then(loadFailures)
 }
 
 async function testEmbedInline(): Promise<void> {
@@ -308,15 +345,15 @@ async function testEmbedInline(): Promise<void> {
     embedTest.result = { kind: 'fail', text: '请先填写（或继承对话端点的）Base URL 与嵌入模型' }
     return
   }
-  await runInlineTest(embedTest, async () =>
-    asFeedback(
-      await testEmbeddingEndpoint({
-        baseUrl: endpoint.baseUrl,
-        model: endpoint.model,
-        apiKey: endpoint.apiKey,
-      }),
-    ),
-  )
+  await runInlineTest(embedTest, async () => {
+    const result = await testEmbeddingEndpoint({
+      baseUrl: endpoint.baseUrl,
+      model: endpoint.model,
+      apiKey: endpoint.apiKey,
+    })
+    recordTestFailure(result, endpoint.baseUrl, endpoint.model)
+    return asFeedback(result)
+  })
 }
 
 async function testServerInline(): Promise<void> {
@@ -731,13 +768,20 @@ onMounted(loadFailures)
         </section>
 
         <section class="card" aria-labelledby="diag-log-title">
-          <h2 id="diag-log-title" class="card-title">诊断记录</h2>
+          <h2 id="diag-log-title" class="card-title">诊断控制台</h2>
           <p class="card-note">
-            最近 {{ failures.length }}/20 条 AI 失败（总结 / 提问 / 去广告 / 模型列表），
-            含原始响应摘录——「回答没看懂（格式不对）」时能直接看到模型回了什么。记录不含任何密钥。
+            AI 失败的终端视图（最近 {{ failures.length }}/20 条：总结 / 提问 / 去广告 / 连通测试 / 模型列表），
+            含模型原始响应摘录。点开即刷新、展开期间每 5 秒自动刷新；点击终端本体也可手动刷新。不含任何密钥。
           </p>
           <div class="diag-log-actions">
-            <button type="button" class="ghost" @click="loadFailures">刷新</button>
+            <button
+              type="button"
+              class="ghost"
+              :aria-expanded="consoleOpen ? 'true' : 'false'"
+              @click="toggleConsole"
+            >
+              {{ consoleOpen ? '收起控制台' : '打开控制台' }}
+            </button>
             <button
               type="button"
               class="ghost danger"
@@ -747,21 +791,30 @@ onMounted(loadFailures)
               清空
             </button>
           </div>
-          <ul v-if="failures.length > 0" class="diag-log-list">
-            <li v-for="(entry, index) in failures" :key="index" class="diag-log-item">
-              <div class="diag-log-head">
-                <span class="diag-log-feature">{{ entry.feature }}</span>
-                <span class="diag-log-kind" :class="entry.kind">{{ entry.kind }}</span>
-                <span class="diag-log-time">{{ failureTimeText(entry) }}</span>
-              </div>
-              <div class="diag-log-msg">{{ entry.message }}</div>
-              <pre v-if="entry.rawExcerpt" class="diag-log-raw">{{ entry.rawExcerpt }}</pre>
-              <div v-if="entry.endpoint || entry.model" class="diag-log-meta">
-                {{ entry.endpoint }}{{ entry.endpoint && entry.model ? ' · ' : '' }}{{ entry.model }}
-              </div>
-            </li>
-          </ul>
-          <p v-else class="field-hint">暂无失败记录。</p>
+          <div v-show="consoleOpen" class="bh-terminal" role="log" @click="loadFailures">
+            <div class="terminal-head" aria-hidden="true">
+              <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
+              <span class="terminal-title">ai-diagnostics</span>
+              <span class="terminal-count">{{ failures.length }}/20</span>
+            </div>
+            <div class="terminal-body">
+              <template v-if="failures.length > 0">
+                <div v-for="(entry, index) in failures" :key="index" class="diag-log-item">
+                  <div class="diag-log-line">
+                    <span class="terminal-prompt">[{{ failureTimeText(entry) }}]</span>
+                    <span class="diag-log-feature">{{ entry.feature }}</span>
+                    <span class="diag-log-kind" :class="entry.kind">{{ entry.kind }}</span>
+                    <span class="diag-log-msg">{{ entry.message }}</span>
+                  </div>
+                  <pre v-if="entry.rawExcerpt" class="diag-log-raw">  ↳ {{ entry.rawExcerpt }}</pre>
+                  <div v-if="entry.endpoint || entry.model" class="diag-log-meta">
+                    ↳ {{ entry.endpoint }}{{ entry.endpoint && entry.model ? ' · ' : '' }}{{ entry.model }}
+                  </div>
+                </div>
+              </template>
+              <div v-else class="terminal-empty">$ 暂无失败记录<span class="terminal-cursor">▊</span></div>
+            </div>
+          </div>
         </section>
 
         <section class="card" aria-labelledby="features-title">
@@ -1434,96 +1487,150 @@ input:focus-visible {
   border: 1px solid rgba(240, 196, 120, 0.4);
 }
 
-/* ---------- 诊断记录卡：失败条目（功能/错误类/时间 + 文案 + 原始响应摘录） ---------- */
+/* ---------- 诊断控制台：终端样式（黑底等宽、绿提示符、点击刷新） ---------- */
 .diag-log-actions {
   display: flex;
   gap: 10px;
   margin-bottom: 12px;
 }
 
-.diag-log-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.bh-terminal {
+  border-radius: 12px;
+  border: 1px solid #2d2b3a;
+  background: #0f1117;
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(15, 17, 23, 0.35);
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  background: #161922;
+  border-bottom: 1px solid #2d2b3a;
+}
+
+.terminal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #3a3d47;
+}
+
+.terminal-dot:first-child {
+  background: #e5565c;
+}
+
+.terminal-dot:nth-child(2) {
+  background: #d9a94e;
+}
+
+.terminal-dot:nth-child(3) {
+  background: #43b661;
+}
+
+.terminal-title {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #8b93a7;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+.terminal-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: #6b7280;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+.terminal-body {
   max-height: 360px;
   overflow-y: auto;
+  padding: 12px 14px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #c9d1d9;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+}
+
+.terminal-prompt {
+  color: #43b661;
+  margin-right: 6px;
+}
+
+.terminal-empty {
+  color: #8b93a7;
+}
+
+.terminal-cursor {
+  margin-left: 4px;
+  color: #43b661;
+  animation: terminal-blink 1.1s step-end infinite;
+}
+
+@keyframes terminal-blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 .diag-log-item {
-  padding: 10px 12px;
-  border: 1px solid #ece7f7;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.6);
-  font-size: 13px;
+  word-break: break-all;
 }
 
-.diag-log-head {
+.diag-log-line {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 6px;
+  align-items: baseline;
 }
 
 .diag-log-feature {
-  font-weight: 600;
+  color: #79c0ff;
+  font-weight: 700;
 }
 
 .diag-log-kind {
-  font-size: 11px;
-  border-radius: 999px;
-  padding: 1px 8px;
-  background: #fdecee;
-  color: #e5484d;
+  font-size: 10.5px;
+  border-radius: 4px;
+  padding: 0 6px;
+  background: rgba(248, 81, 73, 0.18);
+  color: #f85149;
 }
 
 .diag-log-kind.parse,
 .diag-log-kind.config {
-  background: #fdf5e6;
-  color: #b5822a;
-}
-
-.diag-log-kind.network,
-.diag-log-kind.http,
-.diag-log-kind.auth {
-  background: #fdecee;
-  color: #e5484d;
-}
-
-.diag-log-time {
-  margin-left: auto;
-  font-size: 11.5px;
-  color: #8b84a0;
+  background: rgba(210, 153, 34, 0.18);
+  color: #d29914;
 }
 
 .diag-log-msg {
-  line-height: 1.6;
-  word-break: break-all;
+  color: #c9d1d9;
 }
 
 .diag-log-raw {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #f7f4fd;
-  border: 1px dashed #e3def0;
-  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  margin: 2px 0 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #161b27;
+  border-left: 2px solid #30364a;
+  color: #9aa4b8;
+  font-family: inherit;
   font-size: 11.5px;
-  line-height: 1.6;
-  color: #4a4460;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 160px;
+  max-height: 140px;
   overflow-y: auto;
 }
 
 .diag-log-meta {
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: #8b84a0;
-  word-break: break-all;
+  color: #6b7280;
+  font-size: 11px;
 }
 
 .actions {

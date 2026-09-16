@@ -3,6 +3,7 @@
 // 未配置时由直连客户端的 config 守卫拦截，reason 即「先去设置页配置端点」。
 
 import { AiError } from '../shared/error'
+import type { AiErrorKind } from '../shared/error'
 import type { ApiFormat, ChatEndpoint } from './llm/client'
 import { PROBE_TIMEOUT_MS, chatCompletion, embeddings, withDeadline } from './llm/client'
 
@@ -15,9 +16,16 @@ export interface EndpointTestParams {
   signal?: AbortSignal
 }
 
+/** 失败时的结构化详情（诊断日志用）：kind/文案/原始响应摘录。 */
+export interface EndpointTestFailure {
+  kind: AiErrorKind
+  message: string
+  rawResponse?: string
+}
+
 export type EndpointTestResult =
   | { ok: true; model: string; ms: number }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; failure?: EndpointTestFailure }
 
 export async function testChatEndpoint(params: EndpointTestParams): Promise<EndpointTestResult> {
   // 探测用短死线：端点接受连接但不响应时不能悬挂配置台。
@@ -54,7 +62,19 @@ async function runProbe(
     })
     return { ok: true, model: params.model, ms: Date.now() - started }
   } catch (error) {
-    return { ok: false, reason: describeTestFailure(error) }
+    return {
+      ok: false,
+      reason: describeTestFailure(error),
+      ...(error instanceof AiError
+        ? {
+            failure: {
+              kind: error.kind,
+              message: error.message,
+              ...(error.rawResponse === undefined ? {} : { rawResponse: error.rawResponse }),
+            },
+          }
+        : {}),
+    }
   }
 }
 
