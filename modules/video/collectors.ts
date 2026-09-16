@@ -163,9 +163,21 @@ function isMillisecondUnit(rawLines: Record<string, unknown>[], duration: number
 
 async function fetchSubtitleJson(url: string, duration: number): Promise<Subtitle[]> {
   const raw = ensureHttps(url)
-  if (!raw) return []
-  const data = await fetchBiliJson(raw, timeoutSignal())
-  if (!isRecord(data) || !Array.isArray(data.body)) return []
+  if (!raw) {
+    console.info(`[bili-helper] 字幕 JSON：URL 无法规范化（${url.slice(0, 60)}）`)
+    return []
+  }
+  console.info('[bili-helper] 字幕 JSON：拉取', raw.slice(0, 96))
+  // 字幕 CDN（aisubtitle.hdslb.com）回 Access-Control-Allow-Origin: *——规范禁止 * 与
+  // credentials:'include' 共用，带上就直接 Failed to fetch。URL 自带 auth_key 鉴权，
+  // 不需要 cookie，用默认凭据模式（跨域不发送）即可。
+  const response = await fetch(raw, { signal: timeoutSignal() })
+  if (!response.ok) throw new Error(`请求失败：${response.status}`)
+  const data: unknown = await response.json()
+  if (!isRecord(data) || !Array.isArray(data.body)) {
+    console.info('[bili-helper] 字幕 JSON：响应缺少 body 数组', JSON.stringify(data).slice(0, 120))
+    return []
+  }
   const rawLines = data.body.filter(isRecord)
   const scale = isMillisecondUnit(rawLines, duration) ? 0.001 : 1
   const lines: Subtitle[] = []
@@ -184,16 +196,74 @@ function ensureHttps(url: string): string {
   return trimmed.startsWith('https://') ? trimmed : ''
 }
 
+/** player wbi 接口回的列表项形状（与页面状态同构：lan + subtitle_url）。 */
+interface PlayerApiSubtitleItem {
+  lan?: string
+  subtitle_url?: string
+}
+
+/**
+ * 页面状态的字幕列表经常是空的（B 站把真实列表挪到了 x/player/wbi/v2，AI 字幕还要求登录态）——
+ * 空列表时走 player 接口兜底：WBI 签名 + 浏览器自动带 cookie，与登录用户身份一致。
+ */
+async function subtitleListFromPlayerApi(video: VideoMeta): Promise<BiliSubtitleListItem[]> {
+  if (video.cid === undefined) return []
+  try {
+    const data = await fetchJsonWithWbi(
+      'https://api.bilibili.com/x/player/wbi/v2',
+      { bvid: video.bvid, cid: video.cid },
+      timeoutSignal(),
+    )
+    if (!isRecord(data) || !isRecord(data.data)) {
+      console.info('[bili-helper] 字幕兜底：player 接口响应形状异常', JSON.stringify(data).slice(0, 160))
+      return []
+    }
+    const code = typeof data.code === 'number' ? data.code : undefined
+    const subtitle = isRecord(data.data.subtitle) ? data.data.subtitle : undefined
+    const list = subtitle && Array.isArray(subtitle.subtitles) ? subtitle.subtitles : []
+    console.info(
+      `[bili-helper] 字幕兜底：player 接口 code=${code} login_mid=${String((data.data as Record<string, unknown>).login_mid ?? '?')} 字幕轨=${list.length}`,
+    )
+    return list
+      .filter(isRecord)
+      .map((item) => ({
+        lan: typeof item.lan === 'string' ? item.lan : undefined,
+        subtitle_url: typeof item.subtitle_url === 'string' ? item.subtitle_url : undefined,
+      }))
+  } catch (error) {
+    console.info('[bili-helper] 字幕兜底：player 接口请求失败', error instanceof Error ? error.message : String(error))
+    return []
+  }
+}
+
 export async function collectSubtitles(video: VideoMeta): Promise<Subtitle[]> {
   try {
-    // player 字幕列表：优先中文档（lan 含 zh），退而取第一档。
-    const list = videoData()?.subtitle?.list ?? []
-    const candidates = list.filter((item) => typeof item.subtitle_url === 'string' && item.subtitle_url.trim() !== '')
+    // 字幕列表：页面状态优先（零网络成本），空则 player wbi 接口兜底。
+    const pageList = videoData()?.subtitle?.list ?? []
+    let candidates = pageList.filter(
+      (item): item is BiliSubtitleListItem =>
+        typeof item.subtitle_url === 'string' && item.subtitle_url.trim() !== '',
+    )
+    if (candidates.length === 0) {
+      candidates = (await subtitleListFromPlayerApi(video)).filter(
+        (item): item is BiliSubtitleListItem =>
+          typeof item.subtitle_url === 'string' && item.subtitle_url.trim() !== '',
+      )
+    }
+    // 优先中文档（lan 含 zh），退而取第一档。
     const zh = candidates.find((item) => (item.lan ?? '').toLowerCase().includes('zh'))
-    const chosen = zh ?? candidates[0]
-    if (!chosen) return []
-    return await fetchSubtitleJson(chosen.subtitle_url ?? '', video.duration)
-  } catch {
+    const chosen = (zh ?? candidates[0]) as PlayerApiSubtitleItem | undefined
+    if (!chosen) {
+      console.info(`[bili-helper] 字幕：无可用轨道（候选 ${candidates.length}）`)
+      return []
+    }
+    const lines = await fetchSubtitleJson(chosen.subtitle_url ?? '', video.duration)
+    console.info(
+      `[bili-helper] 字幕：选中 lan=${chosen.lan ?? '?'} url=${(chosen.subtitle_url ?? '').slice(0, 48)}… 解析=${lines.length}行`,
+    )
+    return lines
+  } catch (error) {
+    console.info('[bili-helper] 字幕采集异常：', error instanceof Error ? error.message : String(error))
     return []
   }
 }

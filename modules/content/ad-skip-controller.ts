@@ -235,6 +235,9 @@ export class AdSkipController {
         this.deps.collectDanmaku(meta),
         this.deps.collectComments(meta),
       ])
+      console.info(
+        `[bili-helper] 去广告检测开始 bvid=${meta.bvid} 时长=${meta.duration}s 字幕=${subtitles.length}行 弹幕=${danmaku.length}条 评论=${comments.length}条`,
+      )
 
       let settings: AiSettings
       try {
@@ -243,7 +246,10 @@ export class AdSkipController {
         return
       }
       this.masterEnabled = settings.adSkipEnabled
-      if (!this.masterEnabled || !this.pageEnabled) return
+      if (!this.masterEnabled || !this.pageEnabled) {
+        console.info('[bili-helper] 去广告未启用（总开关或页内开关关闭），跳过检测')
+        return
+      }
 
       const backend = this.deps.createBackend(settings, {
         onVectorFallback: () => {
@@ -255,6 +261,7 @@ export class AdSkipController {
       })
 
       let result: DetectAdsResult
+      const detectStartedAt = Date.now()
       try {
         result = await backend.detectAds({
           video: meta,
@@ -263,10 +270,21 @@ export class AdSkipController {
           comments,
           strategy: 'smart',
         })
-      } catch {
-        // 端点未配置（config）/后端失败：静默不弹 UI；pipelineStarted 保持 false，冷却后重试。
+      } catch (error) {
+        // 端点未配置（config）/后端失败：不弹 UI；pipelineStarted 保持 false，冷却后重试。
+        // 但必须留下日志——静默失败是排障黑洞（用户只会看到「没有标记」）。
+        console.error(
+          '[bili-helper] 去广告检测失败（冷却后自动重试）:',
+          error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        )
         return
       }
+      console.info(
+        `[bili-helper] 去广告检测完成 source=${result.source} 广告段=${result.ads.length} 耗时=${Math.round((Date.now() - detectStartedAt) / 1000)}s` +
+          (result.ads.length > 0
+            ? ' → ' + result.ads.map((ad) => `${Math.round(ad.start)}-${Math.round(ad.end)}s(${ad.product_name || '未命名'},${ad.confidence.toFixed(2)})`).join(' ')
+            : ''),
+      )
       if (!this.pageEnabled || !this.masterEnabled) return
       this.ads = sortedAds(result.ads)
       ui.ads = [...this.ads]

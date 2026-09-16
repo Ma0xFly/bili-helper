@@ -106,8 +106,56 @@ describe('collectSubtitles', () => {
     expect(await collectSubtitles(VIDEO)).toEqual([])
   })
 
-  it('无字幕列表 → 空数组', async () => {
+  it('页面状态列表为空 → player wbi 接口兜底（2026 形态：真实列表只在接口里）', async () => {
+    setPageState({ videoData: { subtitle: { list: [] } } })
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url)
+      if (target.includes('/x/web-interface/nav')) {
+        return jsonResponse({
+          code: 0,
+          data: {
+            wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/a.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/b.png' },
+          },
+        })
+      }
+      if (target.includes('/x/player/wbi/v2')) {
+        expect(target).toContain('bvid=BV1xx411c7mD')
+        expect(target).toContain('cid=123456')
+        expect(target).toContain('w_rid=')
+        return jsonResponse({
+          code: 0,
+          data: {
+            subtitle: {
+              subtitles: [
+                { lan: 'ai-zh', lan_doc: '中文（自动生成）', subtitle_url: '//aisubtitle.example/zh.json' },
+              ],
+            },
+          },
+        })
+      }
+      if (target.includes('aisubtitle.example/zh.json')) {
+        // 协议相对 URL 必须补 https 再拉取。
+        expect(target.startsWith('https://')).toBe(true)
+        return jsonResponse({ body: [{ from: 353, to: 432, content: '限时优惠，点评论区链接下单' }] })
+      }
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await collectSubtitles(VIDEO)).toEqual([
+      { start: 353, end: 432, text: '限时优惠，点评论区链接下单' },
+    ])
+  })
+
+  it('页面状态与 player 接口都拿不到列表 → 空数组（不抛错）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('offline'))))
     expect(await collectSubtitles(VIDEO)).toEqual([])
+  })
+
+  it('cid 缺失时不发 player 兜底请求 → 空数组', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await collectSubtitles({ ...VIDEO, cid: undefined })).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
