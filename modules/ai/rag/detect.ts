@@ -25,7 +25,8 @@ import { rankWindowsByLexical } from './bm25'
 import { chunkSubtitleWindows } from './vector'
 import type { SubtitleWindow } from './vector'
 import { rankWindowsByVector } from './vector'
-import { effectiveCorpus } from './user-corpus'
+import { effectiveCorpusDetailed, recordUserCorpusHits } from './user-corpus'
+import { chunkDanmakuWindows, rankWindowsByDanmaku } from './danmaku-signal'
 import { rrfFuse } from './rrf'
 
 export interface DetectHooks {
@@ -241,9 +242,12 @@ export async function runRagDetect(
 
   const { video, subtitles } = input
   const duration = video.duration
-  const windows = chunkSubtitleWindows(subtitles)
-  // 生效语料 = 内置词库 + 用户补录（一次读取，两路召回共用同一份，避免两路口径不一致）。
-  const corpus = await effectiveCorpus()
+  // 字幕窗口优先；字幕缺失（无 ASR/未上传）时用弹幕自建窗口兜底——检测退而不亡。
+  const subtitleWindows = chunkSubtitleWindows(subtitles)
+  const windows = subtitleWindows.length > 0 ? subtitleWindows : chunkDanmakuWindows(input.danmaku ?? [])
+  // 生效语料 = 内置词库 + 用户补录（一次读取，各路召回共用同一份，避免口径不一致）；
+  // userTexts 标记用户来源，供命中统计区分（内置词条不计入）。
+  const { signals: corpus, userTexts } = await effectiveCorpusDetailed()
 
   // 召回第一路：词表/BM25（纯计算，内部已防御，再兜一层保证永不抛错）。
   let lexicalRanked: LexicalRankedWindow[] = []
@@ -270,8 +274,36 @@ export async function runRagDetect(
     }
   }
 
-  // 两路 RRF 融合出候选窗口。
-  const fused = rrfFuse([lexicalRanked.map((item) => item.index), vectorRankedIndexes])
+  // 召回第三路：弹幕信号（观众自发刷「广告/恰饭/跳过」，抗 ASR 噪声）；纯计算永不抛错。
+  let danmakuRankedIndexes: number[] = []
+  try {
+    danmakuRankedIndexes = rankWindowsByDanmaku(windows, input.danmaku ?? [], corpus).map(
+      (item) => item.index,
+    )
+  } catch {
+    danmakuRankedIndexes = []
+  }
+
+  // 三路 RRF 融合出候选窗口。
+  const fused = rrfFuse([
+    lexicalRanked.map((item) => item.index),
+    vectorRankedIndexes,
+    danmakuRankedIndexes,
+  ])
+
+  // 用户补录词条命中统计（设置页展示「命中 N 次」）：只看融合命中窗口的文本，
+  // 异步落库、失败静默——统计绝不能拖垮检测主链路。
+  if (fused.length > 0) {
+    const hitTexts = new Set<string>()
+    const fusedIndexes = new Set(fused.map((item) => item.index))
+    for (const window of windows) {
+      if (!fusedIndexes.has(window.index)) continue
+      for (const text of userTexts) {
+        if (window.text.includes(text)) hitTexts.add(text)
+      }
+    }
+    if (hitTexts.size > 0) void recordUserCorpusHits([...hitTexts])
+  }
   if (fused.length === 0) {
     // ③无命中且字幕可用：LLM 全文兜底（对话可用时）；极速模式/无字幕：空结果收尾。
     if (!chatReady) return { ads: [], source: 'none' }

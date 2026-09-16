@@ -693,6 +693,40 @@ describe('options AI 助手表单', () => {
   })
 
 
+  it('批量粘贴补录：多行入库、重复跳过给原因、列表即时更新', async () => {
+    await chrome.storage.local.set({
+      biliHelperUserCorpus: [
+        { text: '已有词', category: 'scripts', kind: 'script', weight: 2, note: '', createdAt: 'x', hitCount: 3, lastHitAt: '' },
+      ],
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    // 命中次数徽标：存储里的 hitCount 直接展示
+    expect(wrapper.find('.corpus-hits').text()).toBe('命中 3')
+
+    await findButton(wrapper, '批量粘贴').trigger('click')
+    await wrapper.find('textarea[aria-label="批量补录词条"]').setValue('词A\n词B\n已有词\n词A')
+    await findButton(wrapper, '全部入库').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已批量补录 2 条')
+    expect(wrapper.text()).toContain('跳过 2 条')
+    const words = wrapper.findAll('.corpus-word').map((item) => item.text())
+    expect(words).toEqual(['已有词', '词A', '词B'])
+    // 新词条命中数从 0 起
+    expect(wrapper.findAll('.corpus-hits')[1]?.text()).toBe('命中 0')
+  })
+
+  it('批量粘贴：空文本拒绝并提示', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '批量粘贴').trigger('click')
+    await findButton(wrapper, '全部入库').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('先在文本框里贴词条')
+  })
+
   it('API 协议选择：anthropic 回填与写回', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: { apiFormat: 'anthropic' },

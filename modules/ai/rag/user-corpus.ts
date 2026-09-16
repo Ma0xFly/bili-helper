@@ -24,6 +24,10 @@ export interface UserCorpusEntry {
   /** 来源备注（可空）：如「BV1xx 03:20–04:10 漏检」，导出 md patch 时作为注释保留。 */
   note: string
   createdAt: string
+  /** 实际参与召回命中的次数（检测链路自动累计）：0 = 还没产生过价值，可考虑清理。 */
+  hitCount: number
+  /** 最近一次命中时间（ISO；空串 = 从未命中）。 */
+  lastHitAt: string
 }
 
 export type AddUserCorpusResult =
@@ -81,6 +85,11 @@ export function normalizeUserEntry(value: unknown): UserCorpusEntry | null {
     // note 压成单行：手改/旧版本的脏数据里带换行，会让导出 patch 出现脱离注释的注入行。
     note: typeof value.note === 'string' ? value.note.replace(/\s+/gu, ' ').trim().slice(0, 200) : '',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
+    hitCount:
+      typeof value.hitCount === 'number' && Number.isFinite(value.hitCount) && value.hitCount > 0
+        ? Math.round(value.hitCount)
+        : 0,
+    lastHitAt: typeof value.lastHitAt === 'string' ? value.lastHitAt : '',
   }
 }
 
@@ -222,12 +231,115 @@ export async function addUserCorpusEntry(input: {
           weight: defaults.weight,
           note,
           createdAt: new Date().toISOString(),
+          hitCount: 0,
+          lastHitAt: '',
         },
       ]
       return { persist, value: { ok: true, entries: persist } }
     })
   } catch {
     return { ok: false, reason: '保存失败，请重试' }
+  }
+}
+
+export interface BatchAddResult {
+  ok: boolean
+  /** 成功入库的词条数。 */
+  added: number
+  /** 跳过的词条（重复/非法/超长），带原因供 UI 展示。 */
+  skipped: { text: string; reason: string }[]
+  /** 整体失败原因（存储写失败/品类不合法等；逐条跳过不算整体失败）。 */
+  reason?: string
+}
+
+/**
+ * 批量补录（设置页「批量粘贴」与面板「漏检补录」共用）：一次写链步骤完成全部校验与落库，
+ * 逐条给出去留原因；超过上限时按提交顺序截断（先贴的先入库）。
+ */
+export async function addUserCorpusEntries(input: {
+  texts: readonly string[]
+  category: string
+  note?: string
+}): Promise<BatchAddResult> {
+  const category = input.category.trim()
+  if (category === '' || corpusFileMeta(`${category}.md`) === null) {
+    return { ok: false, added: 0, skipped: [], reason: '品类不合法：请从下拉里选，或用 brands- 前缀新建分组' }
+  }
+  const note = (input.note ?? '').replace(/\s+/gu, ' ').trim().slice(0, 200)
+  const defaults = categoryDefaults(category)
+  // 提交内部去重（同词贴两行只算一次），保持提交顺序。
+  const seenInBatch = new Set<string>()
+  const candidates: string[] = []
+  const skipped: { text: string; reason: string }[] = []
+  for (const raw of input.texts) {
+    const text = normalizeEntryText(raw)
+    if (text === '') continue
+    if (seenInBatch.has(text)) {
+      skipped.push({ text, reason: '本批次重复' })
+      continue
+    }
+    seenInBatch.add(text)
+    candidates.push(text)
+  }
+  if (candidates.length === 0) {
+    return { ok: false, added: 0, skipped, reason: '没有可入库的词条' }
+  }
+  try {
+    return await mutate<BatchAddResult>((existing) => {
+      const persist = [...existing]
+      let added = 0
+      for (const text of candidates) {
+        const invalid = validateUserEntryText(text, persist)
+        if (invalid !== null) {
+          skipped.push({ text, reason: invalid })
+          continue
+        }
+        if (persist.length >= MAX_USER_ENTRIES) {
+          skipped.push({ text, reason: `超出词条上限 ${MAX_USER_ENTRIES}` })
+          continue
+        }
+        persist.push({
+          text,
+          category,
+          kind: defaults.kind,
+          weight: defaults.weight,
+          note,
+          createdAt: new Date().toISOString(),
+          hitCount: 0,
+          lastHitAt: '',
+        })
+        added += 1
+      }
+      if (added === 0) {
+        return { persist: null, value: { ok: false, added: 0, skipped, reason: '没有新词条入库' } }
+      }
+      return { persist, value: { ok: true, added, skipped } }
+    })
+  } catch {
+    return { ok: false, added: 0, skipped, reason: '保存失败，请重试' }
+  }
+}
+
+/**
+ * 命中统计：检测链路发现用户词条真的参与了召回时调用（一次写链步骤批量 +1）。
+ * 失败静默——统计是锦上添花，绝不能让写库问题冒泡进检测主链路。
+ */
+export async function recordUserCorpusHits(texts: readonly string[]): Promise<void> {
+  if (texts.length === 0) return
+  const targets = new Set(texts.map((text) => normalizeEntryText(text)).filter((text) => text !== ''))
+  if (targets.size === 0) return
+  try {
+    await mutate<UserCorpusEntry[]>((entries) => {
+      let touched = false
+      const persist = entries.map((entry) => {
+        if (!targets.has(entry.text)) return entry
+        touched = true
+        return { ...entry, hitCount: entry.hitCount + 1, lastHitAt: new Date().toISOString() }
+      })
+      return touched ? { persist, value: persist } : { persist: null, value: entries }
+    })
+  } catch {
+    // 静默：统计失败不影响任何用户可见行为。
   }
 }
 
@@ -283,7 +395,22 @@ export function mergeWithBuiltinCorpus(
 
 /** 检索入口用：内置 + 用户层的生效语料（读失败自动退化为纯内置）。 */
 export async function effectiveCorpus(): Promise<CorpusSignal[]> {
-  return mergeWithBuiltinCorpus(await readUserCorpus())
+  return (await effectiveCorpusDetailed()).signals
+}
+
+export interface EffectiveCorpus {
+  signals: CorpusSignal[]
+  /** 用户词条文本集：命中统计需要区分来源（内置词条不计入用户统计）。 */
+  userTexts: Set<string>
+}
+
+/** 同一次读取同时给出合并语料与用户词条来源标记，避免统计侧再读一遍存储。 */
+export async function effectiveCorpusDetailed(): Promise<EffectiveCorpus> {
+  const entries = await readUserCorpus()
+  return {
+    signals: mergeWithBuiltinCorpus(entries),
+    userTexts: new Set(entries.map((entry) => entry.text)),
+  }
 }
 
 /**

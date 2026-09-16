@@ -15,6 +15,11 @@ import {
   panelErrorCopy,
 } from '../../../../modules/ai/panel-logic'
 import type { PanelSegment } from '../../../../modules/ai/panel-logic'
+import { extractCorpusCandidates } from '../../../../modules/ai/corpus-candidates'
+import {
+  addUserCorpusEntries,
+  addUserCorpusEntry,
+} from '../../../../modules/ai/rag/user-corpus'
 import { renderMarkdown } from './render-markdown'
 
 const result = ref<SummarizeResult | null>(null)
@@ -78,6 +83,76 @@ function stop(): void {
   ownsGeneration = false
   panelActivity.summaryStatus = 'idle'
   controller?.abort()
+}
+
+// ---------- 漏检补录（面板内直达词库） ----------
+// 「这段是广告但没被认出来」：取当前播放位置 ±30 秒字幕切出候选信号词，
+// 用户点选后批量入库（scripts 品类）——把「猜词」变成「选词」。
+const corpusToolOpen = ref(false)
+const corpusCandidates = ref<string[]>([])
+const corpusSelected = ref<string[]>([])
+const corpusBusy = ref(false)
+const corpusHint = ref('')
+/** 打开工具时的播放位置（入库备注用，避免确认后时间已漂走）。 */
+let corpusCenterSeconds = 0
+
+function openCorpusTool(): void {
+  const session = panel.session
+  if (!session) return
+  corpusCenterSeconds = ui.currentTime
+  const candidates = extractCorpusCandidates(
+    session.context.subtitles,
+    corpusCenterSeconds - 30,
+    corpusCenterSeconds + 30,
+  )
+  corpusCandidates.value = candidates
+  corpusSelected.value = []
+  corpusHint.value = candidates.length === 0 ? '这一段没有可用字幕，无法提取候选词' : ''
+  corpusToolOpen.value = true
+}
+
+function toggleCorpusCandidate(text: string): void {
+  const index = corpusSelected.value.indexOf(text)
+  if (index === -1) corpusSelected.value.push(text)
+  else corpusSelected.value.splice(index, 1)
+}
+
+async function confirmCorpusEntries(): Promise<void> {
+  if (corpusBusy.value || corpusSelected.value.length === 0) return
+  corpusBusy.value = true
+  try {
+    const result = await addUserCorpusEntries({
+      texts: corpusSelected.value,
+      category: 'scripts',
+      note: `面板漏检补录 ${panel.session?.bvid ?? ''} ${formatPanelTimestamp(corpusCenterSeconds)}`,
+    })
+    corpusHint.value = result.ok
+      ? `已补录 ${result.added} 条，下次识别即生效${result.skipped.length > 0 ? `（跳过 ${result.skipped.length} 条）` : ''}`
+      : result.reason ?? '补录失败'
+    if (result.ok) corpusSelected.value = []
+  } finally {
+    corpusBusy.value = false
+  }
+}
+
+/** 广告段对应的产品名（从去广告链路的 ui.ads 按时间重叠找）。 */
+function brandWordFor(segment: PanelSegment): string {
+  const ad = ui.ads.find((item) => item.start < segment.end && item.end > segment.start)
+  return ad?.product_name.trim() || ''
+}
+
+async function saveBrandWord(segment: PanelSegment): Promise<void> {
+  const text = brandWordFor(segment)
+  if (text === '') return
+  const result = await addUserCorpusEntry({
+    text,
+    category: 'brands-user',
+    note: `面板广告段 ${panel.session?.bvid ?? ''} ${formatPanelTimestamp(segment.start)}`,
+  })
+  corpusHint.value = result.ok
+    ? `品牌词「${text}」已入库，下次识别即生效`
+    : `「${text}」入库失败：${result.reason}`
+  corpusToolOpen.value = true
 }
 
 onBeforeUnmount(() => {
@@ -151,6 +226,15 @@ onBeforeUnmount(() => {
               </span>
               <span v-if="segment.isAd" class="bh-seg-ad">广告</span>
             </button>
+            <button
+              v-if="segment.isAd && brandWordFor(segment) !== ''"
+              type="button"
+              class="bh-seg-brand"
+              :aria-label="`把 ${brandWordFor(segment)} 补录进广告词库`"
+              @click="saveBrandWord(segment)"
+            >
+              品牌词入库
+            </button>
           </li>
         </ol>
       </template>
@@ -164,5 +248,41 @@ onBeforeUnmount(() => {
         <button type="button" class="bh-btn-primary" @click="generate">生成总结</button>
       </div>
     </template>
+
+    <!-- 漏检补录工具：广告没被认出来时，从当前位置 ±30s 字幕里选词入库 -->
+    <div v-if="contextReady && !generating" class="bh-corpus-tool">
+      <button type="button" class="bh-link" @click="corpusToolOpen ? (corpusToolOpen = false) : openCorpusTool()">
+        {{ corpusToolOpen ? '收起漏检补录' : '有广告没被认出来？漏检补录' }}
+      </button>
+      <template v-if="corpusToolOpen">
+        <p v-if="corpusCandidates.length > 0" class="bh-corpus-tip">
+          点选下方候选词（来自当前位置 ±30 秒字幕），选中后入库：
+        </p>
+        <div v-if="corpusCandidates.length > 0" class="bh-corpus-chips" role="group" aria-label="候选补录词">
+          <button
+            v-for="candidate in corpusCandidates"
+            :key="candidate"
+            type="button"
+            class="bh-chip"
+            :class="{ on: corpusSelected.includes(candidate) }"
+            :aria-pressed="corpusSelected.includes(candidate) ? 'true' : 'false'"
+            @click="toggleCorpusCandidate(candidate)"
+          >
+            {{ candidate }}
+          </button>
+        </div>
+        <div v-if="corpusCandidates.length > 0" class="bh-corpus-actions">
+          <button
+            type="button"
+            class="bh-btn-primary"
+            :disabled="corpusSelected.length === 0 || corpusBusy"
+            @click="confirmCorpusEntries"
+          >
+            {{ corpusBusy ? '入库中…' : `补录入库（${corpusSelected.length}）` }}
+          </button>
+        </div>
+        <p v-if="corpusHint !== ''" class="bh-corpus-hint" role="status">{{ corpusHint }}</p>
+      </template>
+    </div>
   </div>
 </template>

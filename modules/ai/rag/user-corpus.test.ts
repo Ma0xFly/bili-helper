@@ -9,9 +9,12 @@ import {
   STORAGE_STEP_TIMEOUT_MS,
   USER_CORPUS_CATEGORIES,
   USER_CORPUS_KEY,
+  addUserCorpusEntries,
   addUserCorpusEntry,
   clearUserCorpus,
   effectiveCorpus,
+  effectiveCorpusDetailed,
+  recordUserCorpusHits,
   exportUserCorpusMarkdown,
   mergeWithBuiltinCorpus,
   normalizeUserEntry,
@@ -133,7 +136,7 @@ describe('addUserCorpusEntry', () => {
       kind: 'script' as const,
       weight: 2,
       note: '',
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(), hitCount: 0, lastHitAt: ''
     }))
     await chrome.storage.local.set({ [USER_CORPUS_KEY]: full })
     const result = await addUserCorpusEntry({ text: '再多一个', category: 'scripts' })
@@ -177,7 +180,7 @@ describe('addUserCorpusEntry', () => {
       kind: 'script' as const,
       weight: 2,
       note: '',
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(), hitCount: 0, lastHitAt: ''
     }))
     await chrome.storage.local.set({ [USER_CORPUS_KEY]: almostFull })
 
@@ -246,8 +249,8 @@ describe('removeUserCorpusEntry / clearUserCorpus', () => {
 describe('mergeWithBuiltinCorpus（两层合并）', () => {
   it('内置在前用户在后；text 撞车时内置优先（用户层改不了内置权重）', () => {
     const merged = mergeWithBuiltinCorpus([
-      { text: '恰饭', category: 'scripts', kind: 'script', weight: 9, note: '', createdAt: 'x' },
-      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: '', createdAt: 'x' },
+      { text: '恰饭', category: 'scripts', kind: 'script', weight: 9, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
     ])
     expect(merged).toHaveLength(AD_SIGNAL_CORPUS.length + 1)
     expect(merged.filter((signal) => signal.text === '恰饭')).toHaveLength(1)
@@ -257,9 +260,9 @@ describe('mergeWithBuiltinCorpus（两层合并）', () => {
 
   it('用户词条按品类分组追加（顺序稳定 → 哈希稳定）', () => {
     const entries = [
-      { text: '词Z', category: 'scripts', kind: 'script' as const, weight: 2, note: '', createdAt: 'x' },
-      { text: '词A', category: 'brands-food', kind: 'brand' as const, weight: 1, note: '', createdAt: 'x' },
-      { text: '词Y', category: 'scripts', kind: 'script' as const, weight: 2, note: '', createdAt: 'x' },
+      { text: '词Z', category: 'scripts', kind: 'script' as const, weight: 2, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '词A', category: 'brands-food', kind: 'brand' as const, weight: 1, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '词Y', category: 'scripts', kind: 'script' as const, weight: 2, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
     ]
     const tail = mergeWithBuiltinCorpus(entries).slice(AD_SIGNAL_CORPUS.length)
     expect(tail.map((signal) => signal.text)).toEqual(['词A', '词Z', '词Y'])
@@ -278,7 +281,7 @@ describe('mergeWithBuiltinCorpus（两层合并）', () => {
     const before = corpusContentHash()
     const after = corpusContentHash(
       mergeWithBuiltinCorpus([
-        { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: '', createdAt: 'x' },
+        { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
       ]),
     )
     expect(after).not.toBe(before)
@@ -312,9 +315,9 @@ describe('exportUserCorpusMarkdown（入库审核用 patch）', () => {
 
   it('按品类分组、权重非默认才写「词|N」、来源作为注释', () => {
     const patch = exportUserCorpusMarkdown([
-      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: 'BV1xx 03:20 漏检', createdAt: 'x' },
-      { text: '某话术', category: 'scripts', kind: 'script', weight: 3, note: '', createdAt: 'x' },
-      { text: '某话术二', category: 'scripts', kind: 'script', weight: 2, note: '', createdAt: 'x' },
+      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: 'BV1xx 03:20 漏检', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '某话术', category: 'scripts', kind: 'script', weight: 3, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '某话术二', category: 'scripts', kind: 'script', weight: 2, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
     ])
     expect(patch).toContain('# 用户补录广告词库导出')
     // 分组按品类名排序：brands-digital 在 scripts 前。
@@ -330,8 +333,8 @@ describe('exportUserCorpusMarkdown（入库审核用 patch）', () => {
 
   it('导出的 patch 能被词库解析器原样吃回去（追加进 md 不丢词）', () => {
     const patch = exportUserCorpusMarkdown([
-      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: 'BV1xx', createdAt: 'x' },
-      { text: '某话术', category: 'scripts', kind: 'script', weight: 3, note: '', createdAt: 'x' },
+      { text: '某新品牌', category: 'brands-digital', kind: 'brand', weight: 1, note: 'BV1xx', createdAt: 'x', hitCount: 0, lastHitAt: '' },
+      { text: '某话术', category: 'scripts', kind: 'script', weight: 3, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' },
     ])
     const digitalMeta = corpusFileMeta('brands-digital.md')
     const scriptsMeta = corpusFileMeta('scripts.md')
@@ -458,5 +461,73 @@ describe('补录端到端生效（storage → 生效语料 → 词表召回）',
     const ranked = rankWindowsByLexical(windows, await effectiveCorpus())
     expect(ranked.map((hit) => hit.index)).toContain(0)
     expect(ranked[0]?.index).toBe(0)
+  })
+})
+
+
+describe('addUserCorpusEntries（批量补录）', () => {
+  it('一次入库多词；重复/超长逐条给出去留原因', async () => {
+    await addUserCorpusEntry({ text: '已有词', category: 'scripts' })
+    const result = await addUserCorpusEntries({
+      texts: ['词A', '词B', '已有词', '词A', '  ', 'x'.repeat(MAX_ENTRY_LENGTH + 1)],
+      category: 'deals',
+      note: '批量测试',
+    })
+    expect(result.ok).toBe(true)
+    expect(result.added).toBe(2)
+    expect(result.skipped.map((item) => item.reason)).toEqual(
+      expect.arrayContaining(['这个词已经在你的词库里了', '本批次重复']),
+    )
+    const stored = await readUserCorpus()
+    expect(stored.map((entry) => entry.text)).toEqual(['已有词', '词A', '词B'])
+    expect(stored[1]).toMatchObject({ category: 'deals', note: '批量测试', hitCount: 0, lastHitAt: '' })
+  })
+
+  it('品类不合法整体拒绝；空列表拒绝', async () => {
+    const bad = await addUserCorpusEntries({ texts: ['词A'], category: 'misc' })
+    expect(bad).toMatchObject({ ok: false, added: 0 })
+    const empty = await addUserCorpusEntries({ texts: ['  ', ''], category: 'scripts' })
+    expect(empty).toMatchObject({ ok: false, added: 0 })
+  })
+
+  it('越过上限按提交顺序截断', async () => {
+    const filler = Array.from({ length: MAX_USER_ENTRIES - 1 }, (_, i) => `填充${i}`)
+    await addUserCorpusEntries({ texts: filler, category: 'scripts' })
+    const result = await addUserCorpusEntries({ texts: ['倒数第二', '最后一个'], category: 'scripts' })
+    expect(result.added).toBe(1)
+    expect(result.skipped.some((item) => item.reason.includes('词库已满'))).toBe(true)
+    await clearUserCorpus()
+  })
+})
+
+describe('recordUserCorpusHits（命中统计）', () => {
+  it('命中词条 +1 并记录时间；未命中词条不动', async () => {
+    await addUserCorpusEntries({ texts: ['词A', '词B'], category: 'scripts' })
+    await recordUserCorpusHits(['词A'])
+    await recordUserCorpusHits(['词A'])
+    const stored = await readUserCorpus()
+    const a = stored.find((entry) => entry.text === '词A')
+    const b = stored.find((entry) => entry.text === '词B')
+    expect(a?.hitCount).toBe(2)
+    expect(a?.lastHitAt).not.toBe('')
+    expect(b?.hitCount).toBe(0)
+    expect(b?.lastHitAt).toBe('')
+    await clearUserCorpus()
+  })
+
+  it('不存在的词/空列表静默（不抛错、不写库）', async () => {
+    await expect(recordUserCorpusHits(['没有这个词'])).resolves.toBeUndefined()
+    await expect(recordUserCorpusHits([])).resolves.toBeUndefined()
+  })
+})
+
+describe('effectiveCorpusDetailed（来源标记）', () => {
+  it('userTexts 只含用户词条；signals 与 effectiveCorpus 同源', async () => {
+    await addUserCorpusEntry({ text: '某新品牌词', category: 'brands-digital' })
+    const detailed = await effectiveCorpusDetailed()
+    expect(detailed.userTexts.has('某新品牌词')).toBe(true)
+    expect(detailed.userTexts.has('恰饭')).toBe(false)
+    expect(detailed.signals).toEqual(await effectiveCorpus())
+    await clearUserCorpus()
   })
 })

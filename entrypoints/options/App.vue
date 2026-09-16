@@ -13,6 +13,7 @@ import { probeServerEndpoint } from '../../modules/ai/server-probe'
 import { AD_SIGNAL_CORPUS } from '../../modules/ai/rag/corpus'
 import {
   USER_CORPUS_CATEGORIES,
+  addUserCorpusEntries,
   addUserCorpusEntry,
   clearUserCorpus,
   exportUserCorpusMarkdown,
@@ -497,6 +498,49 @@ async function addCorpusEntry(): Promise<void> {
   }
 }
 
+// ---------- 批量粘贴补录 ----------
+const corpusBatchOpen = ref(false)
+const corpusBatchText = ref('')
+const corpusBatchBusy = ref(false)
+
+async function addCorpusBatch(): Promise<void> {
+  if (corpusBatchBusy.value) return
+  const texts = corpusBatchText.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  if (texts.length === 0) {
+    corpusHint.value = { kind: 'fail', text: '先在文本框里贴词条（一行一个）' }
+    return
+  }
+  corpusBatchBusy.value = true
+  corpusHint.value = null
+  try {
+    const result = await addUserCorpusEntries({
+      texts,
+      category: corpusCategory.value,
+      note: corpusNote.value,
+    })
+    if (!result.ok) {
+      corpusHint.value = { kind: 'fail', text: result.reason ?? '批量补录失败' }
+      return
+    }
+    await loadUserCorpus()
+    const skippedNote =
+      result.skipped.length > 0
+        ? `，跳过 ${result.skipped.length} 条（${result.skipped.slice(0, 2).map((item) => `${item.text}：${item.reason}`).join('；')}${result.skipped.length > 2 ? ' 等' : ''}）`
+        : ''
+    corpusHint.value = {
+      kind: corpusTakesEffect.value ? 'ok' : 'warn',
+      text: `已批量补录 ${result.added} 条${skippedNote}`,
+    }
+    corpusBatchText.value = ''
+    corpusPatch.value = ''
+  } finally {
+    corpusBatchBusy.value = false
+  }
+}
+
 async function removeCorpusEntry(text: string): Promise<void> {
   corpusHint.value = null
   try {
@@ -887,10 +931,45 @@ onMounted(loadFailures)
             aria-label="词条来源备注"
           />
 
+          <div class="corpus-actions">
+            <button
+              type="button"
+              class="ghost"
+              :aria-expanded="corpusBatchOpen ? 'true' : 'false'"
+              @click="corpusBatchOpen = !corpusBatchOpen"
+            >
+              {{ corpusBatchOpen ? '收起批量粘贴' : '批量粘贴' }}
+            </button>
+          </div>
+          <div v-show="corpusBatchOpen" class="corpus-batch">
+            <textarea
+              v-model="corpusBatchText"
+              class="corpus-batch-input"
+              rows="4"
+              placeholder="一行一个词条，如：&#10;某某品牌&#10;限时国补&#10;以换代修"
+              aria-label="批量补录词条"
+            />
+            <button
+              type="button"
+              class="ghost"
+              :disabled="corpusBatchBusy"
+              @click="addCorpusBatch"
+            >
+              {{ corpusBatchBusy ? '入库中…' : '全部入库（用上方品类与备注）' }}
+            </button>
+          </div>
+
           <ul v-if="userEntries.length > 0" class="corpus-list">
             <li v-for="entry in userEntries" :key="entry.text" class="corpus-item">
               <span class="corpus-word">{{ entry.text }}</span>
               <span class="corpus-tag">{{ entry.category }}</span>
+              <span
+                class="corpus-hits"
+                :class="{ zero: entry.hitCount === 0 }"
+                :title="entry.lastHitAt ? `最近命中：${entry.lastHitAt}` : '尚未在检测中命中过'"
+              >
+                命中 {{ entry.hitCount }}
+              </span>
               <span v-if="entry.note !== ''" class="corpus-note">{{ entry.note }}</span>
               <button
                 type="button"
@@ -1268,6 +1347,46 @@ select:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+}
+
+.corpus-batch {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  max-width: 560px;
+}
+
+.corpus-batch-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e3def0;
+  background: #fbfaff;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #2e2a3b;
+  resize: vertical;
+}
+
+.corpus-batch .ghost {
+  align-self: flex-start;
+}
+
+.corpus-hits {
+  font-size: 11px;
+  color: #2fa96b;
+  background: #e9f6ee;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.corpus-hits.zero {
+  color: #a49cb8;
+  background: #f1eef9;
 }
 
 .corpus-del {

@@ -926,3 +926,84 @@
     transition: none;
   }
 }
+/* ---------- 漏检补录工具（总结 tab 底部）与广告段品牌词入库 ---------- */
+.bh-corpus-tool {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bh-surface-glass);
+  border: 1px solid var(--bh-glass-border);
+}
+
+.bh-corpus-tip {
+  margin: 8px 0 6px;
+  font-size: 11.5px;
+  color: var(--bh-text-secondary);
+}
+
+.bh-corpus-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bh-chip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--bh-glass-border);
+  background: var(--bh-purple-soft);
+  color: var(--bh-text-primary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.bh-chip.on {
+  border-color: var(--bh-primary);
+  background: var(--bh-primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+.bh-corpus-actions {
+  margin-top: 8px;
+}
+
+.bh-corpus-actions .bh-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bh-corpus-hint {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--bh-text-secondary);
+}
+
+.bh-seg-brand {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--bh-glass-border);
+  background: transparent;
+  color: var(--bh-text-secondary);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.bh-seg-brand:hover {
+  color: var(--bh-primary-bright);
+  border-color: var(--bh-primary);
+}
+
+/* 分段 li：主体按钮占满，品牌词入库按钮贴右侧（同行不折行） */
+.bh-seg-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bh-seg-list li .bh-seg-item {
+  flex: 1;
+  min-width: 0;
+}
