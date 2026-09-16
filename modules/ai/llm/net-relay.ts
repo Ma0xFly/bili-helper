@@ -263,7 +263,14 @@ export async function netRelayFetch(
     finish()
     if (!headSettled) {
       headSettled = true
-      rejectHead?.(new AiError('network', '请求发不出去，请检查端点地址与网络（后台连接中断）'))
+      // 后台连接中断多半是「构建更新了但扩展没重载」：陈旧扩展的 SW 起不来、无人应答。
+      // 文案直接指到重载，而不是让用户去查地址与网络。
+      rejectHead?.(
+        new AiError(
+          'network',
+          '请求发不出去：扩展后台未响应，请在扩展管理页重载扩展后重试；已重载仍失败则检查网络与系统代理',
+        ),
+      )
     } else {
       failPendingReads(new Error('流式响应在传输中中断（后台连接断开）'))
     }
