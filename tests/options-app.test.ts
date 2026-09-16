@@ -643,6 +643,56 @@ describe('options AI 助手表单', () => {
     expect(await readUserCorpus()).toHaveLength(1)
   })
 
+  it('诊断记录卡：展示存储中的失败（含原始响应摘录）并可清空', async () => {
+    await chrome.storage.local.set({
+      aiFailureLog: [
+        {
+          time: Date.UTC(2026, 0, 1, 12, 34, 56),
+          feature: '总结',
+          kind: 'parse',
+          message: '响应不是合法 JSON，请确认端点是否 OpenAI 兼容',
+          rawExcerpt: 'The model replied in plain text',
+          endpoint: 'https://ark.example/api/coding',
+          model: 'm-1',
+        },
+      ],
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const item = wrapper.find('.diag-log-item')
+    expect(item.exists()).toBe(true)
+    expect(item.text()).toContain('总结')
+    expect(item.text()).toContain('parse')
+    expect(item.text()).toContain('响应不是合法 JSON')
+    expect(wrapper.find('.diag-log-raw').text()).toContain('The model replied in plain text')
+    expect(item.text()).toContain('https://ark.example/api/coding')
+    expect(wrapper.text()).toContain('1/20 条')
+
+    await findButton(wrapper, '清空').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.diag-log-item').exists()).toBe(false)
+    expect(wrapper.text()).toContain('暂无失败记录')
+    expect((await chrome.storage.local.get('aiFailureLog')).aiFailureLog).toEqual([])
+  })
+
+  it('拉取模型失败入档：诊断记录出现「模型列表」条目', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('no', { status: 404 })))
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.find('input[type="url"]').setValue('https://ark.example/api/coding')
+    await findButton(wrapper, '拉取模型').trigger('click')
+    await flushPromises()
+
+    const item = wrapper.find('.diag-log-item')
+    expect(item.text()).toContain('模型列表')
+    expect(item.text()).toContain('HTTP 404')
+    expect(wrapper.text()).toContain('手动填写模型名')
+  })
+
+
   it('API 协议选择：anthropic 回填与写回', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: { apiFormat: 'anthropic' },

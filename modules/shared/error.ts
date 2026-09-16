@@ -8,6 +8,8 @@ export interface AiErrorOptions {
   status?: number
   /** 原始错误或附加上下文，透传给上层。 */
   cause?: unknown
+  /** 原始响应摘录（诊断用：坏 JSON/格式不对时直接看到端点回了什么）。不进 JSON 序列化。 */
+  rawResponse?: string
 }
 
 export interface AiErrorJson {
@@ -21,6 +23,8 @@ export interface AiErrorJson {
 export class AiError extends Error {
   readonly kind: AiErrorKind
   readonly status?: number
+  /** 原始响应摘录（诊断控制台用；序列化契约不含它）。 */
+  readonly rawResponse?: string
 
   constructor(kind: AiErrorKind, message: string, options: AiErrorOptions = {}) {
     // cause 交给原生 Error 承载，保证 Error.prototype.cause 语义一致。
@@ -28,6 +32,7 @@ export class AiError extends Error {
     this.name = 'AiError'
     this.kind = kind
     this.status = options.status
+    this.rawResponse = options.rawResponse
   }
 
   toJSON(): AiErrorJson {

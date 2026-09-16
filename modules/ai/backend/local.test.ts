@@ -231,3 +231,49 @@ describe('local detectAds（RAG 链路接线）', () => {
     ])
   })
 })
+describe('local 失败落诊断日志（设置页「诊断记录」）', () => {
+  it('summarize 坏 JSON：parse 失败入档，含原始响应摘录与端点/模型', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>not json</html>', { status: 200 })),
+    )
+    const backend = createLocalBackend(settingsOf({}))
+    await expect(backend.summarize(SUMMARIZE_INPUT)).rejects.toMatchObject({ kind: 'parse' })
+    const log = await chrome.storage.local.get('aiFailureLog')
+    const list = log.aiFailureLog as Array<Record<string, unknown>>
+    expect(list).toHaveLength(1)
+    expect(list[0]).toMatchObject({
+      feature: '总结',
+      kind: 'parse',
+      endpoint: 'https://llm.example/v1',
+      model: 'm-1',
+    })
+    expect(String(list[0]?.rawExcerpt)).toContain('not json')
+  })
+
+  it('chat 流失败：end{error} 收束的同时入档', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"error":"boom"}', { status: 500 })),
+    )
+    const backend = createLocalBackend(settingsOf({}))
+    const events = await collectChat(backend)
+    expect(events.at(-1)).toMatchObject({ type: 'end', error: { kind: 'http' } })
+    const log = await chrome.storage.local.get('aiFailureLog')
+    expect((log.aiFailureLog as unknown[])).toHaveLength(1)
+  })
+
+  it('底层网络抛 TypeError：client 归一为 AiError network 后照常入档', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    const backend = createLocalBackend(settingsOf({}))
+    await expect(backend.summarize(SUMMARIZE_INPUT)).rejects.toMatchObject({ kind: 'network' })
+    const log = await chrome.storage.local.get('aiFailureLog')
+    // TypeError 被 client 归一为 AiError network 才入档——这里走的就是 AiError，应有记录。
+    expect((log.aiFailureLog as unknown[])).toHaveLength(1)
+  })
+})

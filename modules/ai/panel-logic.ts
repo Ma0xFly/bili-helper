@@ -180,7 +180,7 @@ const ERROR_COPY: Record<AiErrorInfo['kind'], Omit<PanelErrorCopy, 'withSettings
   },
   parse: {
     title: 'AI 的回答没看懂（格式不对），再试一次？',
-    hint: '建议重试；反复出现则检查端点是否 OpenAI 兼容',
+    hint: '建议重试；原始回复可在设置页「诊断记录」里直接查看',
   },
   config: {
     title: '还没配置端点，先去设置页填一下？',

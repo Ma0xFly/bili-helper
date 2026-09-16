@@ -3,7 +3,7 @@
 // 降级链见模块注释）。chat 遵循端口 SSE 终止性：emit start 之后的任何失败（含外部中止）
 // 都以 end{error} 收尾，消费方永不悬挂。
 
-import { errorInfoFrom } from '../../shared/error'
+import { errorInfoFrom, AiError } from '../../shared/error'
 import type { AiSettings } from '../../settings'
 import type {
   AiCapabilities,
@@ -16,6 +16,7 @@ import type {
 import { buildChatMessages, buildSummaryMessages, parseSummarizeResponse } from '../prompts'
 import { chatCompletion, chatCompletionStream, type ChatEndpoint } from '../llm/client'
 import { runRagDetect, type DetectHooks } from '../rag/detect'
+import { recordAiFailure, type AiFailureFeature } from '../diagnostics-log'
 
 export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}): AiCapabilities {
   const endpoint: ChatEndpoint = {
@@ -25,19 +26,46 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
     format: settings.apiFormat,
   }
 
+  /**
+   * 失败落诊断日志（设置页「诊断记录」卡消费）：kind/文案/原始响应摘录，
+   * 只记元信息与模型自己的回答文本，凭据永远不经过这里。记录失败静默。
+   */
+  function logFailure(feature: AiFailureFeature, error: unknown): void {
+    if (!(error instanceof AiError)) return
+    void recordAiFailure({
+      time: Date.now(),
+      feature,
+      kind: error.kind,
+      message: error.message,
+      ...(error.rawResponse === undefined ? {} : { rawExcerpt: error.rawResponse }),
+      ...(endpoint.baseUrl === '' ? {} : { endpoint: endpoint.baseUrl }),
+      ...(endpoint.model === '' ? {} : { model: endpoint.model }),
+    })
+  }
+
   return {
     async detectAds(input: DetectAdsInput): Promise<DetectAdsResult> {
       // strategy 本阶段固定 smart：无论调用方传什么，链路只走 smart 路径。
-      return runRagDetect(input, settings, hooks)
+      try {
+        return await runRagDetect(input, settings, hooks)
+      } catch (error) {
+        logFailure('去广告', error)
+        throw error
+      }
     },
 
     async summarize(input: SummarizeInput): Promise<SummarizeResult> {
-      const { content } = await chatCompletion({
-        endpoint,
-        messages: buildSummaryMessages(input),
-        signal: input.signal,
-      })
-      return parseSummarizeResponse(content)
+      try {
+        const { content } = await chatCompletion({
+          endpoint,
+          messages: buildSummaryMessages(input),
+          signal: input.signal,
+        })
+        return parseSummarizeResponse(content)
+      } catch (error) {
+        logFailure('总结', error)
+        throw error
+      }
     },
 
     async chat(input: ChatInput, handlers): Promise<void> {
@@ -53,6 +81,7 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
         handlers.onEvent({ type: 'end' })
       } catch (error) {
         // 终止性约定：流一旦开始，失败与中止（含 handler 自身抛错）都经 end{error} 收束。
+        logFailure('提问', error)
         handlers.onEvent({ type: 'end', error: errorInfoFrom(error) })
       }
     },

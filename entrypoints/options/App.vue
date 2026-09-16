@@ -22,6 +22,13 @@ import {
 import type { UserCorpusEntry } from '../../modules/ai/rag/user-corpus'
 import { readAiSettings, resolveEmbeddingEndpoint, writeAiSettings } from '../../modules/settings'
 import type { AiMode, AiSettings } from '../../modules/settings'
+import { AiError } from '../../modules/shared/error'
+import {
+  clearAiFailures,
+  readAiFailures,
+  recordAiFailure,
+} from '../../modules/ai/diagnostics-log'
+import type { AiFailureEntry } from '../../modules/ai/diagnostics-log'
 import {
   applyProfile,
   deleteProfile,
@@ -155,8 +162,9 @@ async function fetchChatModels(): Promise<void> {
       apiKey: form.apiKey,
       format: form.apiFormat,
     })
-  } catch {
+  } catch (error) {
     chatModelsHint.value = FETCH_MODELS_HINT
+    recordFetchFailure('模型列表', error)
   } finally {
     chatModelsLoading.value = false
   }
@@ -168,11 +176,48 @@ async function fetchEmbedModels(): Promise<void> {
   try {
     const endpoint = resolveEmbeddingEndpoint(form)
     embedModelOptions.value = await listModels({ baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey })
-  } catch {
+  } catch (error) {
     embedModelsHint.value = FETCH_MODELS_HINT
+    recordFetchFailure('模型列表', error)
   } finally {
     embedModelsLoading.value = false
   }
+}
+
+/** 拉取类失败落诊断日志（含原始响应摘录），设置页「诊断记录」直接可看。 */
+function recordFetchFailure(feature: '模型列表', error: unknown): void {
+  if (!(error instanceof AiError)) return
+  void recordAiFailure({
+    time: Date.now(),
+    feature,
+    kind: error.kind,
+    message: error.message,
+    ...(error.rawResponse === undefined ? {} : { rawExcerpt: error.rawResponse }),
+    ...(form.apiUrl.trim() === '' ? {} : { endpoint: form.apiUrl }),
+  }).then(loadFailures)
+}
+
+// ---------- 诊断记录（AI 失败控制台） ----------
+// 总结/提问/去广告失败在 local 后端自动落档；这里展示 + 清空。
+const failures = ref<AiFailureEntry[]>([])
+
+async function loadFailures(): Promise<void> {
+  try {
+    failures.value = await readAiFailures()
+  } catch {
+    failures.value = []
+  }
+}
+
+async function onClearFailures(): Promise<void> {
+  await clearAiFailures()
+  failures.value = []
+}
+
+function failureTimeText(entry: AiFailureEntry): string {
+  const date = new Date(entry.time)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
 type Feedback = { kind: 'ok' | 'warn' | 'fail'; text: string }
@@ -456,6 +501,7 @@ async function exportCorpus(): Promise<void> {
 }
 
 onMounted(loadUserCorpus)
+onMounted(loadFailures)
 </script>
 
 <template>
@@ -682,6 +728,40 @@ onMounted(loadUserCorpus)
               </div>
             </div>
           </template>
+        </section>
+
+        <section class="card" aria-labelledby="diag-log-title">
+          <h2 id="diag-log-title" class="card-title">诊断记录</h2>
+          <p class="card-note">
+            最近 {{ failures.length }}/20 条 AI 失败（总结 / 提问 / 去广告 / 模型列表），
+            含原始响应摘录——「回答没看懂（格式不对）」时能直接看到模型回了什么。记录不含任何密钥。
+          </p>
+          <div class="diag-log-actions">
+            <button type="button" class="ghost" @click="loadFailures">刷新</button>
+            <button
+              type="button"
+              class="ghost danger"
+              :disabled="failures.length === 0"
+              @click="onClearFailures"
+            >
+              清空
+            </button>
+          </div>
+          <ul v-if="failures.length > 0" class="diag-log-list">
+            <li v-for="(entry, index) in failures" :key="index" class="diag-log-item">
+              <div class="diag-log-head">
+                <span class="diag-log-feature">{{ entry.feature }}</span>
+                <span class="diag-log-kind" :class="entry.kind">{{ entry.kind }}</span>
+                <span class="diag-log-time">{{ failureTimeText(entry) }}</span>
+              </div>
+              <div class="diag-log-msg">{{ entry.message }}</div>
+              <pre v-if="entry.rawExcerpt" class="diag-log-raw">{{ entry.rawExcerpt }}</pre>
+              <div v-if="entry.endpoint || entry.model" class="diag-log-meta">
+                {{ entry.endpoint }}{{ entry.endpoint && entry.model ? ' · ' : '' }}{{ entry.model }}
+              </div>
+            </li>
+          </ul>
+          <p v-else class="field-hint">暂无失败记录。</p>
         </section>
 
         <section class="card" aria-labelledby="features-title">
@@ -1352,6 +1432,98 @@ input:focus-visible {
   background: #fdf5e6;
   color: #b5822a;
   border: 1px solid rgba(240, 196, 120, 0.4);
+}
+
+/* ---------- 诊断记录卡：失败条目（功能/错误类/时间 + 文案 + 原始响应摘录） ---------- */
+.diag-log-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.diag-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diag-log-item {
+  padding: 10px 12px;
+  border: 1px solid #ece7f7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+}
+
+.diag-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.diag-log-feature {
+  font-weight: 600;
+}
+
+.diag-log-kind {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: #fdecee;
+  color: #e5484d;
+}
+
+.diag-log-kind.parse,
+.diag-log-kind.config {
+  background: #fdf5e6;
+  color: #b5822a;
+}
+
+.diag-log-kind.network,
+.diag-log-kind.http,
+.diag-log-kind.auth {
+  background: #fdecee;
+  color: #e5484d;
+}
+
+.diag-log-time {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: #8b84a0;
+}
+
+.diag-log-msg {
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.diag-log-raw {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f4fd;
+  border: 1px dashed #e3def0;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #4a4460;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.diag-log-meta {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #8b84a0;
+  word-break: break-all;
 }
 
 .actions {

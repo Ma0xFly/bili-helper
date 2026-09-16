@@ -109,8 +109,12 @@ export function extractUpstreamMessage(text: string): string | undefined {
   return message && message.trim() !== '' ? message.slice(0, 160) : undefined
 }
 
-export function mapJsonFailure(cause: unknown): AiError {
-  return new AiError('parse', '响应不是合法 JSON，请确认端点是否 OpenAI 兼容', { cause })
+/** 坏 JSON 的映射附带原始响应摘录：设置页诊断控制台能直接看到端点回了什么。 */
+export function mapJsonFailure(cause: unknown, rawExcerpt?: string): AiError {
+  return new AiError('parse', '响应不是合法 JSON，请确认端点是否 OpenAI 兼容', {
+    cause,
+    ...(rawExcerpt === undefined ? {} : { rawResponse: rawExcerpt }),
+  })
 }
 
 /** 统一的响应形状：直连取自 fetch Response；中继路径为端口桥接流（body/text 语义一致）。 */
@@ -273,11 +277,12 @@ async function requestJson(
 ): Promise<unknown> {
   const response = await performFetch(url, init, { timeoutMs, signal })
   if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
+  const text = await response.text()
   let data: unknown
   try {
-    data = JSON.parse(await response.text())
+    data = JSON.parse(text)
   } catch (cause) {
-    throw mapJsonFailure(cause)
+    throw mapJsonFailure(cause, text.slice(0, 400))
   }
   return data
 }
@@ -338,11 +343,12 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
     params.signal,
   )
   if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
+  const text = await response.text()
   let data: unknown
   try {
-    data = JSON.parse(await response.text())
+    data = JSON.parse(text)
   } catch (cause) {
-    throw mapJsonFailure(cause)
+    throw mapJsonFailure(cause, text.slice(0, 400))
   }
   const content = anthropic
     ? parseAnthropicContent(data)
@@ -568,11 +574,12 @@ export async function listModels(params: ListModelsParams): Promise<string[]> {
   authVariants.push({})
 
   const parse = async (response: HttpResponseLike): Promise<string[]> => {
+    const text = await response.text()
     let data: unknown
     try {
-      data = JSON.parse(await response.text())
+      data = JSON.parse(text)
     } catch (cause) {
-      throw mapJsonFailure(cause)
+      throw mapJsonFailure(cause, text.slice(0, 400))
     }
     const ids = parseModelIds(data)
     if (ids.length === 0) {
