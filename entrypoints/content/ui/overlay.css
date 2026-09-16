@@ -294,14 +294,16 @@
 }
 
 /* ---------- 进度条广告标记（做标层，悬停商品名） ---------- */
+/* 盒子 left/top/width 由控制器按进度条本体实时几何内联注入；top = 进度条中心线。 */
 .bh-marks {
   position: absolute;
-  inset: 0;
+  height: 0;
   pointer-events: none;
 }
 
 .bh-mark {
   position: absolute;
+  top: 0;
   height: 9px;
   border-radius: 999px;
   background: var(--bh-accent-pink);

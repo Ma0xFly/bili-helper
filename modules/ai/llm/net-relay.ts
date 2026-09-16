@@ -89,6 +89,18 @@ export function isNetRelayClientMessage(value: unknown): value is NetRelayClient
 export function attachNetRelay(port: RelayPort, deps: { fetchImpl?: typeof fetch } = {}): void {
   const fetchImpl = deps.fetchImpl ?? fetch
   let controller: AbortController | undefined
+  let disconnected = false
+  // 断开后的 postMessage 会抛「disconnected port」：统一吞掉，
+  // 否则客户端先挂断时 SW 里会堆一串未捕获 rejection。
+  const post = (message: unknown): void => {
+    if (disconnected) return
+    try {
+      port.postMessage(message)
+    } catch {
+      disconnected = true
+    }
+  }
+  const isDisconnected = (): boolean => disconnected
 
   port.onMessage.addListener((raw) => {
     if (!isNetRelayClientMessage(raw)) return
@@ -97,20 +109,30 @@ export function attachNetRelay(port: RelayPort, deps: { fetchImpl?: typeof fetch
       controller?.abort()
       return
     }
-    void runRelayRequest(port, raw, fetchImpl, (created) => {
-      controller = created
-    })
+    void runRelayRequest(
+      post,
+      raw,
+      fetchImpl,
+      (created) => {
+        controller = created
+      },
+      isDisconnected,
+    )
   })
 
   // 客户端断开（消费方 cancel / 页面关闭）：立刻中止上游。
-  port.onDisconnect.addListener(() => controller?.abort())
+  port.onDisconnect.addListener(() => {
+    disconnected = true
+    controller?.abort()
+  })
 }
 
 async function runRelayRequest(
-  port: RelayPort,
+  post: (message: unknown) => void,
   req: NetRelayRequestParams,
   fetchImpl: typeof fetch,
   setController: (controller: AbortController) => void,
+  isDisconnected: () => boolean,
 ): Promise<void> {
   const controller = new AbortController()
   setController(controller)
@@ -128,18 +150,21 @@ async function runRelayRequest(
       signal,
     })
   } catch (cause) {
-    console.error('[bili-helper/net-relay:sw] fetch 失败', req.url, String(cause))
-    postHostError(port, cause)
+    // 客户端已挂断导致的中止是正常收尾，不记错误日志。
+    if (!isDisconnected()) {
+      console.error('[bili-helper/net-relay:sw] fetch 失败', req.url, String(cause))
+      postHostError(post, cause)
+    }
     return
   }
-  port.postMessage({
+  post({
     t: 'head',
     status: response.status,
     contentType: response.headers.get('content-type') ?? '',
   })
   const body = response.body
   if (!body) {
-    port.postMessage({ t: 'end' })
+    post({ t: 'end' })
     return
   }
   const reader = body.getReader()
@@ -147,20 +172,22 @@ async function runRelayRequest(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      if (value !== undefined) port.postMessage({ t: 'chunk', data: uint8ToBase64(value) })
+      if (value !== undefined) post({ t: 'chunk', data: uint8ToBase64(value) })
     }
-    port.postMessage({ t: 'end' })
+    post({ t: 'end' })
   } catch (cause) {
-    console.error('[bili-helper/net-relay:sw] 流读取失败', req.url, String(cause))
-    postHostError(port, cause)
+    if (!isDisconnected()) {
+      console.error('[bili-helper/net-relay:sw] 流读取失败', req.url, String(cause))
+      postHostError(post, cause)
+    }
   } finally {
     void reader.cancel().catch(() => {})
   }
 }
 
-function postHostError(port: RelayPort, cause: unknown): void {
+function postHostError(post: (message: unknown) => void, cause: unknown): void {
   const error = cause instanceof Error ? cause : undefined
-  port.postMessage({
+  post({
     t: 'error',
     name: error?.name ?? 'Error',
     message: error?.message ?? '请求失败',
@@ -214,6 +241,17 @@ export async function netRelayFetch(
     throw new AiError('config', '网络中继未装配：仅内容脚本需要走后台代取')
   }
   const port = connect()
+  // 端口断开后再 postMessage 同样会抛「disconnected port」（SW 熄火可能早于 onDisconnect 到达）：
+  // 静默吞掉即可，断连语义由 onDisconnect / 失败分支统一处理。
+  let portDead = false
+  const safePost = (message: unknown): void => {
+    if (portDead) return
+    try {
+      port.postMessage(message)
+    } catch {
+      portDead = true
+    }
+  }
 
   let headSettled = false
   let resolveHead: ((head: { status: number; contentType: string }) => void) | undefined
@@ -231,7 +269,7 @@ export async function netRelayFetch(
 
   // 保活心跳：长流（总结/问答 SSE）可能长时间无分块，20 秒一拍防止 SW 闲置熄火。
   const keepTimer = setInterval(() => {
-    if (!terminal) port.postMessage({ t: 'keep' })
+    if (!terminal) safePost({ t: 'keep' })
   }, 20_000)
   const finish = (): void => {
     terminal = true
@@ -284,6 +322,7 @@ export async function netRelayFetch(
   }
 
   const onDisconnect = (): void => {
+    portDead = true
     if (terminal) return
     finish()
     console.error('[bili-helper/net-relay] 端口断开 ' + JSON.stringify({ headSettled, url: req.url, chunksSeen }))
@@ -305,7 +344,7 @@ export async function netRelayFetch(
   const onExternalAbort = (): void => {
     if (terminal) return
     console.error('[bili-helper/net-relay] 外部信号中止', { headSettled, url: req.url, reason: String(external?.reason) })
-    port.postMessage({ t: 'abort' })
+    safePost({ t: 'abort' })
     finish()
     const timeout = external?.reason instanceof Error && external.reason.name === 'TimeoutError'
     if (!headSettled) {
@@ -320,7 +359,7 @@ export async function netRelayFetch(
   external?.addEventListener('abort', onExternalAbort, { once: true })
   port.onMessage.addListener(onHostMessage)
   port.onDisconnect.addListener(onDisconnect)
-  port.postMessage({ t: 'req', ...req })
+  safePost({ t: 'req', ...req })
 
   let head: { status: number; contentType: string }
   try {
@@ -352,7 +391,7 @@ export async function netRelayFetch(
     cancel(): void {
       // 消费方放弃（如流式收尾 reader.cancel）：停掉上游，别让端点白生成。
       finish()
-      port.postMessage({ t: 'abort' })
+      safePost({ t: 'abort' })
       port.disconnect()
     },
   })

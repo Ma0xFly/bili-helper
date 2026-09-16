@@ -5,7 +5,7 @@ import { AiError } from '../../shared/error'
 import type { Subtitle } from '../../video/types'
 import type { DetectAdsInput } from '../port'
 import { tokenize } from './bm25'
-import { runRagDetect } from './detect'
+import { FALLBACK_MAX_SEGMENT_SECONDS, runRagDetect } from './detect'
 
 // 与语料一致的窗口：开头 bigram 与语料「恰饭时间」「本期视频由」重合 → 向量路必然召回。
 // 以下填空行刻意避开语料词汇（含「游戏」这类品牌词里的字），保证只有恰饭窗口被召回。
@@ -25,6 +25,19 @@ const AD_SUBTITLES: Subtitle[] = [
 const NO_SIGNAL_SUBTITLES: Subtitle[] = [
   { start: 0, end: 10, text: '大家好，今天讲讲续航' },
   { start: 30, end: 40, text: '接下来看测试数据' },
+]
+
+// 刷屏噪声 + 孤立恰饭段：前 300 秒每 10 秒一句「恰饭」（窗口连成一片，合并后 >120s 巨段，
+// 应被限长丢弃），492–580 是正常长度的恰饭段（应保留）。
+const SPAM_THEN_AD_SUBTITLES: Subtitle[] = [
+  ...Array.from({ length: 31 }, (_, i) => ({
+    start: i * 10,
+    end: i * 10 + 8,
+    text: '恰饭时间到啦',
+  })),
+  { start: 492, end: 512, text: '恰饭时间到了，感谢本期视频由某某音乐App赞助播出' },
+  { start: 512, end: 540, text: '今天给大家种草这款降噪耳机，评论区置顶有优惠券' },
+  { start: 540, end: 580, text: '领券下单更划算，还能粉丝专属价' },
 ]
 
 function makeSettings(overrides: Partial<AiSettings> = {}): AiSettings {
@@ -255,6 +268,30 @@ describe('runRagDetect（全链路）', () => {
     expect(result.source).toBe('rag')
     expect(result.ads.length).toBeGreaterThan(0)
     expect(onRetrievalOnly).toHaveBeenCalledTimes(1)
+  })
+
+  it('兜底段限长：刷屏词合并出的巨段（>120s）整段丢弃，孤立正常段保留', async () => {
+    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await runRagDetect(
+      makeInput(SPAM_THEN_AD_SUBTITLES),
+      makeSettings({ apiUrl: '', model: '' }),
+      {},
+    )
+    expect(result.source).toBe('rag')
+    for (const ad of result.ads) {
+      expect(ad.end - ad.start).toBeLessThanOrEqual(FALLBACK_MAX_SEGMENT_SECONDS)
+    }
+    // 492–580 的恰饭段没被巨段连坐。
+    expect(result.ads.some((ad) => ad.start >= 450 && ad.end <= 600)).toBe(true)
+  })
+
+  it('兜底段限长：全片刷屏时不产出任何巨段标记', async () => {
+    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+    vi.stubGlobal('fetch', fetchMock)
+    const spamOnly = SPAM_THEN_AD_SUBTITLES.filter((line) => line.start <= 300)
+    const result = await runRagDetect(makeInput(spamOnly), makeSettings({ apiUrl: '', model: '' }), {})
+    expect(result).toEqual({ ads: [], source: 'rag' })
   })
 
   it('LLM 定界输出不可解析：宽松解析失败后退回召回窗口（留窗口不悬挂）', async () => {

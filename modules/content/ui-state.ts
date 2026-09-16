@@ -24,12 +24,24 @@ export interface SavedChipState {
 
 export interface AdMarkState {
   key: string
+  /** 相对进度条本体的横向百分比（标记层盒子 = 进度条几何）。 */
   leftPct: number
   widthPct: number
-  topPct: number
   productName: string
   range: string
   done: boolean
+}
+
+/**
+ * 标记层盒子：直接跟随 B 站进度条本体的几何（相对播放器容器的 px），
+ * 并镜像控制层显隐——B 站控制层淡出/收起时标记必须一起消失，不能悬在原地。
+ * top = 进度条垂直中心线。
+ */
+export interface MarksBoxState {
+  visible: boolean
+  left: number
+  top: number
+  width: number
 }
 
 export interface OverlayGeometry {
@@ -54,6 +66,7 @@ export const ui = reactive({
   chip: { visible: false, text: '' } as SavedChipState,
   vectorHint: { visible: false, text: '向量端点（Embedding）的 API 有问题，暂时只用词表匹配' },
   marks: [] as AdMarkState[],
+  marksBox: { visible: false, left: 0, top: 0, width: 0 } as MarksBoxState,
   /**
    * 去广告检测结果镜像（控制器维护）：AI 面板分段时间线与广告区间合并打标用。
    * adSkipEnabled 关/无广告时为空数组 → 面板纯分段。

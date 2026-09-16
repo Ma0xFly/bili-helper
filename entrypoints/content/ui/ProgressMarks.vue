@@ -1,11 +1,21 @@
 <script setup lang="ts">
 // 进度条广告标记（progressBarAdMark）：detectAds 结果区间在播放器进度条位的粉色标记，
-// 悬停可见商品名与区间；标记渲染在做标层（Shadow DOM），不触碰 B 站进度条本体。
+// 悬停可见商品名与区间。标记盒子直接锚在 B 站进度条本体的实时几何上（控制器高频同步），
+// 控制层淡出/收起时整层跟随隐藏——绝不悬在进度条已不在的位置。渲染仍在做标层（Shadow DOM）。
 import { ui } from '../../../modules/content/ui-state'
+
+function boxStyle(): Record<string, string> {
+  const { left, top, width } = ui.marksBox
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+  }
+}
 </script>
 
 <template>
-  <div v-if="ui.marks.length > 0" class="bh-marks">
+  <div v-if="ui.marks.length > 0 && ui.marksBox.visible" class="bh-marks" :style="boxStyle()">
     <div
       v-for="mark in ui.marks"
       :key="mark.key"
@@ -14,7 +24,6 @@ import { ui } from '../../../modules/content/ui-state'
       :style="{
         left: `${mark.leftPct}%`,
         width: `${mark.widthPct}%`,
-        top: `${mark.topPct}%`,
       }"
       role="button"
       tabindex="0"

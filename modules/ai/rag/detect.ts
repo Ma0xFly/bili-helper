@@ -92,6 +92,17 @@ export function mergeAdSegments(ads: AdSegment[], duration: number): AdSegment[]
   return merged
 }
 
+/** 极速匹配兜底段的长度上限（秒）：合并后仍长于此的整段丢弃。 */
+export const FALLBACK_MAX_SEGMENT_SECONDS = 120
+
+/**
+ * 兜底段限长：纯检索没有定界能力，刷屏词（如整场直播切片里满屏「带货」）会让
+ * 相邻命中窗口合并出横跨大半视频的巨段——这种段当广告标记/跳过都是灾难，宁可不要。
+ */
+function capFallbackAds(ads: AdSegment[]): AdSegment[] {
+  return ads.filter((ad) => ad.end - ad.start <= FALLBACK_MAX_SEGMENT_SECONDS)
+}
+
 /**
  * 召回窗口兜底成片段（极速匹配：LLM 未配置/不可用/输出不可解析时）：
  * 融合分映射保守置信度（封顶 0.6，明确低于 LLM 定界的可信度）；
@@ -313,7 +324,10 @@ export async function runRagDetect(
   }
 
   const spans = buildCandidateSpans(windows, fused, input, duration)
-  const fallbacks = mergeAdSegments(windowsAsFallbackAds(windows, fused, duration, corpus), duration)
+  // 兜底段先合并再限长：极速匹配与 LLM 失败降级共用这一份，巨段噪声在源头掐掉。
+  const fallbacks = capFallbackAds(
+    mergeAdSegments(windowsAsFallbackAds(windows, fused, duration, corpus), duration),
+  )
   // 极速匹配：对话端点未配置（只配向量）→ 命中窗口直接成段，零对话调用。
   if (!chatReady) {
     return { ads: mergeAdSegments(fallbacks, duration), source: 'rag' }

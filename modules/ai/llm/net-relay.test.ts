@@ -23,7 +23,9 @@ function createPortPair(): { client: RelayPort; host: RelayPort } {
 
   const endOf = (self: ReturnType<typeof mk>, peer: ReturnType<typeof mk>): RelayPort => ({
     postMessage(message: unknown): void {
-      if (self.disconnected) return
+      // 与真实 Chrome 端口同构：断开后再投递会抛「disconnected port」——
+      // 两侧的安全出口必须自己吞掉这类异常，否则 SW/页面里堆未捕获 rejection。
+      if (self.disconnected) throw new Error('Attempting to use a disconnected port object')
       // 模拟 Chrome runtime 端口的 JSON 序列化语义：非 JSON 安全的值（Uint8Array 等）
       // 过端口会变形——测试必须与真实通道同构，否则挡不住这类 bug。
       const serialized = JSON.parse(JSON.stringify(message)) as unknown
@@ -194,6 +196,38 @@ describe('netRelayFetch（流式代取）', () => {
     const result = await netRelayFetch(REQ)
     await result.body.cancel()
     expect(hostSignalAbort).toHaveBeenCalledTimes(1)
+  })
+
+  it('客户端断开导致上游中止：宿主静默收尾，不向断口投递也不记错', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { client, host } = createPortPair()
+      attachNetRelay(host, {
+        fetchImpl: vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+          // 永不产出响应头：上游在 abort 时以 AbortError 拒绝（真实断连中止的形态）。
+          const init_ = init
+          return new Promise<Response>((_resolve, reject) => {
+            init_?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('signal is aborted without reason', 'AbortError'))
+            })
+          })
+        }) as unknown as typeof fetch,
+      })
+      setNetRelayConnect(() => client)
+      const pending = netRelayFetch(REQ)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      client.disconnect()
+      await expect(pending).rejects.toMatchObject({ kind: 'network' })
+      // 让宿主侧的 fetch 拒绝分支跑完：没有安全出口的话这里会向断口 postMessage 抛出
+      // 「disconnected port」的未捕获 rejection，并多打一条 fetch 失败日志。
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const relayErrors = errSpy.mock.calls.filter((call) =>
+        call.some((arg) => String(arg).includes('net-relay:sw')),
+      )
+      expect(relayErrors).toEqual([])
+    } finally {
+      errSpy.mockRestore()
+    }
   })
 
   it('非 2xx 状态照常透传（ok=false，状态码归上层映射）', async () => {

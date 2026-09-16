@@ -33,6 +33,17 @@ export const COUNTDOWN_TICK_MS = 100
 export const MANUAL_BANNER_MS = 350
 export const SEEK_VERIFY_DELAY_MS = 250
 export const MEASURE_INTERVAL_MS = 2_000
+/**
+ * 标记层跟随进度条的快速同步节拍：B 站控制层闲置淡出是亚秒级动画，
+ * 靠 2s 的玩家几何节拍会留下「进度条已藏、标记悬在原地」的空窗。
+ */
+export const MARKS_SYNC_INTERVAL_MS = 250
+/**
+ * 自动跳过置信度门槛：只有高置信段（LLM 定界确认）才弹横幅并接管进度条；
+ * 极速匹配（纯检索兜底）置信度封顶 0.6——只上进度条标记，不自动跳，
+ * 防止端点故障时低质量召回把正片当广告跳掉。
+ */
+export const AUTO_SKIP_MIN_CONFIDENCE = 0.7
 /** 失败链路的重试冷却：周期检查按此节流，避免端点故障时疯狂重打。 */
 export const RETRY_COOLDOWN_MS = 10_000
 
@@ -76,6 +87,8 @@ export class AdSkipController {
   private player: HTMLVideoElement | null = null
   private videoMeta: VideoMeta | null = null
   private ads: AdSegment[] = []
+  /** ads 中达到自动跳过门槛的子集：横幅/倒计时/跳过只看这里，标记看全量 ads。 */
+  private skipAds: AdSegment[] = []
   private bannerAd: AdSegment | null = null
   private optedOut = new Set<string>()
   private skippedOnce = new Set<string>()
@@ -97,8 +110,11 @@ export class AdSkipController {
   }
   private countdownTimer: number | null = null
   private measureTimer: number | null = null
+  private marksSyncTimer: number | null = null
   private chipTimer: number | null = null
   private lastRectKey = ''
+  /** 进度条本体缓存：SPA 内一般不变，脱离文档时重找。 */
+  private barElement: HTMLElement | null = null
 
   private readonly onTick = (): void => {
     this.onTimeUpdate()
@@ -115,6 +131,9 @@ export class AdSkipController {
   }
   private readonly onMeasureTick = (): void => {
     this.measureIfMoved()
+  }
+  private readonly onMarksSyncTick = (): void => {
+    this.syncMarksBox()
   }
 
   constructor(private readonly deps: AdSkipControllerDeps) {
@@ -279,14 +298,19 @@ export class AdSkipController {
         )
         return
       }
+      // 门槛统计就地算：此处 this.skipAds 还是上一轮的（赋值在 gate 之后才发生）。
+      const skippable = result.ads.filter(
+        (ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE,
+      ).length
       console.info(
-        `[bili-helper] 去广告检测完成 source=${result.source} 广告段=${result.ads.length} 耗时=${Math.round((Date.now() - detectStartedAt) / 1000)}s` +
+        `[bili-helper] 去广告检测完成 source=${result.source} 广告段=${result.ads.length} 可自动跳过=${skippable} 耗时=${Math.round((Date.now() - detectStartedAt) / 1000)}s` +
           (result.ads.length > 0
             ? ' → ' + result.ads.map((ad) => `${Math.round(ad.start)}-${Math.round(ad.end)}s(${ad.product_name || '未命名'},${ad.confidence.toFixed(2)})`).join(' ')
             : ''),
       )
       if (!this.pageEnabled || !this.masterEnabled) return
       this.ads = sortedAds(result.ads)
+      this.skipAds = this.ads.filter((ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE)
       ui.ads = [...this.ads]
       if (this.ads.length === 0) {
         this.pipelineStarted = true // 无广告 = 链路成功走完，静默既是终点。
@@ -313,6 +337,10 @@ export class AdSkipController {
       window.document.addEventListener('fullscreenchange', this.onFullscreen)
     }
     this.measureTimer = this.deps.timers.setInterval(this.onMeasureTick, MEASURE_INTERVAL_MS)
+    this.marksSyncTimer = this.deps.timers.setInterval(
+      this.onMarksSyncTick,
+      MARKS_SYNC_INTERVAL_MS,
+    )
     this.measureGeometry()
   }
 
@@ -328,6 +356,11 @@ export class AdSkipController {
       this.deps.timers.clearInterval(this.measureTimer)
       this.measureTimer = null
     }
+    if (this.marksSyncTimer !== null) {
+      this.deps.timers.clearInterval(this.marksSyncTimer)
+      this.marksSyncTimer = null
+    }
+    this.barElement = null
     this.stopCountdown()
   }
 
@@ -350,20 +383,16 @@ export class AdSkipController {
     ui.overlay.top = rect.top
     ui.overlay.width = rect.width
     ui.overlay.height = rect.height
-    this.buildMarks(rect, container)
+    this.buildMarks(container)
   }
 
-  private buildMarks(playerRect: DOMRect, container: HTMLElement | null): void {
+  private buildMarks(container: HTMLElement | null): void {
     if (!this.pageEnabled || !this.masterEnabled || this.ads.length === 0) {
       ui.marks = []
+      ui.marksBox.visible = false
       return
     }
     const total = this.videoMeta?.duration || this.player?.duration || 0
-    const barRect = this.deps.player.findProgressElement(container)?.getBoundingClientRect()
-    const barCenterPct =
-      barRect && playerRect.height > 0
-        ? ((barRect.top + barRect.height / 2 - playerRect.top) / playerRect.height) * 100
-        : 94
     ui.marks = this.ads.map((ad) => {
       const key = segmentKey(ad)
       const leftPct = total > 0 ? (ad.start / total) * 100 : 0
@@ -373,12 +402,70 @@ export class AdSkipController {
         key,
         leftPct: clampedLeft,
         widthPct: Math.min(widthPct, 100 - clampedLeft),
-        topPct: barCenterPct,
         productName: ad.product_name,
         range: `${formatHms(ad.start)} – ${formatHms(ad.end)}`,
         done: this.skippedOnce.has(key),
       }
     })
+    this.syncMarksBox()
+  }
+
+  /**
+   * 标记层盒子 = 进度条本体的实时几何（相对播放器容器），并镜像控制层显隐。
+   * 找不到进度条 / 进度条被收起淡出 / 移出播放器范围，标记一律隐藏——
+   * 绝不再退回「按播放器高度猜一个固定位置」的旧行为。
+   */
+  private syncMarksBox(): void {
+    if (ui.marks.length === 0) {
+      ui.marksBox.visible = false
+      return
+    }
+    const video = this.player
+    if (!video) {
+      ui.marksBox.visible = false
+      return
+    }
+    const container = this.deps.player.findPlayerContainer(video)
+    const playerRect = container?.getBoundingClientRect() ?? video.getBoundingClientRect()
+    const bar = this.resolveBarElement(container)
+    if (!bar || playerRect.width <= 0 || playerRect.height <= 0) {
+      ui.marksBox.visible = false
+      return
+    }
+    const barRect = bar.getBoundingClientRect()
+    const centerY = barRect.top + barRect.height / 2
+    // 收起动画可能把控制层整个下移出播放器：中心线出界即视为不可见。
+    const insidePlayer =
+      barRect.width > 0 && centerY >= playerRect.top - 2 && centerY <= playerRect.bottom + 2
+    ui.marksBox.visible = insidePlayer && this.barEffectivelyVisible(bar, container)
+    ui.marksBox.left = barRect.left - playerRect.left
+    ui.marksBox.top = centerY - playerRect.top
+    ui.marksBox.width = barRect.width
+  }
+
+  private resolveBarElement(container: HTMLElement | null): HTMLElement | null {
+    if (this.barElement?.isConnected) return this.barElement
+    this.barElement = this.deps.player.findProgressElement(container)
+    return this.barElement
+  }
+
+  /** B 站控制层隐藏有 opacity 淡出 / visibility / display 三种形态，从进度条逐层向上查到播放器容器。 */
+  private barEffectivelyVisible(bar: HTMLElement, container: HTMLElement | null): boolean {
+    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return true
+    let node: HTMLElement | null = bar
+    while (node) {
+      try {
+        const style = window.getComputedStyle(node)
+        if (style.display === 'none' || style.visibility === 'hidden') return false
+        const opacity = Number.parseFloat(style.opacity)
+        if (Number.isFinite(opacity) && opacity < 0.08) return false
+      } catch {
+        return true // 样式读不到时保守视为可见，不误杀标记。
+      }
+      if (container && node === container) break
+      node = node.parentElement
+    }
+    return true
   }
 
   private measureIfMoved(): void {
@@ -462,10 +549,10 @@ export class AdSkipController {
   /** 播放器 timeupdate 入口：倒计时展示 / 手动拖入立即跳过 / 离开窗口收起。 */
   onTimeUpdate(): void {
     this.applyDark()
-    if (!this.masterEnabled || !this.pageEnabled || !this.player || this.ads.length === 0) return
+    if (!this.masterEnabled || !this.pageEnabled || !this.player || this.skipAds.length === 0) return
     const t = this.player.currentTime
 
-    const manual = insideAdAt(this.ads, t)
+    const manual = insideAdAt(this.skipAds, t)
     if (manual) {
       const key = segmentKey(manual)
       if (!this.optedOut.has(key) && !this.skippedOnce.has(key)) {
@@ -491,7 +578,7 @@ export class AdSkipController {
       return
     }
 
-    const upcoming = countdownAdAt(this.ads, t)
+    const upcoming = countdownAdAt(this.skipAds, t)
     if (upcoming) {
       const key = segmentKey(upcoming)
       const fresh = !this.optedOut.has(key) && !this.skippedOnce.has(key)
@@ -578,6 +665,7 @@ export class AdSkipController {
     }
     this.activeBvid = null
     this.ads = []
+    this.skipAds = []
     ui.marks = []
     ui.ads = []
     this.hideBanner()

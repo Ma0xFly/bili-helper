@@ -3,7 +3,7 @@
 // 归零自动 seek 到 ad.end，跳过按「实际节省秒数」写入统计；
 // 总开关/页内开关 gate 全部跳转逻辑；SPA 换 bvid 整体复位并重跑管线。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AdSkipController } from '../modules/content/ad-skip-controller'
+import { AdSkipController, MARKS_SYNC_INTERVAL_MS } from '../modules/content/ad-skip-controller'
 import type { AdSkipControllerDeps } from '../modules/content/ad-skip-controller'
 import { ui } from '../modules/content/ui-state'
 import { DEFAULT_SETTINGS } from '../modules/settings'
@@ -16,8 +16,27 @@ function makeVideo(): HTMLVideoElement {
   return document.createElement('video')
 }
 
+/** happy-dom 的 rect 全是 0：测试里按元素逐个打桩。 */
+function stubRect(
+  el: Element,
+  r: { left: number; top: number; width: number; height: number },
+): void {
+  vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+    left: r.left,
+    top: r.top,
+    width: r.width,
+    height: r.height,
+    right: r.left + r.width,
+    bottom: r.top + r.height,
+    x: r.left,
+    y: r.top,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
 interface Harness {
   video: HTMLVideoElement
+  container: HTMLElement
   recordSkipped: ReturnType<typeof vi.fn>
   detectAds: ReturnType<typeof vi.fn>
   controller: AdSkipController
@@ -27,6 +46,7 @@ interface Harness {
 async function makeHarness(overrides: {
   settings?: Partial<AiSettings>
   ads?: AdSegment[]
+  bar?: HTMLElement | null
 } = {}): Promise<Harness> {
   const video = makeVideo()
   const container = document.createElement('div')
@@ -62,7 +82,7 @@ async function makeHarness(overrides: {
       findVideo: () => video,
       waitForVideo: async () => video,
       findPlayerContainer: () => container,
-      findProgressElement: () => null,
+      findProgressElement: () => overrides.bar ?? null,
     },
     pageHref: () => href,
     isDark: () => false,
@@ -76,7 +96,7 @@ async function makeHarness(overrides: {
     openOptions: vi.fn(),
   }
   const controller = new AdSkipController(deps)
-  return { video, recordSkipped, detectAds, controller, setHref: (next) => (href = next) }
+  return { video, container, recordSkipped, detectAds, controller, setHref: (next) => (href = next) }
 }
 
 /** 把挂起微任务全部结算（runPipeline 等 async 链不带定时器时足够）。 */
@@ -243,3 +263,95 @@ async function endpoint(): Promise<void> {
   await flushMicrotasks()
   await vi.advanceTimersByTimeAsync(0)
 }
+
+describe('进度条广告标记跟随', () => {
+  const PLAYER = { left: 100, top: 200, width: 800, height: 450 } // bottom = 650
+  const BAR = { left: 120, top: 600, width: 760, height: 6 } // 中心线 y = 603
+
+  async function marksHarness(bar: HTMLElement | null) {
+    const harness = await makeHarness({ bar })
+    if (bar) harness.container.appendChild(bar)
+    stubRect(harness.container, PLAYER)
+    if (bar) stubRect(bar, BAR)
+    await harness.controller.start()
+    return harness
+  }
+
+  it('标记盒锚在进度条本体实时几何上；条被收起（下移出界）时 250ms 节拍内隐藏，滑回恢复', async () => {
+    const bar = document.createElement('div')
+    await marksHarness(bar)
+
+    expect(ui.marks.length).toBe(1)
+    // AD 100–130s / 总长 600s → 条内百分比定位；盒子 = 进度条相对播放器的几何。
+    expect(ui.marks[0]).toMatchObject({ leftPct: (100 / 600) * 100, widthPct: (30 / 600) * 100 })
+    expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+
+    // B 站控制层收起：进度条随动画移出播放器下界 → 标记跟着藏，绝不悬在原地。
+    stubRect(bar, { left: 120, top: 700, width: 760, height: 6 })
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(false)
+
+    stubRect(bar, BAR)
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(true)
+  })
+
+  it('控制层 opacity 淡出：标记同步隐藏；淡入恢复', async () => {
+    const bar = document.createElement('div')
+    await marksHarness(bar)
+    expect(ui.marksBox.visible).toBe(true)
+
+    const styleSpy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockReturnValue({ display: '', visibility: '', opacity: '0' } as CSSStyleDeclaration)
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(false)
+
+    styleSpy.mockReturnValue({ display: '', visibility: '', opacity: '1' } as CSSStyleDeclaration)
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(true)
+    styleSpy.mockRestore()
+  })
+
+  it('找不到进度条本体：标记隐藏，不再退回按播放器高度猜的固定位置', async () => {
+    await marksHarness(null)
+    expect(ui.marks.length).toBe(1) // 数据在，但无处可挂
+    expect(ui.marksBox.visible).toBe(false)
+  })
+
+  it('低置信段（极速匹配兜底 ≤0.6）：只上进度条标记，不弹横幅不自动跳', async () => {
+    const LOW_CONF: AdSegment = { ...AD, confidence: 0.5 }
+    const harness = await makeHarness({ ads: [LOW_CONF] })
+    await harness.controller.start()
+
+    expect(ui.ads).toEqual([LOW_CONF]) // 面板镜像保留全量（含低置信段）
+    harness.video.currentTime = 97.5
+    harness.controller.onTimeUpdate()
+    expect(ui.banner.visible).toBe(false) // 不弹「带你跳过」横幅
+    harness.video.currentTime = 110
+    harness.controller.onTimeUpdate()
+    expect(ui.banner.visible).toBe(false) // 拖入段内也不接管播放器
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(harness.video.currentTime).toBe(110) // 没有自动 seek
+  })
+
+  it('高置信段（LLM 定界 ≥0.7）照常弹横幅并自动跳过', async () => {
+    const harness = await makeHarness() // AD confidence 0.9
+    await harness.controller.start()
+    harness.video.currentTime = 97.5
+    harness.controller.onTimeUpdate()
+    expect(ui.banner.visible).toBe(true)
+  })
+
+  it('播放器几何变化（resize/滚动）后盒子重挂到新位置的进度条上', async () => {
+    const bar = document.createElement('div')
+    const harness = await marksHarness(bar)
+    expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+
+    // 页面下滚 300px：播放器与进度条一起移动。
+    stubRect(harness.container, { ...PLAYER, top: -100 })
+    stubRect(bar, { ...BAR, top: 300 })
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+  })
+})
