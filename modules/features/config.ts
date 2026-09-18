@@ -450,8 +450,9 @@ export async function readFeatureStats(): Promise<Partial<Record<FeatureId, Feat
   return out
 }
 
-/** 拦截计数 +1（跨日先归零），返回今日累计。仅 counted 功能有意义，其余照常计数不设限。 */
-export async function bumpFeatureStat(id: FeatureId, now = new Date()): Promise<number> {
+/** 拦截计数 +N（默认 1；跨日先归零），返回今日累计。 */
+export async function bumpFeatureStat(id: FeatureId, by = 1, now = new Date()): Promise<number> {
+  const increment = Math.max(1, Math.round(by))
   const run = async (): Promise<number> => {
     const result = await withTimeout(chrome.storage.local.get(FEATURE_STATS_STORAGE_KEY))
     const raw = asRecord((result as Record<string, unknown>)[FEATURE_STATS_STORAGE_KEY])
@@ -459,7 +460,7 @@ export async function bumpFeatureStat(id: FeatureId, now = new Date()): Promise<
     const entry = asRecord(raw[id])
     const current =
       typeof entry.statsDate === 'string' && entry.statsDate === today ? (asInt(entry.totalBlocked, 0) ?? 0) : 0
-    const next = { statsDate: today, totalBlocked: current + 1 }
+    const next = { statsDate: today, totalBlocked: current + increment }
     await withTimeout(
       chrome.storage.local.set({ [FEATURE_STATS_STORAGE_KEY]: { ...raw, [id]: next } }),
     )

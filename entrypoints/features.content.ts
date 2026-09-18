@@ -10,6 +10,7 @@ import type { FeatureConfigMap } from '../modules/features/config'
 import { FeatureManager } from '../modules/features/manager'
 import { pushInterceptConfigs } from '../modules/features/intercept/protocol'
 import type { SerializedFeatureConfigs } from '../modules/features/intercept/protocol'
+import { createAdVideoBlocker } from '../modules/features/blockers/ad-video'
 
 /** FeatureConfigMap → 主世界线协议（纯 JSON；函数过不了 postMessage）。 */
 function toInterceptPayload(map: FeatureConfigMap): SerializedFeatureConfigs {
@@ -61,6 +62,9 @@ export default defineContentScript({
         return () => chrome.storage.onChanged.removeListener(onChange)
       },
     })
+    // 功能运行时注册（Epic 2–4 逐个登记）：广告视频拦截（首页，DOM 侧）。
+    manager.register('adVideoBlocker', () => createAdVideoBlocker())
+
     await manager.start()
     await broadcastConfigs()
   },
