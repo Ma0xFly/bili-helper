@@ -294,11 +294,23 @@
 }
 
 /* ---------- 进度条广告标记（做标层，悬停商品名） ---------- */
-/* 盒子 left/top/width 由控制器按进度条本体实时几何内联注入；top = 进度条中心线。 */
+/* 盒子 left/top/width 由控制器按进度条本体实时几何内联注入（取整后写入，亚像素抖动不产生新值）；
+   top = 进度条中心线。真实布局变化（剧场/全屏/窗口缩放）经 180ms 过渡平滑滑动，不跳变。 */
 .bh-marks {
   position: absolute;
   height: 0;
   pointer-events: none;
+  transition:
+    left 0.18s ease-out,
+    top 0.18s ease-out,
+    width 0.18s ease-out;
+}
+
+/* 偏好减弱动效：过渡退化为瞬时（信息不丢，只是不再滑动）。 */
+@media (prefers-reduced-motion: reduce) {
+  .bh-marks {
+    transition: none;
+  }
 }
 
 .bh-mark {

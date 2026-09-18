@@ -119,6 +119,7 @@ beforeEach(() => {
   ui.chip.visible = false
   ui.vectorHint.visible = false
   ui.marks = []
+  ui.marksBox = { visible: false, left: 0, top: 0, width: 0 }
   ui.ads = []
   ui.dark = false
 })
@@ -286,7 +287,7 @@ describe('进度条广告标记跟随', () => {
     return harness
   }
 
-  it('标记盒锚在进度条本体实时几何上；条被收起（下移出界）时 250ms 节拍内隐藏，滑回恢复', async () => {
+  it('标记盒锚在进度条本体实时几何上；条被收起（下移出界）需连续两拍确认才隐藏，滑回立即恢复', async () => {
     const bar = document.createElement('div')
     await marksHarness(bar)
 
@@ -295,8 +296,11 @@ describe('进度条广告标记跟随', () => {
     expect(ui.marks[0]).toMatchObject({ leftPct: (100 / 600) * 100, widthPct: (30 / 600) * 100 })
     expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
 
-    // B 站控制层收起：进度条随动画移出播放器下界 → 标记跟着藏，绝不悬在原地。
+    // B 站控制层收起：进度条随动画移出播放器下界。淡出动画中间态只观察到一拍不可见——
+    // 标记不许闪没（这正是"一直刷新闪烁"的来源），连续两拍确认后才隐藏。
     stubRect(bar, { left: 120, top: 700, width: 760, height: 6 })
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(true)
     await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
     expect(ui.marksBox.visible).toBe(false)
 
@@ -305,7 +309,18 @@ describe('进度条广告标记跟随', () => {
     expect(ui.marksBox.visible).toBe(true)
   })
 
-  it('控制层 opacity 淡出：标记同步隐藏；淡入恢复', async () => {
+  it('防闪烁：几何取整写入，亚像素抖动不再产生新样式值', async () => {
+    const bar = document.createElement('div')
+    await marksHarness(bar)
+    expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+
+    // 进度条几何抖动（播放中的常见现象）：取整后落回同一组值，不触发重渲染。
+    stubRect(bar, { left: 120.3, top: 600.2, width: 759.7, height: 6.2 })
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+  })
+
+  it('控制层 opacity 淡出：连续两拍确认后隐藏；淡入立即恢复', async () => {
     const bar = document.createElement('div')
     await marksHarness(bar)
     expect(ui.marksBox.visible).toBe(true)
@@ -313,6 +328,8 @@ describe('进度条广告标记跟随', () => {
     const styleSpy = vi
       .spyOn(window, 'getComputedStyle')
       .mockReturnValue({ display: '', visibility: '', opacity: '0' } as CSSStyleDeclaration)
+    await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
+    expect(ui.marksBox.visible).toBe(true) // 第一拍：动画中间态，不闪
     await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
     expect(ui.marksBox.visible).toBe(false)
 

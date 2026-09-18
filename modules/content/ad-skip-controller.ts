@@ -41,6 +41,12 @@ export const MEASURE_INTERVAL_MS = 2_000
  */
 export const MARKS_SYNC_INTERVAL_MS = 250
 /**
+ * 标记隐藏的确认拍数：250ms 一拍，连续两拍（约 500ms）确认不可见才隐藏。
+ * 控制层淡出是约 300ms 的过渡动画，中间态读到的 opacity/几何会来回跳——
+ * 单拍判定会把标记闪没又闪回，这就是"一直刷新/闪烁"的来源之一。
+ */
+export const MARKS_HIDE_CONFIRM_TICKS = 2
+/**
  * 自动跳过置信度门槛：只有高置信段（LLM 定界确认）才弹横幅并接管进度条；
  * 极速匹配（纯检索兜底）置信度封顶 0.6——只上进度条标记，不自动跳，
  * 防止端点故障时低质量召回把正片当广告跳掉。
@@ -125,6 +131,8 @@ export class AdSkipController {
   private lastRectKey = ''
   /** 进度条本体缓存：SPA 内一般不变，脱离文档时重找。 */
   private barElement: HTMLElement | null = null
+  /** 连续「不可见」观察拍数：隐藏需连续确认，防淡出动画中间态造成闪烁。 */
+  private marksInvisibleStreak = 0
 
   private readonly onTick = (): void => {
     this.onTimeUpdate()
@@ -489,22 +497,33 @@ export class AdSkipController {
    * 标记层盒子 = 进度条本体的实时几何（相对播放器容器），并镜像控制层显隐。
    * 找不到进度条 / 进度条被收起淡出 / 移出播放器范围，标记一律隐藏——
    * 绝不再退回「按播放器高度猜一个固定位置」的旧行为。
+   *
+   * 防闪烁三件套：几何**取整**写入（亚像素抖动不再产生新样式值，同值赋值不触发渲染）；
+   * 隐藏需**连续两拍**确认（控制层淡出动画的中间态与边界抖动不允许把标记闪没）；
+   * 显隐恢复立即（控制层出现时标记第一时间跟上）。
    */
   private syncMarksBox(): void {
     if (ui.marks.length === 0) {
       ui.marksBox.visible = false
+      this.marksInvisibleStreak = 0
       return
+    }
+    const markHidden = (): void => {
+      this.marksInvisibleStreak += 1
+      if (ui.marksBox.visible && this.marksInvisibleStreak >= MARKS_HIDE_CONFIRM_TICKS) {
+        ui.marksBox.visible = false
+      }
     }
     const video = this.player
     if (!video) {
-      ui.marksBox.visible = false
+      markHidden()
       return
     }
     const container = this.deps.player.findPlayerContainer(video)
     const playerRect = container?.getBoundingClientRect() ?? video.getBoundingClientRect()
     const bar = this.resolveBarElement(container)
     if (!bar || playerRect.width <= 0 || playerRect.height <= 0) {
-      ui.marksBox.visible = false
+      markHidden()
       return
     }
     const barRect = bar.getBoundingClientRect()
@@ -512,10 +531,15 @@ export class AdSkipController {
     // 收起动画可能把控制层整个下移出播放器：中心线出界即视为不可见。
     const insidePlayer =
       barRect.width > 0 && centerY >= playerRect.top - 2 && centerY <= playerRect.bottom + 2
-    ui.marksBox.visible = insidePlayer && this.barEffectivelyVisible(bar, container)
-    ui.marksBox.left = barRect.left - playerRect.left
-    ui.marksBox.top = centerY - playerRect.top
-    ui.marksBox.width = barRect.width
+    if (!(insidePlayer && this.barEffectivelyVisible(bar, container))) {
+      markHidden()
+      return
+    }
+    this.marksInvisibleStreak = 0
+    ui.marksBox.visible = true
+    ui.marksBox.left = Math.round(barRect.left - playerRect.left)
+    ui.marksBox.top = Math.round(centerY - playerRect.top)
+    ui.marksBox.width = Math.round(barRect.width)
   }
 
   private resolveBarElement(container: HTMLElement | null): HTMLElement | null {
