@@ -110,3 +110,27 @@ describe('popup 快开关（AI 去广告 + 总结面板）', () => {
     expect((switches[1]!.element as HTMLInputElement).disabled).toBe(true)
   })
 })
+describe('今日拦截行（Epic1-S1.4）', () => {
+  it('广告+推广统计合并显示；0 条不占行', async () => {
+    const now = new Date()
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    await chrome.storage.local.set({
+      biliHelperFeatureStats: {
+        adVideoBlocker: { statsDate: today, totalBlocked: 3 },
+        promotedVideoBlocker: { statsDate: today, totalBlocked: 2 },
+      },
+    })
+    const wrapper = await mountedPopup()
+    await flushPromises()
+    expect(wrapper.text()).toContain('今日拦截推广 5 条')
+    expect(wrapper.text()).toContain('广告 3')
+    expect(wrapper.text()).toContain('小火箭 2')
+  })
+
+  it('没有拦截记录时不显示该行', async () => {
+    const wrapper = await mountedPopup()
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('今日拦截')
+  })
+})

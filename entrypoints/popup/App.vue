@@ -18,10 +18,12 @@ import {
 import type { AdSkipPageState, PanelPageState } from '../../modules/content/protocol'
 import { readDailyStats } from '../../modules/content/stats'
 import { savedChipText, todayString } from '../../modules/content/logic'
+import { readFeatureStats } from '../../modules/features/config'
 
 const pageState = ref<AdSkipPageState | null>(null)
 const panelPageState = ref<PanelPageState | null>(null)
 const savedText = ref('')
+const blockedText = ref('')
 const busy = ref(false)
 
 function refreshStateFrom(response: unknown, panelMessage: boolean): void {
@@ -121,6 +123,18 @@ onMounted(async () => {
   if (stats && stats.date === todayString() && stats.savedSeconds > 0) {
     savedText.value = savedChipText(stats.savedSeconds)
   }
+  // 「今日拦截」：广告 + 推广两个 DOM 拦截器的日统计；拦截到才显示（0 条不占行）。
+  try {
+    const featureStats = await readFeatureStats()
+    const ad = featureStats.adVideoBlocker?.totalBlocked ?? 0
+    const promoted = featureStats.promotedVideoBlocker?.totalBlocked ?? 0
+    const total = ad + promoted
+    if (total > 0) {
+      blockedText.value = `今日拦截推广 ${total} 条${ad > 0 ? `（广告 ${ad}` : ''}${ad > 0 && promoted > 0 ? ' · ' : ''}${promoted > 0 ? `小火箭 ${promoted}` : ''}${ad > 0 || promoted > 0 ? '）' : ''}`
+    }
+  } catch {
+    // 统计读失败不显示该行（弹窗其余功能不受影响）。
+  }
 })
 </script>
 
@@ -183,6 +197,10 @@ onMounted(async () => {
     <div v-if="savedText" class="achievement-row">
       <span class="ach-orb" aria-hidden="true" />
       <span>{{ savedText }}</span>
+    </div>
+    <div v-if="blockedText" class="achievement-row">
+      <span class="ach-orb" aria-hidden="true" />
+      <span>{{ blockedText }}</span>
     </div>
     <button type="button" class="open-options" @click="openOptions">打开设置页</button>
   </div>

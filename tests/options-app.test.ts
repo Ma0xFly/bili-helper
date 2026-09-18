@@ -834,3 +834,66 @@ describe('options AI 助手表单', () => {
     expect((list.element as HTMLElement).style.display).toBe('none')
   })
 })
+
+describe('功能分组（Epic1-S1.4）', () => {
+  async function openGroup(wrapper: ReturnType<typeof mount>, title: string): Promise<void> {
+    const nav = wrapper.findAll('button.sidebar-item').find((item) => item.text() === title)
+    if (!nav) throw new Error(`找不到分组：${title}`)
+    await nav.trigger('click')
+    await flushPromises()
+  }
+
+  it('侧栏只含 AI 助手 + 三个功能组（净化与占位组已移除）；功能行带标题/描述/适用范围', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    const navTexts = wrapper.findAll('button.sidebar-item').map((item) => item.text())
+    expect(navTexts).toEqual(['AI 助手', '过滤视频', '布局优化', '功能增强'])
+
+    await openGroup(wrapper, '过滤视频')
+    const names = wrapper.findAll('.switch-name').map((item) => item.text())
+    expect(names.some((t) => t.includes('视频筛选'))).toBe(true)
+    expect(names.some((t) => t.includes('广告视频'))).toBe(true)
+    expect(names.some((t) => t.includes('推广视频'))).toBe(true)
+    expect(names.some((t) => t.includes('标签视频'))).toBe(true)
+    // 适用范围标签在场；默认全部关闭。
+    expect(wrapper.findAll('.applies-tag').length).toBe(4)
+    for (const box of wrapper.findAll('input[type="checkbox"]')) {
+      expect((box.element as HTMLInputElement).checked).toBe(false)
+    }
+  })
+
+  it('切换开关即时持久化到 biliHelperFeatures 并回显成功反馈', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    await openGroup(wrapper, '布局优化')
+    const splitSwitch = wrapper.find('input[aria-label="左右分屏开关"]')
+    expect(splitSwitch.exists()).toBe(true)
+    await splitSwitch.setValue(true)
+    await flushPromises()
+    const stored = (await chrome.storage.local.get('biliHelperFeatures')) as {
+      biliHelperFeatures: Record<string, { enabled: boolean } | undefined>
+    }
+    expect(stored.biliHelperFeatures.leftRightSplitScreen?.enabled).toBe(true)
+    expect(wrapper.text()).toContain('已开启左右分屏')
+  })
+
+  it('今日拦截徽标：统计 >0 才显示，未计数的功能不显示', async () => {
+    const now = new Date()
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    await chrome.storage.local.set({
+      biliHelperFeatureStats: {
+        adVideoBlocker: { statsDate: today, totalBlocked: 5 },
+        promotedVideoBlocker: { statsDate: today, totalBlocked: 2 },
+      },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    await openGroup(wrapper, '过滤视频')
+    expect(wrapper.text()).toContain('今日拦截 5')
+    expect(wrapper.text()).toContain('今日拦截 2')
+    // 视频筛选不参与统计：无徽标（其行文本不含「今日拦截」）。
+    const filterRow = wrapper.findAll('.switch-row').find((row) => row.text().includes('视频筛选'))
+    expect(filterRow?.text()).not.toContain('今日拦截')
+  })
+})

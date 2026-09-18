@@ -43,10 +43,18 @@ import {
   saveProfileFromCurrent,
 } from '../../modules/settings/profiles'
 import type { AiProfile } from '../../modules/settings/profiles'
+import { FEATURE_GROUPS } from '../../modules/features/config'
+import type { FeatureGroupId } from '../../modules/features/config'
+import FeaturesSection from './FeaturesSection.vue'
 import ModelCombo from './ModelCombo.vue'
 
-const groups = ['AI 助手', '服务器', '过滤', '净化', '布局', '增强']
+// 侧栏分组：AI 助手 + 三个功能组（过滤视频/布局优化/功能增强）。
+// 「净化」按 PRD 砍掉不再出现；旧占位组（服务器等）一并移除——服务器配置在 AI 助手内。
+const groups = ['AI 助手', ...FEATURE_GROUPS.map((group) => group.title)]
 const active = ref<string>(groups[0] ?? 'AI 助手')
+const activeGroupId = computed<FeatureGroupId | null>(
+  () => FEATURE_GROUPS.find((group) => group.title === active.value)?.id ?? null,
+)
 
 interface FormModel {
   apiUrl: string
@@ -1292,8 +1300,9 @@ onMounted(loadFailures)
       <template v-else>
         <header class="content-head">
           <h1>{{ active }}</h1>
-          <p class="content-sub">该分组的配置将在后续实现。</p>
+          <p class="content-sub">按开关启停，改动即时保存并持久化（默认全部关闭）。</p>
         </header>
+        <FeaturesSection v-if="activeGroupId" :group-id="activeGroupId" />
       </template>
     </main>
   </div>
