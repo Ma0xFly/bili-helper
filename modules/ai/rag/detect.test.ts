@@ -5,7 +5,13 @@ import { AiError } from '../../shared/error'
 import type { Subtitle } from '../../video/types'
 import type { DetectAdsInput } from '../port'
 import { tokenize } from './bm25'
-import { FALLBACK_MAX_SEGMENT_SECONDS, runRagDetect } from './detect'
+import {
+  CONSENSUS_CONFIDENCE,
+  curateSpanDanmaku,
+  FALLBACK_MAX_SEGMENT_SECONDS,
+  hasWeakSignal,
+  runRagDetect,
+} from './detect'
 
 // 与语料一致的窗口：开头 bigram 与语料「恰饭时间」「本期视频由」重合 → 向量路必然召回。
 // 以下填空行刻意避开语料词汇（含「游戏」这类品牌词里的字），保证只有恰饭窗口被召回。
@@ -172,7 +178,7 @@ describe('runRagDetect（全链路）', () => {
     expect(onVectorFallback).toHaveBeenCalledTimes(1)
   })
 
-  it('③纯词表无命中且字幕可用：LLM 全文兜底，source:llm', async () => {
+  it('③纯词表无命中但有弱信号：LLM 全文兜底，source:llm', async () => {
     const fetchMock = pipeFetch({
       embeddings: (inputs) => tokenEmbeddingResponse(inputs),
       chat: () =>
@@ -183,10 +189,29 @@ describe('runRagDetect（全链路）', () => {
     vi.stubGlobal('fetch', fetchMock)
     const onVectorFallback = vi.fn()
 
-    const result = await runRagDetect(makeInput(NO_SIGNAL_SUBTITLES), makeSettings(), { onVectorFallback })
+    // 弱信号 = 顶部评论提到广告：值得花全文定界的 token。
+    const result = await runRagDetect(
+      makeInput(NO_SIGNAL_SUBTITLES, [], [{ top: { text: '评论区都在说这视频有广告' } }]),
+      makeSettings(),
+      { onVectorFallback },
+    )
     expect(result.source).toBe('llm')
+    expect(result.meta?.path).toBe('fulltext')
     expect(result.ads).toEqual([{ start: 30, end: 40, product_name: 'X', ad_content: 'y', confidence: 0.6 }])
     expect(onVectorFallback).not.toHaveBeenCalled()
+  })
+
+  it('③全文兜底闸门：召回零命中且弹幕/评论均无广告线索 → 不调 LLM，0 token 收尾', async () => {
+    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await runRagDetect(makeInput(NO_SIGNAL_SUBTITLES), makeSettings(), {})
+    expect(result.source).toBe('none')
+    expect(result.meta?.path).toBe('none')
+    expect(result.meta?.note).toContain('弱信号')
+    // 零对话调用：请求只有 /embeddings。
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/embeddings')
+    }
   })
 
   it('③全文兜底解析失败/无片段：{ads:[], source:"none"}', async () => {
@@ -195,15 +220,21 @@ describe('runRagDetect（全链路）', () => {
       chat: () => completionResponse('这段字幕我没有什么好说的。'),
     })
     vi.stubGlobal('fetch', fetchMock)
-    const result = await runRagDetect(makeInput(NO_SIGNAL_SUBTITLES), makeSettings(), {})
-    expect(result).toEqual({ ads: [], source: 'none' })
+    const result = await runRagDetect(
+      makeInput(NO_SIGNAL_SUBTITLES, [], [{ top: { text: '有广告吗' } }]),
+      makeSettings(),
+      {},
+    )
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('fulltext')
   })
 
   it('④无字幕/全部不可用：{ads:[], source:"none"}，不发请求', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const result = await runRagDetect(makeInput([]), makeSettings(), {})
-    expect(result).toEqual({ ads: [], source: 'none' })
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('none')
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -250,7 +281,8 @@ describe('runRagDetect（全链路）', () => {
       makeSettings({ apiUrl: '', model: '' }),
       {},
     )
-    expect(result).toEqual({ ads: [], source: 'none' })
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('none')
     expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
     for (const call of fetchMock.mock.calls) {
       expect(String(call[0])).toContain('/embeddings')
@@ -291,7 +323,77 @@ describe('runRagDetect（全链路）', () => {
     vi.stubGlobal('fetch', fetchMock)
     const spamOnly = SPAM_THEN_AD_SUBTITLES.filter((line) => line.start <= 300)
     const result = await runRagDetect(makeInput(spamOnly), makeSettings({ apiUrl: '', model: '' }), {})
-    expect(result).toEqual({ ads: [], source: 'rag' })
+    expect(result).toMatchObject({ ads: [], source: 'rag' })
+    expect(result.meta?.path).toBe('retrieval')
+  })
+
+  it('双源强一致：词表命中 + 多条不同弹幕指认 → 免 LLM 直接高置信成段（0 对话调用）', async () => {
+    const fetchMock = pipeFetch({
+      embeddings: tokenEmbeddingResponse,
+      chat: () => {
+        throw new Error('consensus 路径不应调对话端点')
+      },
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    // 恰饭区间（492–580，跨两个窗口）每 8 秒一条**不同文案**的广告弹幕：每个窗口都有
+    // ≥3 条去重文本的指认，词表 + 弹幕双源一致 → 免 LLM。
+    const texts = [
+      '广告走起',
+      '恰饭现场直击',
+      '前方高能广告',
+      '这广告我忍了',
+      '又恰饭了',
+      '硬广预警',
+      '软广也是广',
+      '赞助商打钱',
+      '广子来了',
+      '带货时间',
+      '推广一下',
+      '恰饭恰饱了',
+    ]
+    const danmaku = texts.map((text, index) => ({ time: 494 + index * 7, text }))
+    const result = await runRagDetect(makeInput(AD_SUBTITLES, danmaku), makeSettings(), {})
+    expect(result.source).toBe('rag')
+    expect(result.meta?.path).toBe('consensus')
+    expect(result.meta?.llmCalls).toBe(0)
+    expect(result.ads.length).toBeGreaterThan(0)
+    // 强一致置信度 0.75：高于 0.7 的自动跳过门槛——免 LLM 也能自动跳。
+    for (const ad of result.ads) expect(ad.confidence).toBeGreaterThanOrEqual(0.7)
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/embeddings')
+    }
+  })
+
+  it('弹幕同句刷屏不算多人指认：双源一致性要求去重文本数', async () => {
+    const fetchMock = pipeFetch({
+      embeddings: tokenEmbeddingResponse,
+      chat: () => completionResponse(HAPPY_CHAT_BODY),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    // 同一条「广告」刷 8 次：raw 计数 8、去重计数 1 —— 不足以强一致，仍走 LLM 定界。
+    const danmaku = Array.from({ length: 8 }, (_, i) => ({ time: 495 + i * 8, text: '广告' }))
+    const result = await runRagDetect(makeInput(AD_SUBTITLES, danmaku), makeSettings(), {})
+    expect(result.meta?.path).toBe('llm')
+  })
+
+  it('去广告专用端点：定界请求发给专用端点/模型，总结端点不受影响', async () => {
+    const fetchMock = pipeFetch({
+      embeddings: tokenEmbeddingResponse,
+      chat: () => completionResponse(HAPPY_CHAT_BODY),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await runRagDetect(
+      makeInput(AD_SUBTITLES),
+      makeSettings({ detectApiUrl: 'https://cheap.example/v1', detectModel: 'cheap-flash' }),
+      {},
+    )
+    expect(result.meta?.path).toBe('llm')
+    const chatCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('cheap.example'))
+    expect(chatCall).toBeDefined()
+    expect((JSON.parse(String(chatCall?.[1]?.body)) as { model: string }).model).toBe('cheap-flash')
+    // embeddings 仍走向量端点（emb.example），不跟随去广告专用端点。
+    const embedCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/embeddings'))
+    expect(String(embedCall?.[0])).toContain('emb.example')
   })
 
   it('LLM 定界输出不可解析：宽松解析失败后退回召回窗口（留窗口不悬挂）', async () => {
@@ -370,8 +472,12 @@ describe('用户补录词条进入全链路（detect 用的是合并后的生效
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    // 基线：用户层为空 → 两路都召回不到 → 降级到 LLM 全文兜底。
-    const baseline = await runRagDetect(makeInput(USER_WORD_SUBTITLES), makeSettings(), {})
+    // 基线：用户层为空 → 两路都召回不到，但评论有弱信号 → 降级到 LLM 全文兜底。
+    const baseline = await runRagDetect(
+      makeInput(USER_WORD_SUBTITLES, [], [{ top: { text: '评论区都说这有广告' } }]),
+      makeSettings(),
+      {},
+    )
     expect(baseline.source).toBe('llm')
     expect(corpusEmbeddingInputs(fetchMock)).not.toContain('某新品牌')
 
@@ -379,7 +485,11 @@ describe('用户补录词条进入全链路（detect 用的是合并后的生效
     await chrome.storage.local.set({
       biliHelperUserCorpus: [{ text: '某新品牌', category: 'brands-digital' }],
     })
-    const after = await runRagDetect(makeInput(USER_WORD_SUBTITLES), makeSettings(), {})
+    const after = await runRagDetect(
+      makeInput(USER_WORD_SUBTITLES, [], [{ top: { text: '评论区都说这有广告' } }]),
+      makeSettings(),
+      {},
+    )
     expect(after.source).toBe('rag')
     expect(after.ads).toEqual([
       { start: 300, end: 330, product_name: '某新品牌', ad_content: '口播', confidence: 0.8 },
@@ -387,5 +497,76 @@ describe('用户补录词条进入全链路（detect 用的是合并后的生效
 
     // 两路共用同一份合并语料：向量路请求的语料里也必须有用户词（否则只是词表路生效）。
     expect(corpusEmbeddingInputs(fetchMock)).toContain('某新品牌')
+  })
+})
+
+describe('curateSpanDanmaku（弹幕精选 = token 预算闸门）', () => {
+  const corpus = [
+    { text: '恰饭', kind: 'script' as const, weight: 3, category: 'scripts' },
+    { text: '广告', kind: 'script' as const, weight: 2, category: 'scripts' },
+  ]
+
+  it('不超限时原样返回（时间序不变）', () => {
+    const items = [
+      { time: 1, text: 'a' },
+      { time: 2, text: 'b' },
+    ]
+    expect(curateSpanDanmaku(items, corpus, 40)).toEqual(items)
+  })
+
+  it('超限压缩：信号弹幕优先占位（去重后按权重），无偏采样补齐，总数不超上限', () => {
+    const items = [
+      ...Array.from({ length: 90 }, (_, i) => ({ time: i, text: `闲聊${i}号` })),
+      { time: 95, text: '恰饭现场' },
+      { time: 96, text: '广告走起' },
+      { time: 97, text: '恰饭现场' }, // 同文本刷屏：去重只留一条
+    ]
+    const curated = curateSpanDanmaku(items, corpus, 10)
+    expect(curated.length).toBeLessThanOrEqual(10)
+    // 信号弹幕（恰饭现场/广告走起）必须在场：证据不能被采样挤掉。
+    expect(curated.some((item) => item.text === '恰饭现场')).toBe(true)
+    expect(curated.some((item) => item.text === '广告走起')).toBe(true)
+    // 去重：同文本最多一条。
+    expect(new Set(curated.map((item) => item.text)).size).toBe(curated.length)
+    // 输出按时间排序（喂给 LLM 的旁证保持时间线）。
+    const times = curated.map((item) => item.time)
+    expect([...times].sort((a, b) => a - b)).toEqual(times)
+    // 无偏采样：中性弹幕也留了样本（不只喂广告弹幕，避免把模型带偏）。
+    expect(curated.some((item) => item.text.startsWith('闲聊'))).toBe(true)
+  })
+})
+
+describe('hasWeakSignal（全文兜底闸门）', () => {
+  const corpus = [{ text: '恰饭', kind: 'script' as const, weight: 3, category: 'scripts' }]
+  const comments = [{ top: { text: '这视频纯聊天' } }]
+
+  it('弹幕广告词达阈值即弱信号', () => {
+    expect(
+      hasWeakSignal(
+        [
+          { time: 1, text: '开头恰饭' },
+          { time: 2, text: '中间恰饭' },
+          { time: 3, text: '结尾恰饭' },
+        ],
+        comments,
+        corpus,
+      ),
+    ).toBe(true)
+  })
+
+  it('弹幕无广告词但顶部评论提到 → 仍是弱信号', () => {
+    expect(
+      hasWeakSignal([{ time: 1, text: '哈哈哈哈' }], [{ top: { text: '后面有恰饭别走' } }], corpus),
+    ).toBe(true)
+  })
+
+  it('弹幕与评论都没有线索 → 非弱信号（不花全文兜底的 token）', () => {
+    expect(hasWeakSignal([{ time: 1, text: '哈哈哈' }, { time: 2, text: '哈哈哈' }], comments, corpus)).toBe(false)
+  })
+})
+
+describe('双源强一致常量', () => {
+  it('强一致置信度必须高于 0.7 的自动跳过门槛（免 LLM 也能自动跳）', () => {
+    expect(CONSENSUS_CONFIDENCE).toBeGreaterThanOrEqual(0.7)
   })
 })

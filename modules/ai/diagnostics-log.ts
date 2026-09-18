@@ -70,3 +70,69 @@ export async function recordAiFailure(entry: AiFailureEntry): Promise<void> {
 export async function clearAiFailures(): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY]: [] })
 }
+
+// ---------- 去广告开销记录（成本可观测） ----------
+// 「这次检测走了哪条路、花了多少 token」落同一存储区，设置页诊断控制台直接展示：
+// 贵不贵是数据不是感觉。红线同上：只有计数与路径，没有任何凭据。
+
+const COST_KEY = 'aiDetectCostLog'
+const COST_LIMIT = 20
+
+export interface DetectCostEntry {
+  /** 毫秒时间戳。 */
+  time: number
+  bvid: string
+  /** 检测路径：cache=缓存命中（0 token）/ consensus=双源强一致免 LLM / llm / fulltext / retrieval / none。 */
+  path: string
+  /** 对话请求次数。 */
+  llmCalls: number
+  /** token 用量（端点未回 usage 时缺省）。 */
+  inputTokens?: number
+  outputTokens?: number
+  /** 检测耗时（毫秒）。 */
+  elapsedMs: number
+  /** 识别出的广告段数与可自动跳过数。 */
+  ads: number
+  skippable: number
+}
+
+function isCostEntry(value: unknown): value is DetectCostEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.time === 'number' && typeof entry.path === 'string'
+}
+
+/** 读最近检测开销（最新在前）；读失败回空数组。 */
+export async function readDetectCosts(): Promise<DetectCostEntry[]> {
+  try {
+    const result = await chrome.storage.local.get({ [COST_KEY]: [] })
+    const list = (result as Record<string, unknown>)[COST_KEY]
+    if (!Array.isArray(list)) return []
+    return list.filter(isCostEntry).slice(0, COST_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+/** 追加一条开销记录（最新在前），环形淘汰。写失败静默。 */
+export async function recordDetectCost(entry: DetectCostEntry): Promise<void> {
+  const sanitized: DetectCostEntry = {
+    time: Number.isFinite(entry.time) ? entry.time : Date.now(),
+    bvid: String(entry.bvid ?? '').slice(0, 32),
+    path: String(entry.path ?? '').slice(0, 16),
+    llmCalls: Math.max(0, Math.round(entry.llmCalls) || 0),
+    ...(Number.isFinite(entry.inputTokens) ? { inputTokens: Math.max(0, Math.round(entry.inputTokens as number)) } : {}),
+    ...(Number.isFinite(entry.outputTokens) ? { outputTokens: Math.max(0, Math.round(entry.outputTokens as number)) } : {}),
+    elapsedMs: Math.max(0, Math.round(entry.elapsedMs) || 0),
+    ads: Math.max(0, Math.round(entry.ads) || 0),
+    skippable: Math.max(0, Math.round(entry.skippable) || 0),
+  }
+  try {
+    const current = await readDetectCosts()
+    await chrome.storage.local.set({
+      [COST_KEY]: [sanitized, ...current].slice(0, COST_LIMIT),
+    })
+  } catch {
+    // 开销记录写入失败不影响业务链路。
+  }
+}

@@ -21,15 +21,21 @@ import {
   removeUserCorpusEntry,
 } from '../../modules/ai/rag/user-corpus'
 import type { UserCorpusEntry } from '../../modules/ai/rag/user-corpus'
-import { readAiSettings, resolveEmbeddingEndpoint, writeAiSettings } from '../../modules/settings'
+import {
+  readAiSettings,
+  resolveDetectEndpoint,
+  resolveEmbeddingEndpoint,
+  writeAiSettings,
+} from '../../modules/settings'
 import type { AiMode, AiSettings } from '../../modules/settings'
 import { AiError } from '../../modules/shared/error'
 import {
   clearAiFailures,
   readAiFailures,
+  readDetectCosts,
   recordAiFailure,
 } from '../../modules/ai/diagnostics-log'
-import type { AiFailureEntry } from '../../modules/ai/diagnostics-log'
+import type { AiFailureEntry, DetectCostEntry } from '../../modules/ai/diagnostics-log'
 import {
   applyProfile,
   deleteProfile,
@@ -50,6 +56,10 @@ interface FormModel {
   embedBaseUrl: string
   embedKey: string
   embedModel: string
+  detectApiUrl: string
+  detectApiKey: string
+  detectModel: string
+  detectApiFormat: 'inherit' | 'openai' | 'anthropic'
   mode: AiMode
   serverBaseUrl: string
   serverToken: string
@@ -65,6 +75,10 @@ const form = reactive<FormModel>({
   embedBaseUrl: '',
   embedKey: '',
   embedModel: '',
+  detectApiUrl: '',
+  detectApiKey: '',
+  detectModel: '',
+  detectApiFormat: 'inherit',
   mode: 'local',
   serverBaseUrl: '',
   serverToken: '',
@@ -83,6 +97,10 @@ function applyStoredToForm(settings: AiSettings): void {
   form.embedBaseUrl = settings.embedBaseUrl
   form.embedKey = settings.embedKey
   form.embedModel = settings.embedModel
+  form.detectApiUrl = settings.detectApiUrl
+  form.detectApiKey = settings.detectApiKey
+  form.detectModel = settings.detectModel
+  form.detectApiFormat = settings.detectApiFormat
   form.mode = settings.mode
   fallbackWanted.value = settings.mode === 'auto'
   form.serverBaseUrl = settings.serverBaseUrl
@@ -141,6 +159,31 @@ const embedKeyHint = computed(() =>
 )
 const embedModelHint = computed(() =>
   resolvedEmbed.value.model ? `继承：${resolvedEmbed.value.model}` : '继承：尚未配置对话端点',
+)
+
+// 去广告专用端点（省 token）：默认折叠，留空继承对话端点。定界是约束很强的结构化任务，
+// 便宜模型（flash 档）够用；这里只影响去广告，总结/提问仍走对话端点。
+const detectOpen = ref(false)
+const resolvedDetect = computed(() => resolveDetectEndpoint(form))
+const detectBaseInherits = computed(() => form.detectApiUrl.trim() === '')
+const detectKeyInherits = computed(() => form.detectApiKey.trim() === '')
+const detectModelInherits = computed(() => form.detectModel.trim() === '')
+const detectBaseHint = computed(() =>
+  resolvedDetect.value.baseUrl && detectBaseInherits.value
+    ? `继承：${resolvedDetect.value.baseUrl}`
+    : detectBaseInherits.value
+      ? '继承：尚未配置对话端点'
+      : '',
+)
+const detectModelHint = computed(() =>
+  resolvedDetect.value.model && detectModelInherits.value
+    ? `继承：${resolvedDetect.value.model}`
+    : detectModelInherits.value
+      ? '继承：尚未配置对话端点'
+      : '',
+)
+const detectKeyHint = computed(() =>
+  detectKeyInherits.value && resolvedDetect.value.apiKey ? '继承：对话端点的 API Key' : '',
 )
 
 const FETCH_MODELS_HINT =
@@ -202,6 +245,7 @@ function recordFetchFailure(feature: '模型列表', error: unknown): void {
 // 总结/提问/去广告/连通测试失败自动落档；这里以终端样式展示。
 // 展开（或点击终端本体）即刷新，展开期间每 5 秒自动刷新——失败发生时打开就能看到。
 const failures = ref<AiFailureEntry[]>([])
+const costs = ref<DetectCostEntry[]>([])
 const consoleOpen = ref(false)
 let consoleTimer: number | undefined
 
@@ -210,6 +254,11 @@ async function loadFailures(): Promise<void> {
     failures.value = await readAiFailures()
   } catch {
     failures.value = []
+  }
+  try {
+    costs.value = await readDetectCosts()
+  } catch {
+    costs.value = []
   }
 }
 
@@ -239,6 +288,33 @@ function failureTimeText(entry: AiFailureEntry): string {
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
+
+/** 开销行的路径译名：终端里看代码词比看中文标签更快对上日志。 */
+function costPathText(path: string): string {
+  const known: Record<string, string> = {
+    cache: '缓存命中(0 token)',
+    consensus: '双源强一致(免LLM)',
+    llm: 'LLM定界',
+    fulltext: '全文兜底',
+    retrieval: '极速匹配',
+    none: '无命中',
+  }
+  return known[path] ?? path
+}
+
+function costTimeText(entry: DetectCostEntry): string {
+  return failureTimeText({ time: entry.time } as AiFailureEntry)
+}
+
+/** 开销合计：最近 N 次检测的 token 总量与零成本占比（缓存/双源/无命中）。 */
+const costSummary = computed(() => {
+  const total = costs.value.length
+  if (total === 0) return null
+  const input = costs.value.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0)
+  const output = costs.value.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0)
+  const free = costs.value.filter((item) => item.llmCalls === 0).length
+  return `最近 ${total} 次：输入 ${input.toLocaleString()} / 输出 ${output.toLocaleString()} token，${free} 次零成本（${Math.round((free / total) * 100)}%）`
+})
 
 type Feedback = { kind: 'ok' | 'warn' | 'fail'; text: string }
 
@@ -283,6 +359,7 @@ function newTestState(): InlineTestState {
 }
 const chatTest = reactive(newTestState())
 const embedTest = reactive(newTestState())
+const detectTest = reactive(newTestState())
 const serverTest = reactive(newTestState())
 
 function asFeedback(result: EndpointTestResult): Feedback {
@@ -352,6 +429,19 @@ async function testEmbedInline(): Promise<void> {
       model: endpoint.model,
       apiKey: endpoint.apiKey,
     })
+    recordTestFailure(result, endpoint.baseUrl, endpoint.model)
+    return asFeedback(result)
+  })
+}
+
+async function testDetectInline(): Promise<void> {
+  const endpoint = resolveDetectEndpoint(form)
+  if (endpoint.baseUrl.trim() === '' || endpoint.model.trim() === '') {
+    detectTest.result = { kind: 'fail', text: '请先填写（或继承对话端点的）Base URL 与模型' }
+    return
+  }
+  await runInlineTest(detectTest, async () => {
+    const result = await testChatEndpoint(endpoint)
     recordTestFailure(result, endpoint.baseUrl, endpoint.model)
     return asFeedback(result)
   })
@@ -815,7 +905,8 @@ onMounted(loadFailures)
           <h2 id="diag-log-title" class="card-title">诊断控制台</h2>
           <p class="card-note">
             AI 失败的终端视图（最近 {{ failures.length }}/20 条：总结 / 提问 / 去广告 / 连通测试 / 模型列表），
-            含模型原始响应摘录。点开即刷新、展开期间每 5 秒自动刷新；点击终端本体也可手动刷新。不含任何密钥。
+            含模型原始响应摘录；下方「去广告开销」逐次记录检测走了哪条路、花了多少 token。
+            点开即刷新、展开期间每 5 秒自动刷新；点击终端本体也可手动刷新。不含任何密钥。
           </p>
           <div class="diag-log-actions">
             <button
@@ -857,6 +948,20 @@ onMounted(loadFailures)
                 </div>
               </template>
               <div v-else class="terminal-empty">$ 暂无失败记录<span class="terminal-cursor">▊</span></div>
+              <template v-if="costs.length > 0">
+                <div class="terminal-divider">$ 去广告开销 {{ costSummary }}</div>
+                <div v-for="(entry, index) in costs" :key="`cost-${index}`" class="diag-log-item">
+                  <div class="diag-log-line">
+                    <span class="terminal-prompt">[{{ costTimeText(entry) }}]</span>
+                    <span class="diag-log-feature">{{ costPathText(entry.path) }}</span>
+                    <span class="diag-log-msg">
+                      {{ entry.bvid || '未知视频' }} · 广告段 {{ entry.ads }}（可跳 {{ entry.skippable }}） ·
+                      {{ entry.elapsedMs >= 1000 ? `${(entry.elapsedMs / 1000).toFixed(1)}s` : `${entry.elapsedMs}ms` }} ·
+                      {{ entry.llmCalls === 0 ? '0 token' : `入${(entry.inputTokens ?? 0).toLocaleString()}/出${(entry.outputTokens ?? 0).toLocaleString()}` }}
+                    </span>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
         </section>
@@ -1096,6 +1201,83 @@ onMounted(loadFailures)
                   {{ embedTest.result.kind === 'ok' ? '✓' : embedTest.result.kind === 'warn' ? '!' : '✕' }}
                 </span>
                 <span>{{ embedTest.result.text }}</span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            class="ghost"
+            :aria-expanded="detectOpen ? 'true' : 'false'"
+            aria-controls="advanced-detect"
+            @click="detectOpen = !detectOpen"
+          >
+            {{ detectOpen ? '收起去广告端点' : '去广告端点（可选 · 省 token）' }}
+          </button>
+          <p class="card-note">
+            留空即继承对话端点。广告定界是约束很强的结构化任务，flash 档的便宜模型就够用——
+            高频的去广告走这里，总结/提问仍走对话端点，token 成本能降一个量级。
+            另有免 token 通道：词表与弹幕双源强一致时直接出结果，不调模型。
+          </p>
+          <div v-show="detectOpen" id="advanced-detect">
+            <label class="field">
+              <span class="field-label">Base URL</span>
+              <input
+                v-model.trim="form.detectApiUrl"
+                type="url"
+                placeholder="留空则继承对话端点"
+                :class="{ inheriting: detectBaseInherits }"
+              />
+              <span v-if="detectBaseInherits" class="field-hint">{{ detectBaseHint }}</span>
+            </label>
+            <label class="field">
+              <span class="field-label">API Key</span>
+              <input
+                v-model="form.detectApiKey"
+                type="password"
+                placeholder="留空则继承对话端点"
+                :class="{ inheriting: detectKeyInherits }"
+                autocomplete="off"
+              />
+              <span v-if="detectKeyInherits" class="field-hint">{{ detectKeyHint }}</span>
+            </label>
+            <label class="field">
+              <span class="field-label">模型</span>
+              <input
+                v-model.trim="form.detectModel"
+                placeholder="留空则继承对话端点"
+                :class="{ inheriting: detectModelInherits }"
+              />
+              <span v-if="detectModelInherits" class="field-hint">{{ detectModelHint }}</span>
+            </label>
+            <label class="field">
+              <span class="field-label">协议</span>
+              <select v-model="form.detectApiFormat">
+                <option value="inherit">继承对话端点的协议</option>
+                <option value="openai">OpenAI 兼容</option>
+                <option value="anthropic">Anthropic Messages</option>
+              </select>
+            </label>
+            <div class="field">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="detectTest.running"
+                aria-label="测试去广告端点"
+                @click="testDetectInline"
+              >
+                {{ detectTest.running ? '测试中…' : '测试连接' }}
+              </button>
+              <div
+                v-if="detectTest.result"
+                class="feedback"
+                :class="detectTest.result.kind"
+                aria-live="polite"
+              >
+                <span class="badge" aria-hidden="true">
+                  {{ detectTest.result.kind === 'ok' ? '✓' : detectTest.result.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ detectTest.result.text }}</span>
               </div>
             </div>
           </div>
@@ -1684,6 +1866,14 @@ input:focus-visible {
 
 .terminal-empty {
   color: #8b93a7;
+}
+
+.terminal-divider {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #2a2e3d;
+  color: #8b93a7;
+  font-size: 11px;
 }
 
 .terminal-cursor {

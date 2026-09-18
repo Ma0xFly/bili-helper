@@ -130,10 +130,15 @@ describe('resolveBackend（mode 分派唯一入口）', () => {
     const fetchMock = routedFetch(true)
     vi.stubGlobal('fetch', fetchMock)
     const caps = resolveBackend(await settingsOf('auto'))
-    // local 的 embeddings 收到补全形状响应 → 向量路解析失败 → 纯词表无命中 → 全文兜底：
-    // 兜底 chat 返回的 "本地总结" JSON 不是 ads 形状 → 定界无片段 → {ads:[], source:"none"}。
-    const result = await caps.detectAds({ ...CONTEXT, strategy: 'smart' })
-    expect(result).toEqual({ ads: [], source: 'none' })
+    // local 的 embeddings 收到补全形状响应 → 向量路解析失败 → 纯词表无命中；评论带弱信号
+    // → 走全文兜底：兜底 chat 返回的 "本地总结" JSON 不是 ads 形状 → 定界无片段 → {ads:[], source:"none"}。
+    const result = await caps.detectAds({
+      ...CONTEXT,
+      comments: [{ top: { text: '听说这视频有广告' } }],
+      strategy: 'smart',
+    })
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('fulltext')
     const urls = fetchMock.mock.calls.map((call) => String(call[0]))
     expect(urls[0]).toBe('https://srv.example/ai/ad-detection')
     expect(urls[urls.length - 1]).toBe('https://llm.example/v1/chat/completions')

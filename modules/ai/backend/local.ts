@@ -5,6 +5,7 @@
 
 import { errorInfoFrom, AiError } from '../../shared/error'
 import type { AiSettings } from '../../settings'
+import { resolveDetectEndpoint } from '../../settings'
 import type {
   AiCapabilities,
   ChatInput,
@@ -33,7 +34,11 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
    * 失败落诊断日志（设置页「诊断记录」卡消费）：kind/文案/原始响应摘录，
    * 只记元信息与模型自己的回答文本，凭据永远不经过这里。记录失败静默。
    */
-  function logFailure(feature: AiFailureFeature, error: unknown): void {
+  function logFailure(
+    feature: AiFailureFeature,
+    error: unknown,
+    origin: ChatEndpoint = endpoint,
+  ): void {
     // 任何抛出物都入档（非 AiError 经 errorInfoFrom 归一）：排障时「没日志」比「日志多」更致命。
     const info = errorInfoFrom(error)
     const raw = error instanceof AiError ? error.rawResponse : undefined
@@ -45,9 +50,18 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
       kind: info.kind,
       message: info.message + detail,
       ...(raw === undefined ? {} : { rawExcerpt: raw }),
-      ...(endpoint.baseUrl === '' ? {} : { endpoint: endpoint.baseUrl }),
-      ...(endpoint.model === '' ? {} : { model: endpoint.model }),
+      ...(origin.baseUrl === '' ? {} : { endpoint: origin.baseUrl }),
+      ...(origin.model === '' ? {} : { model: origin.model }),
     })
+  }
+
+  // 去广告定界走专用端点（默认继承对话端点）：失败记录要标真实使用的端点/模型。
+  const detectResolved = resolveDetectEndpoint(settings)
+  const detectEndpoint: ChatEndpoint = {
+    baseUrl: detectResolved.baseUrl,
+    model: detectResolved.model,
+    apiKey: detectResolved.apiKey,
+    format: detectResolved.format,
   }
 
   return {
@@ -56,7 +70,7 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
       try {
         return await runRagDetect(input, settings, hooks)
       } catch (error) {
-        logFailure('去广告', error)
+        logFailure('去广告', error, detectEndpoint)
         throw error
       }
     },

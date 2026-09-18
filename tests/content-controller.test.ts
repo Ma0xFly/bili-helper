@@ -47,8 +47,11 @@ async function makeHarness(overrides: {
   settings?: Partial<AiSettings>
   ads?: AdSegment[]
   bar?: HTMLElement | null
+  /** 初始观看进度：默认 30s（跨过 15s 观看门槛，检测立即放行）。 */
+  watchedSeconds?: number
 } = {}): Promise<Harness> {
   const video = makeVideo()
+  video.currentTime = overrides.watchedSeconds ?? 30
   const container = document.createElement('div')
   container.appendChild(video)
   document.body.appendChild(container)
@@ -86,7 +89,13 @@ async function makeHarness(overrides: {
     },
     pageHref: () => href,
     isDark: () => false,
-    collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
+    collectVideoMeta: async () => ({
+      // 跟随 href：SPA 换视频时 bvid 变化，检测结果缓存按 bvid:cid 区分。
+      bvid: href.includes('BV2xx411c7mE') ? 'BV2xx411c7mE' : 'BV1xx411c7mD',
+      cid: 1,
+      title: '横评',
+      duration: 600,
+    }),
     collectSubtitles: async () => [],
     collectDanmaku: async () => [{ time: 500, text: '恰饭' }],
     collectComments: async () => [{ top: { text: '广告明显' } }],
@@ -341,6 +350,59 @@ describe('进度条广告标记跟随', () => {
     harness.video.currentTime = 97.5
     harness.controller.onTimeUpdate()
     expect(ui.banner.visible).toBe(true)
+  })
+
+  it('观看门槛：看不够 15 秒不花检测 token；继续观看后周期重试放行', async () => {
+    const { video, controller, detectAds } = await makeHarness({ watchedSeconds: 0 })
+    await controller.start()
+    expect(detectAds).not.toHaveBeenCalled() // 秒退/划走的视频零 token
+
+    video.currentTime = 16
+    controller.retryIfNeeded()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(1)
+  })
+
+  it('结果缓存：同视频再次进入命中缓存（0 token），负缓存同样生效', async () => {
+    const { controller, detectAds, setHref } = await makeHarness()
+    await controller.start()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(1)
+    expect(ui.ads).toEqual([AD])
+
+    // SPA 换到新视频：照常检测（第二次调用）。
+    setHref('https://www.bilibili.com/video/BV2xx411c7mE/')
+    controller.checkNavigation()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(2)
+
+    // 再回到旧视频：命中缓存，零检测调用，结果照常镜像。
+    setHref('https://www.bilibili.com/video/BV1xx411c7mD/')
+    controller.checkNavigation()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(2)
+    expect(ui.ads).toEqual([AD])
+    // 开销记录里能看到「缓存命中」这次零成本检测。
+    const stored = (await chrome.storage.local.get(null)) as Record<string, unknown>
+    const costs = stored.aiDetectCostLog as { path: string }[] | undefined
+    expect(costs?.some((entry) => entry.path === 'cache')).toBe(true)
+  })
+
+  it('无广告结果也入负缓存：第二次进入同样零检测调用', async () => {
+    const { controller, detectAds, setHref } = await makeHarness({ ads: [] })
+    await controller.start()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(1)
+    expect(ui.ads).toEqual([])
+
+    setHref('https://www.bilibili.com/video/BV2xx411c7mE/')
+    controller.checkNavigation()
+    await flushMicrotasks()
+    setHref('https://www.bilibili.com/video/BV1xx411c7mD/')
+    controller.checkNavigation()
+    await flushMicrotasks()
+    expect(detectAds).toHaveBeenCalledTimes(2) // 第二次是 BV2 的检测；回到 BV1 走负缓存
+    expect(ui.ads).toEqual([])
   })
 
   it('播放器几何变化（resize/滚动）后盒子重挂到新位置的进度条上', async () => {

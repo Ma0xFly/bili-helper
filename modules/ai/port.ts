@@ -33,9 +33,34 @@ export interface AdSegment {
 /** 结果来源标记（供缓存/调试），不是后端选择器。 */
 export type AdSource = 'rag' | 'llm' | 'none'
 
+/**
+ * 检测走了哪条路（成本可观测的锚点）：
+ * cache=命中结果缓存（0 token）｜consensus=词表+弹幕双源强一致（免 LLM）｜llm=LLM 定界（常规路径）
+ * ｜fulltext=召回零命中后的全文兜底｜retrieval=极速匹配（对话端点未配置/不可用）｜none=无命中收尾。
+ */
+export type DetectPath = 'cache' | 'consensus' | 'llm' | 'fulltext' | 'retrieval' | 'none'
+
+/** token 用量（端点未回 usage 时缺省）。 */
+export interface TokenUsage {
+  input: number
+  output: number
+}
+
+export interface DetectMeta {
+  path: DetectPath
+  /** 本次检测实际发出的对话请求数（0 = 没花 token）。 */
+  llmCalls: number
+  usage?: TokenUsage
+  /** 送 LLM 的候选窗口数（诊断用）。 */
+  spans?: number
+  /** 补充说明（如缓存命中的原始路径、双源一致的窗口数）。 */
+  note?: string
+}
+
 export interface DetectAdsResult {
   ads: AdSegment[]
   source: AdSource
+  meta?: DetectMeta
 }
 
 export interface SummarizeInput {

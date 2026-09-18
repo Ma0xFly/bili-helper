@@ -5,6 +5,7 @@ import {
   embeddings,
   joinApiUrl,
   listModels,
+  parseTokenUsage,
   withDeadline,
 } from './client'
 import { attachNetRelay, setNetRelayConnect } from './net-relay'
@@ -712,5 +713,59 @@ describe('listModels（容错对齐开源客户端做法）', () => {
     await expect(listModels({ baseUrl: ENDPOINT.baseUrl, apiKey: '' })).rejects.toThrow(
       /HTTP 404/,
     )
+  })
+})
+
+describe('parseTokenUsage（成本可观测）', () => {
+  it('OpenAI 形状：usage.prompt_tokens/completion_tokens', () => {
+    expect(
+      parseTokenUsage({ choices: [], usage: { prompt_tokens: 1234.0, completion_tokens: 56 } }),
+    ).toEqual({ input: 1234, output: 56 })
+  })
+
+  it('Anthropic 形状：usage.input_tokens/output_tokens', () => {
+    expect(
+      parseTokenUsage({ content: [], usage: { input_tokens: 987, output_tokens: 3 } }),
+    ).toEqual({ input: 987, output: 3 })
+  })
+
+  it('缺 usage / 缺字段 / 非数字 / 负数 → 一律视为没有（undefined）', () => {
+    expect(parseTokenUsage({ choices: [] })).toBeUndefined()
+    expect(parseTokenUsage({ usage: { prompt_tokens: 100 } })).toBeUndefined()
+    expect(parseTokenUsage({ usage: { prompt_tokens: 'x', completion_tokens: 1 } })).toBeUndefined()
+    expect(parseTokenUsage(null)).toBeUndefined()
+  })
+
+  it('chatCompletion 把端点回传的 usage 透传给调用方', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: 'ok' } }],
+              usage: { prompt_tokens: 300, completion_tokens: 20 },
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+    const result = await chatCompletion({ endpoint: ENDPOINT, messages: [{ role: 'user', content: 'hi' }] })
+    expect(result.content).toBe('ok')
+    expect(result.usage).toEqual({ input: 300, output: 20 })
+  })
+
+  it('端点不回 usage 时 result.usage 缺省（不报错）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+            status: 200,
+          }),
+      ),
+    )
+    const result = await chatCompletion({ endpoint: ENDPOINT, messages: [{ role: 'user', content: 'hi' }] })
+    expect(result.usage).toBeUndefined()
   })
 })

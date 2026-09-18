@@ -3,6 +3,7 @@ import type { AiSettings } from './index'
 import {
   DEFAULT_SETTINGS,
   readAiSettings,
+  resolveDetectEndpoint,
   resolveEmbeddingEndpoint,
   writeAiSettings,
 } from './index'
@@ -131,5 +132,66 @@ describe('resolveEmbeddingEndpoint', () => {
     expect(resolved.baseUrl).toBe('https://emb.example')
     expect(resolved.model).toBe('text-embedding')
     expect(resolved.apiKey).toBe('emb-key')
+  })
+})
+
+describe('resolveDetectEndpoint（去广告专用端点）', () => {
+  it('三项全空：逐字段继承对话端点，协议跟随对话协议', () => {
+    const settings: AiSettings = {
+      ...DEFAULT_SETTINGS,
+      apiUrl: 'https://chat.example/v1',
+      model: 'm-1',
+      apiKey: 'k',
+      apiFormat: 'anthropic',
+    }
+    expect(resolveDetectEndpoint(settings)).toEqual({
+      baseUrl: 'https://chat.example/v1',
+      model: 'm-1',
+      apiKey: 'k',
+      format: 'anthropic',
+    })
+  })
+
+  it('单独配了便宜模型：只覆盖模型，其余仍继承', () => {
+    const settings: AiSettings = {
+      ...DEFAULT_SETTINGS,
+      apiUrl: 'https://chat.example/v1',
+      model: 'm-1',
+      apiKey: 'k',
+      detectModel: 'cheap-flash',
+    }
+    expect(resolveDetectEndpoint(settings)).toEqual({
+      baseUrl: 'https://chat.example/v1',
+      model: 'cheap-flash',
+      apiKey: 'k',
+      format: 'openai',
+    })
+  })
+
+  it('协议显式选择优先于继承（对话 anthropic + 检测 openai 各走各的）', () => {
+    const settings: AiSettings = {
+      ...DEFAULT_SETTINGS,
+      apiUrl: 'https://chat.example',
+      model: 'm-1',
+      apiFormat: 'anthropic',
+      detectApiUrl: 'https://cheap.example/v1',
+      detectApiFormat: 'openai',
+    }
+    const resolved = resolveDetectEndpoint(settings)
+    expect(resolved.baseUrl).toBe('https://cheap.example/v1')
+    expect(resolved.format).toBe('openai')
+  })
+
+  it('空白字符按空处理（trim 后为空即继承）', () => {
+    const settings: AiSettings = {
+      ...DEFAULT_SETTINGS,
+      apiUrl: 'https://chat.example/v1',
+      model: 'm-1',
+      detectApiUrl: '   ',
+      detectModel: '\t',
+    }
+    const resolved = resolveDetectEndpoint(settings)
+    expect(resolved.baseUrl).toBe('https://chat.example/v1')
+    expect(resolved.model).toBe('m-1')
   })
 })

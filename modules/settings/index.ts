@@ -20,6 +20,14 @@ export interface AiSettings {
   embedBaseUrl: string
   embedModel: string
   embedKey: string
+  /**
+   * 去广告专用端点（可选，省 token）：定界是约束很强的结构化任务，便宜模型够用。
+   * 三项为空时读取侧继承对话端点；detectApiFormat='inherit' 时协议同继承结果。
+   */
+  detectApiUrl: string
+  detectModel: string
+  detectApiKey: string
+  detectApiFormat: DetectApiFormat
   /** 后端分派唯一事实来源，值域 local/server/auto。 */
   mode: AiMode
   /** server 适配器端点/鉴权。 */
@@ -43,6 +51,17 @@ export interface EmbeddingEndpoint {
   apiKey: string
 }
 
+/** 去广告专用端点的协议：inherit = 跟随对话端点（默认）。 */
+export type DetectApiFormat = 'inherit' | ApiFormat
+
+/** 去广告专用端点的解析结果（三项为空即继承对话端点）。 */
+export interface DetectEndpoint {
+  baseUrl: string
+  model: string
+  apiKey: string
+  format: ApiFormat
+}
+
 export const DEFAULT_SETTINGS: AiSettings = {
   apiUrl: '',
   model: '',
@@ -51,6 +70,10 @@ export const DEFAULT_SETTINGS: AiSettings = {
   embedBaseUrl: '',
   embedModel: '',
   embedKey: '',
+  detectApiUrl: '',
+  detectModel: '',
+  detectApiKey: '',
+  detectApiFormat: 'inherit',
   mode: 'local',
   serverBaseUrl: '',
   serverToken: '',
@@ -77,6 +100,13 @@ function normalizeSettings(raw: unknown): AiSettings {
     embedBaseUrl: asString(source.embedBaseUrl, DEFAULT_SETTINGS.embedBaseUrl),
     embedModel: asString(source.embedModel, DEFAULT_SETTINGS.embedModel),
     embedKey: asString(source.embedKey, DEFAULT_SETTINGS.embedKey),
+    detectApiUrl: asString(source.detectApiUrl, DEFAULT_SETTINGS.detectApiUrl),
+    detectModel: asString(source.detectModel, DEFAULT_SETTINGS.detectModel),
+    detectApiKey: asString(source.detectApiKey, DEFAULT_SETTINGS.detectApiKey),
+    detectApiFormat:
+      source.detectApiFormat === 'openai' || source.detectApiFormat === 'anthropic'
+        ? source.detectApiFormat
+        : 'inherit',
     mode: isAiMode(source.mode) ? source.mode : DEFAULT_SETTINGS.mode,
     serverBaseUrl: asString(source.serverBaseUrl, DEFAULT_SETTINGS.serverBaseUrl),
     serverToken: asString(source.serverToken, DEFAULT_SETTINGS.serverToken),
@@ -110,4 +140,24 @@ export function resolveEmbeddingEndpoint(settings: AiSettings): EmbeddingEndpoin
     model: settings.embedModel.trim() || settings.model,
     apiKey: settings.embedKey.trim() || settings.apiKey,
   }
+}
+
+// 去广告专用端点：同样逐字段继承；协议 inherit 时跟随对话端点的协议。
+// 单独存在只为一件事——把「定界」这类约束强的结构化任务交给更便宜的模型，省 token 不省精度。
+export function resolveDetectEndpoint(settings: AiSettings): DetectEndpoint {
+  return {
+    baseUrl: settings.detectApiUrl.trim() || settings.apiUrl,
+    model: settings.detectModel.trim() || settings.model,
+    apiKey: settings.detectApiKey.trim() || settings.apiKey,
+    format: settings.detectApiFormat === 'inherit' ? settings.apiFormat : settings.detectApiFormat,
+  }
+}
+
+/** 是否配了独立的去广告端点（UI 提示与诊断展示用；不影响解析结果）。 */
+export function hasDedicatedDetectEndpoint(settings: AiSettings): boolean {
+  return (
+    settings.detectApiUrl.trim() !== '' ||
+    settings.detectModel.trim() !== '' ||
+    settings.detectApiKey.trim() !== ''
+  )
 }

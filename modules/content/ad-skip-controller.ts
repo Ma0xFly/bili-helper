@@ -8,6 +8,8 @@ import type { AiSettings } from '../settings'
 import type { AiCapabilities, AdSegment, DetectAdsInput, DetectAdsResult } from '../ai/port'
 import type { Comment, Danmaku, Subtitle, VideoMeta } from '../video/types'
 import type { DetectHooks } from '../ai/rag/detect'
+import { detectCacheFingerprint, readDetectCache, writeDetectCache } from '../ai/rag/result-cache'
+import { recordDetectCost } from '../ai/diagnostics-log'
 import { extractBvidFromUrl } from '../video/collectors'
 import type { AdSkipPageState, AdSkipToggleResponse } from './protocol'
 import {
@@ -44,8 +46,16 @@ export const MARKS_SYNC_INTERVAL_MS = 250
  * 防止端点故障时低质量召回把正片当广告跳掉。
  */
 export const AUTO_SKIP_MIN_CONFIDENCE = 0.7
-/** 失败链路的重试冷却：周期检查按此节流，避免端点故障时疯狂重打。 */
+/**
+ * 失败链路的重试冷却：周期检查按此节流，避免端点故障时疯狂重打。这也承担观看门槛的
+ * 重试节拍——门槛未过时 pipelineStarted 保持 false，靠这里的周期重试在用户继续看时接上。
+ */
 export const RETRY_COOLDOWN_MS = 10_000
+/**
+ * token 闸门：真实观看进度达到该秒数才发起检测。秒退/划走的视频零 token；
+ * 拖动进度条也会立刻满足（用户明显在看）。典型恰饭段在 1–3 分钟处，重试节拍下不赶不上。
+ */
+export const WATCH_GATE_SECONDS = 15
 
 export interface TimerApi {
   setTimeout(handler: () => void, ms: number): number
@@ -249,14 +259,16 @@ export class AdSkipController {
       if (!meta) return // 元数据取不到：静默（等价 source:none），pipelineStarted 保持 false 可重试。
       this.activeBvid = meta.bvid
       this.videoMeta = meta
-      const [subtitles, danmaku, comments] = await Promise.all([
-        this.deps.collectSubtitles(meta),
-        this.deps.collectDanmaku(meta),
-        this.deps.collectComments(meta),
-      ])
-      console.info(
-        `[bili-helper] 去广告检测开始 bvid=${meta.bvid} 时长=${meta.duration}s 字幕=${subtitles.length}行 弹幕=${danmaku.length}条 评论=${comments.length}条`,
-      )
+
+      // token 闸门①（观看门槛）：看不够 15 秒不花检测 token——秒退/划走的视频零成本。
+      // pipelineStarted 保持 false，周期重试（10s 冷却）在用户继续看时自动接上。
+      const watched = this.deps.player.findVideo()?.currentTime ?? 0
+      if (watched < WATCH_GATE_SECONDS) {
+        console.info(
+          `[bili-helper] 去广告等待观看进度（${Math.floor(watched)}s/${WATCH_GATE_SECONDS}s，看够才花 token）`,
+        )
+        return
+      }
 
       let settings: AiSettings
       try {
@@ -270,44 +282,107 @@ export class AdSkipController {
         return
       }
 
-      const backend = this.deps.createBackend(settings, {
-        onVectorFallback: () => {
-          this.showHint('向量端点（Embedding）的 API 有问题，暂时只用词表匹配')
-        },
-        onRetrievalOnly: () => {
-          this.showHint('对话端点这次没响应，先用极速匹配（仅检索）跳广告')
-        },
-      })
-
-      let result: DetectAdsResult
-      const detectStartedAt = Date.now()
+      // token 闸门②（结果缓存）：重复观看/回看直接用上次的结论（含「没广告」的负缓存）。
+      // 指纹含算法版本/端点/模型/生效语料，配置一变自动重算。命中时连采集都省掉。
+      // cid 取不到（罕见：页面状态没就绪）时跳过缓存——不同分 P 的检测结果不能混。
+      const cacheCid = typeof meta.cid === 'number' ? meta.cid : null
+      let fingerprint = ''
       try {
-        result = await backend.detectAds({
-          video: meta,
-          subtitles,
-          danmaku,
-          comments,
-          strategy: 'smart',
-        })
-      } catch (error) {
-        // 端点未配置（config）/后端失败：不弹 UI；pipelineStarted 保持 false，冷却后重试。
-        // 但必须留下日志——静默失败是排障黑洞（用户只会看到「没有标记」）。
-        console.error(
-          '[bili-helper] 去广告检测失败（冷却后自动重试）:',
-          error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-        )
-        return
+        fingerprint = await detectCacheFingerprint(settings)
+      } catch {
+        fingerprint = '' // 指纹算不出（语料读失败等）：视为不可缓存，照常检测。
       }
+      let cached =
+        fingerprint === '' || cacheCid === null
+          ? null
+          : await readDetectCache(meta.bvid, cacheCid, fingerprint)
+
+      const detectStartedAt = Date.now()
+      let result: DetectAdsResult
+      if (cached) {
+        result = {
+          ads: cached.ads,
+          source: cached.source,
+          meta: {
+            ...(cached.meta ?? {}),
+            path: 'cache',
+            llmCalls: 0,
+            note: `缓存命中（原路径 ${cached.meta?.path ?? cached.source}，${Math.round((Date.now() - cached.savedAt) / 60000)} 分钟前）`,
+          },
+        }
+        console.info(`[bili-helper] 去广告检测缓存命中 bvid=${meta.bvid} 广告段=${cached.ads.length}（0 token）`)
+      } else {
+        const [subtitles, danmaku, comments] = await Promise.all([
+          this.deps.collectSubtitles(meta),
+          this.deps.collectDanmaku(meta),
+          this.deps.collectComments(meta),
+        ])
+        console.info(
+          `[bili-helper] 去广告检测开始 bvid=${meta.bvid} 时长=${meta.duration}s 字幕=${subtitles.length}行 弹幕=${danmaku.length}条 评论=${comments.length}条`,
+        )
+        const backend = this.deps.createBackend(settings, {
+          onVectorFallback: () => {
+            this.showHint('向量端点（Embedding）的 API 有问题，暂时只用词表匹配')
+          },
+          onRetrievalOnly: () => {
+            this.showHint('对话端点这次没响应，先用极速匹配（仅检索）跳广告')
+          },
+        })
+        try {
+          result = await backend.detectAds({
+            video: meta,
+            subtitles,
+            danmaku,
+            comments,
+            strategy: 'smart',
+          })
+        } catch (error) {
+          // 端点未配置（config）/后端失败：不弹 UI；pipelineStarted 保持 false，冷却后重试。
+          // 但必须留下日志——静默失败是排障黑洞（用户只会看到「没有标记」）。
+          console.error(
+            '[bili-helper] 去广告检测失败（冷却后自动重试）:',
+            error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          )
+          return
+        }
+        // 负缓存同样入档：没有广告的结论也是花了 token 得到的。
+        if (fingerprint !== '' && cacheCid !== null) {
+          void writeDetectCache(meta.bvid, cacheCid, {
+            ads: result.ads,
+            source: result.source,
+            ...(result.meta === undefined ? {} : { meta: result.meta }),
+            fingerprint,
+          })
+        }
+      }
+
       // 门槛统计就地算：此处 this.skipAds 还是上一轮的（赋值在 gate 之后才发生）。
       const skippable = result.ads.filter(
         (ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE,
       ).length
+      const metaInfo = result.meta
+      const usage = metaInfo?.usage
+      const costText =
+        metaInfo === undefined
+          ? ''
+          : ` 路径=${metaInfo.path} 对话=${metaInfo.llmCalls}次` +
+            (usage === undefined ? '' : ` token=入${usage.input}/出${usage.output}`)
       console.info(
-        `[bili-helper] 去广告检测完成 source=${result.source} 广告段=${result.ads.length} 可自动跳过=${skippable} 耗时=${Math.round((Date.now() - detectStartedAt) / 1000)}s` +
+        `[bili-helper] 去广告检测完成 source=${result.source} 广告段=${result.ads.length} 可自动跳过=${skippable} 耗时=${cached ? 0 : Math.round((Date.now() - detectStartedAt) / 1000)}s${costText}` +
           (result.ads.length > 0
             ? ' → ' + result.ads.map((ad) => `${Math.round(ad.start)}-${Math.round(ad.end)}s(${ad.product_name || '未命名'},${ad.confidence.toFixed(2)})`).join(' ')
             : ''),
       )
+      void recordDetectCost({
+        time: Date.now(),
+        bvid: meta.bvid,
+        path: metaInfo?.path ?? (cached ? 'cache' : 'unknown'),
+        llmCalls: metaInfo?.llmCalls ?? 0,
+        ...(usage === undefined ? {} : { inputTokens: usage.input, outputTokens: usage.output }),
+        elapsedMs: cached ? 0 : Date.now() - detectStartedAt,
+        ads: result.ads.length,
+        skippable,
+      })
       if (!this.pageEnabled || !this.masterEnabled) return
       this.ads = sortedAds(result.ads)
       this.skipAds = this.ads.filter((ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE)

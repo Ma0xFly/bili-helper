@@ -34,18 +34,21 @@ export interface DanmakuRankedWindow {
 }
 
 /**
- * 弹幕信号排名：时间指针扫一遍弹幕（两侧都已排序），每条弹幕只落进它所属的窗口。
- * 元信号词命中 +2 分，语料短语命中 +weight；按命中弹幕数过门槛后以分数降序。
+ * 弹幕信号扫描：时间指针扫一遍弹幕（两侧都已排序），每条弹幕只落进它所属的窗口。
+ * 元信号词命中 +2 分，语料短语命中 +weight；返回每窗的命中条数与分数。
+ * 排名与「双源强一致」判定共用这一份扫描，避免两处口径漂移。
  */
-export function rankWindowsByDanmaku(
+function scanDanmakuWindows(
   windows: readonly SubtitleWindow[],
   danmaku: readonly Danmaku[],
   corpus: readonly CorpusSignal[],
-): DanmakuRankedWindow[] {
-  if (windows.length === 0 || danmaku.length === 0) return []
-  const sorted = [...danmaku].sort((a, b) => a.time - b.time)
+): { hits: number[]; distinct: number[]; scores: number[] } {
   const hits = new Array<number>(windows.length).fill(0)
+  const distinct = new Array<number>(windows.length).fill(0)
   const scores = new Array<number>(windows.length).fill(0)
+  const seen = new Array<Set<string> | undefined>(windows.length).fill(undefined)
+  if (windows.length === 0 || danmaku.length === 0) return { hits, distinct, scores }
+  const sorted = [...danmaku].sort((a, b) => a.time - b.time)
   let cursor = 0
   for (const item of sorted) {
     // 指针推进到包含该弹幕时刻的窗口（窗口按时间有序且不重叠）。
@@ -72,8 +75,43 @@ export function rankWindowsByDanmaku(
     if (score > 0) {
       hits[cursor] = (hits[cursor] ?? 0) + 1
       scores[cursor] = (scores[cursor] ?? 0) + score
+      // 去重计数：同一条弹幕刷屏（「广告」「广告」「广告」）不该等价于多人指认。
+      const bucket = seen[cursor] ?? new Set<string>()
+      seen[cursor] = bucket
+      bucket.add(text.trim())
+      distinct[cursor] = bucket.size
     }
   }
+  return { hits, distinct, scores }
+}
+
+/** 窗口级弹幕命中条数（与排名同一判定）：双源强一致免 LLM 用。 */
+export function danmakuHitCounts(
+  windows: readonly SubtitleWindow[],
+  danmaku: readonly Danmaku[],
+  corpus: readonly CorpusSignal[],
+): number[] {
+  return scanDanmakuWindows(windows, danmaku, corpus).hits
+}
+
+/** 窗口级弹幕命中**去重文本**数：同句刷屏只算一次，作为「多人在指认」的代理信号。 */
+export function danmakuDistinctHitCounts(
+  windows: readonly SubtitleWindow[],
+  danmaku: readonly Danmaku[],
+  corpus: readonly CorpusSignal[],
+): number[] {
+  return scanDanmakuWindows(windows, danmaku, corpus).distinct
+}
+
+/**
+ * 弹幕信号排名：命中条数过门槛后以分数降序。
+ */
+export function rankWindowsByDanmaku(
+  windows: readonly SubtitleWindow[],
+  danmaku: readonly Danmaku[],
+  corpus: readonly CorpusSignal[],
+): DanmakuRankedWindow[] {
+  const { hits, scores } = scanDanmakuWindows(windows, danmaku, corpus)
   const ranked: DanmakuRankedWindow[] = []
   for (let index = 0; index < windows.length; index += 1) {
     if ((hits[index] ?? 0) >= MIN_DANMAKU_HITS) {

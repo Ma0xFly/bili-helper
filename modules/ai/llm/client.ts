@@ -5,6 +5,7 @@
 // 坏 JSON/形状不符→parse、未配置→config。凭据只进鉴权头，不落日志。
 
 import { AiError } from '../../shared/error'
+import type { TokenUsage } from '../port'
 import { netRelayEnabled, netRelayFetch } from './net-relay'
 
 export interface OpenAiChatMessage {
@@ -31,6 +32,8 @@ export interface ChatCompletionParams {
 
 export interface ChatCompletionResult {
   content: string
+  /** 端点回传的 token 用量（成本可观测用）；端点不回 usage 时缺省。 */
+  usage?: TokenUsage
 }
 
 export interface ChatCompletionStreamParams extends ChatCompletionParams {
@@ -353,7 +356,22 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
   const content = anthropic
     ? parseAnthropicContent(data)
     : parseOpenAiContent(data)
-  return { content }
+  const usage = parseTokenUsage(data)
+  return { content, ...(usage === undefined ? {} : { usage }) }
+}
+
+/**
+ * token 用量解析：OpenAI 形状 usage.prompt_tokens/completion_tokens，
+ * Anthropic 形状 usage.input_tokens/output_tokens；缺字段或非数字一律视为没有。
+ */
+export function parseTokenUsage(data: unknown): TokenUsage | undefined {
+  const root = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+  const usage = typeof root.usage === 'object' && root.usage !== null ? (root.usage as Record<string, unknown>) : {}
+  const input = usage.prompt_tokens ?? usage.input_tokens
+  const output = usage.completion_tokens ?? usage.output_tokens
+  if (typeof input !== 'number' || !Number.isFinite(input)) return undefined
+  if (typeof output !== 'number' || !Number.isFinite(output)) return undefined
+  return { input: Math.max(0, Math.round(input)), output: Math.max(0, Math.round(output)) }
 }
 
 function parseOpenAiContent(data: unknown): string {
