@@ -5,8 +5,20 @@
 // SPA 首页 ⇄ 视频页的启停由管理器的导航节拍与配置订阅共同驱动。
 
 import { defineContentScript } from 'wxt/utils/define-content-script'
-import { FEATURE_STORAGE_KEY, readFeatureConfigs } from '../modules/features/config'
+import { FEATURE_IDS, FEATURE_STORAGE_KEY, readFeatureConfigs } from '../modules/features/config'
+import type { FeatureConfigMap } from '../modules/features/config'
 import { FeatureManager } from '../modules/features/manager'
+import { pushInterceptConfigs } from '../modules/features/intercept/protocol'
+import type { SerializedFeatureConfigs } from '../modules/features/intercept/protocol'
+
+/** FeatureConfigMap → 主世界线协议（纯 JSON；函数过不了 postMessage）。 */
+function toInterceptPayload(map: FeatureConfigMap): SerializedFeatureConfigs {
+  const payload: SerializedFeatureConfigs = {}
+  for (const id of FEATURE_IDS) {
+    payload[id] = { enabled: map[id].enabled, config: map[id].config as Record<string, unknown> }
+  }
+  return payload
+}
 
 export default defineContentScript({
   matches: [
@@ -16,6 +28,23 @@ export default defineContentScript({
     'https://www.bilibili.com/list/*',
   ],
   async main() {
+    // 主世界拦截器需要配置（videoFilter 的规则、换一换的开关…），但主世界没有 chrome API：
+    // 启动时广播一次，此后每次 storage 变化再广播（主世界收到即重建拦截规则）。
+    const broadcastConfigs = async (): Promise<void> => {
+      try {
+        pushInterceptConfigs(window, toInterceptPayload(await readFeatureConfigs()))
+      } catch {
+        // 广播失败保持主世界现状，下一次变化再试。
+      }
+    }
+    const onStorageChanged = (
+      changes: Record<string, unknown>,
+      area: string,
+    ): void => {
+      if (area === 'local' && FEATURE_STORAGE_KEY in changes) void broadcastConfigs()
+    }
+    chrome.storage.onChanged.addListener(onStorageChanged)
+
     const manager = new FeatureManager({
       readConfigs: readFeatureConfigs,
       getHref: () => window.location.href,
@@ -33,5 +62,6 @@ export default defineContentScript({
       },
     })
     await manager.start()
+    await broadcastConfigs()
   },
 })
