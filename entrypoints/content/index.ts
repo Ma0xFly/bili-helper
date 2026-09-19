@@ -2,13 +2,23 @@ import 'uno.css'
 import './ui/overlay.css'
 import { defineContentScript } from 'wxt/utils/define-content-script'
 import { createShadowRootUi } from 'wxt/utils/content-script-ui/shadow-root'
-import { createApp } from 'vue'
+import { createApp, watch } from 'vue'
 import { browser } from 'wxt/browser'
 import App from './ui/App.vue'
 import PanelApp from './ui/panel/PanelApp.vue'
 import { ui } from '../../modules/content/ui-state'
 import { AdSkipController } from '../../modules/content/ad-skip-controller'
-import type { TimerApi } from '../../modules/content/ad-skip-controller'
+import type { PlayerAdapter, TimerApi } from '../../modules/content/ad-skip-controller'
+import { MarksBoxTracker } from '../../modules/content/marks-box'
+import { formatCompactTime } from '../../modules/content/logic'
+import {
+  mergeChapterSources,
+  parseViewPoints,
+  readChapterCache,
+  writeChapterCache,
+  type ChapterMark,
+} from '../../modules/content/chapters'
+import type { SummarySegment } from '../../modules/ai/port'
 import { readAiSettings } from '../../modules/settings'
 import type { AiSettings } from '../../modules/settings'
 import { resolveBackend } from '../../modules/ai/backend/resolve'
@@ -17,6 +27,7 @@ import {
   collectDanmaku,
   collectSubtitles,
   collectVideoMeta,
+  collectViewPoints,
 } from '../../modules/video'
 import { recordSkipped } from '../../modules/content/stats'
 import { panel, panelActions, panelBackoffMs, panelVisibleNow } from '../../modules/content/panel-state'
@@ -161,6 +172,26 @@ export default defineContentScript({
       })
     }
 
+    function findPlayerContainer(video: HTMLVideoElement): HTMLElement | null {
+      return (video.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null) ?? null
+    }
+
+    function findProgressElement(container: HTMLElement | null): HTMLElement | null {
+      return (
+        container?.querySelector<HTMLElement>(PROGRESS_SELECTORS.join(',')) ??
+        window.document.querySelector<HTMLElement>(PROGRESS_SELECTORS.join(',')) ??
+        null
+      )
+    }
+
+    /** 去广告控制器与章节标记共用的定位面。 */
+    const playerAdapter: PlayerAdapter = {
+      findVideo,
+      waitForVideo,
+      findPlayerContainer,
+      findProgressElement,
+    }
+
     const timers: TimerApi = {
       setTimeout: (handler, ms) => window.setTimeout(handler, ms),
       clearTimeout: (id) => window.clearTimeout(id),
@@ -193,16 +224,7 @@ export default defineContentScript({
     const controller = new AdSkipController({
       timers,
       now: () => Date.now(),
-      player: {
-        findVideo,
-        waitForVideo,
-        findPlayerContainer: (video) =>
-          (video.closest(PLAYER_SELECTORS.join(',')) as HTMLElement | null) ?? null,
-        findProgressElement: (container) =>
-          container?.querySelector<HTMLElement>(PROGRESS_SELECTORS.join(',')) ??
-          window.document.querySelector<HTMLElement>(PROGRESS_SELECTORS.join(',')) ??
-          null,
-      },
+      player: playerAdapter,
       pageHref: () => window.location.href,
       isDark: isDarkMode,
       collectVideoMeta,
@@ -215,6 +237,103 @@ export default defineContentScript({
       openOptions: openOptionsViaBackground,
     })
 
+    // ---------- 章节标记（官方看点 + AI 总结时间线 → 进度条刻度，点击跳转） ----------
+    // 官方看点零 token（player 接口）；AI 时间线只在用户手动点总结后出现，并按 bvid:cid
+    // 缓存——总结花过 token，时间线不能随刷新蒸发。几何与广告标记共用 MarksBoxTracker 口径。
+    const chapterMarksBox = new MarksBoxTracker({
+      timers,
+      player: playerAdapter,
+      getVideo: findVideo,
+      isRelevant: () => ui.chapterMarks.length > 0,
+    })
+    let chaptersEnabled = true
+    let chapterBvid: string | null = null
+    let chapterCid: number | undefined
+    let chapterDone = false
+    let chapterAttempts = 0
+    let chapterOfficial: ChapterMark[] = []
+    let chapterAi: SummarySegment[] = []
+
+    function chapterTotalSeconds(): number {
+      const video = findVideo()
+      const duration = video?.duration
+      return typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+        ? duration
+        : 0
+    }
+
+    function applyChapterMarks(): void {
+      const merged = mergeChapterSources(chapterOfficial, chapterAi)
+      const total = chapterTotalSeconds()
+      ui.chapterMarks = merged.map((chapter) => ({
+        key: `${chapter.source}:${Math.round(chapter.start * 10) / 10}`,
+        leftPct: total > 0 ? Math.min((chapter.start / total) * 100, 100) : 0,
+        start: chapter.start,
+        label: chapter.label,
+        timeText: formatCompactTime(chapter.start),
+        source: chapter.source,
+      }))
+      if (ui.chapterMarks.length > 0) chapterMarksBox.start()
+      console.info(
+        `[bili-helper] 章节标记：官方=${chapterOfficial.length} AI=${chapterAi.length} 上条=${ui.chapterMarks.length}`,
+      )
+    }
+
+    async function syncChapters(): Promise<void> {
+      const bvid = extractBvidFromUrl(window.location.href)
+      if (!chaptersEnabled || !bvid) {
+        chapterBvid = null
+        chapterDone = false
+        chapterAttempts = 0
+        chapterOfficial = []
+        chapterAi = []
+        ui.chapterMarks = []
+        chapterMarksBox.stop()
+        return
+      }
+      if (bvid !== chapterBvid) {
+        chapterBvid = bvid
+        chapterDone = false
+        chapterAttempts = 0
+        chapterOfficial = []
+        chapterAi = []
+        ui.chapterMarks = []
+        ui.summarySegments = []
+      }
+      if (chapterDone) return
+      chapterAttempts += 1
+      const meta = await collectVideoMeta()
+      if (!meta || meta.bvid !== bvid || meta.cid === undefined) {
+        // 页面状态未就绪（罕见）：留待下一拍，超过十拍放弃（本视频无章节标记）。
+        if (chapterAttempts < 10) return
+        chapterDone = true
+        return
+      }
+      const [rawPoints, cached] = await Promise.all([
+        collectViewPoints(meta),
+        readChapterCache(meta.bvid, meta.cid),
+      ])
+      if (rawPoints === null && chapterAttempts < 5) return // 网络瞬时失败：稍后重试
+      chapterCid = meta.cid
+      chapterOfficial = parseViewPoints(rawPoints ?? [])
+      chapterAi = cached?.segments ?? []
+      chapterDone = true
+      applyChapterMarks()
+    }
+
+    // 总结生成成功（SummaryTab 镜像 ui.summarySegments）→ 缓存时间线 + 重上章节条。
+    watch(
+      () => ui.summarySegments,
+      (segments) => {
+        const bvid = chapterBvid ?? extractBvidFromUrl(window.location.href)
+        if (bvid === null || segments.length === 0 || chapterCid === undefined) return
+        if (extractBvidFromUrl(window.location.href) !== bvid) return
+        chapterAi = segments
+        void writeChapterCache(bvid, chapterCid, segments)
+        applyChapterMarks()
+      },
+    )
+
     // ---------- 消息接线 ----------
     // 面板动作注入：跳播/打开设置/端口调用（always 经 resolveBackend 唯一分派）。
     panelActions.seek = (seconds) => {
@@ -226,6 +345,8 @@ export default defineContentScript({
         // 播放器拒绝 seek：静默忽略。
       }
     }
+    // 章节标记点击跳转复用面板跳播（同一个 video 元素、同一套失败静默）。
+    ui.actions.onSeek = (seconds) => panelActions.seek(seconds)
     panelActions.openSettings = openOptionsViaBackground
     panelActions.summarize = async (input) => {
       const settings = await readAiSettings()
@@ -513,6 +634,17 @@ export default defineContentScript({
         panel.masterEnabled = next.panelEnabled
         if (panel.masterEnabled) void syncPanelSession()
       }
+      if (next && typeof next.chapterMarksEnabled === 'boolean') {
+        chaptersEnabled = next.chapterMarksEnabled
+        if (!chaptersEnabled) {
+          ui.chapterMarks = []
+          ui.summarySegments = []
+          chapterMarksBox.stop()
+        } else {
+          chapterDone = false // 重新开启：下一拍重跑采集（缓存请求免网络重复）。
+          void syncChapters()
+        }
+      }
     })
 
     // ---------- 导航 / 亮暗观测 ----------
@@ -522,6 +654,7 @@ export default defineContentScript({
       controller.retryIfNeeded()
       controller.checkNavigation()
       void syncPanelSession()
+      void syncChapters()
       ensurePanelPlacement()
     }, NAV_CHECK_INTERVAL_MS)
     try {
@@ -555,6 +688,7 @@ export default defineContentScript({
         }
       }
       controller.requestRemesh()
+      chapterMarksBox.requestRemesh()
     }
     window.document.addEventListener('fullscreenchange', onFullscreenChange)
 
@@ -569,11 +703,13 @@ export default defineContentScript({
     try {
       const initialSettings = await readAiSettings()
       panel.masterEnabled = initialSettings.panelEnabled
+      chaptersEnabled = initialSettings.chapterMarksEnabled
     } catch {
       // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
     }
     panel.ready = true
     void syncPanelSession()
+    void syncChapters()
 
     void controller.start()
   },

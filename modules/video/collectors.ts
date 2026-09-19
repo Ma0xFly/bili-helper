@@ -203,17 +203,43 @@ interface PlayerApiSubtitleItem {
 }
 
 /**
+ * player wbi/v2 响应的按视频缓存（bvid:cid → Promise）：同一响应里有字幕列表与
+ * 官方看点（view_points）两组数据，字幕兜底与章节标记都拉这一个接口，命中即零额外请求。
+ * 页面生命周期内的内存缓存，SPA 换视频自然换键，无需失效策略。
+ */
+const playerApiCache = new Map<string, Promise<unknown>>()
+
+/** 清空 player 接口缓存（测试隔离用；线上自然常驻，无需主动调用）。 */
+export function resetPlayerApiCache(): void {
+  playerApiCache.clear()
+}
+
+function fetchPlayerApiCached(video: VideoMeta, signal?: AbortSignal): Promise<unknown> {
+  if (video.cid === undefined) return Promise.resolve(null)
+  const key = `${video.bvid}:${video.cid}`
+  const cached = playerApiCache.get(key)
+  if (cached) return cached
+  const pending = fetchJsonWithWbi(
+    'https://api.bilibili.com/x/player/wbi/v2',
+    { bvid: video.bvid, cid: video.cid },
+    signal,
+  ).catch((error: unknown) => {
+    // 失败不缓存：下次调用（重试节拍/字幕兜底）还能再试。
+    playerApiCache.delete(key)
+    throw error
+  })
+  playerApiCache.set(key, pending)
+  return pending
+}
+
+/**
  * 页面状态的字幕列表经常是空的（B 站把真实列表挪到了 x/player/wbi/v2，AI 字幕还要求登录态）——
  * 空列表时走 player 接口兜底：WBI 签名 + 浏览器自动带 cookie，与登录用户身份一致。
  */
 async function subtitleListFromPlayerApi(video: VideoMeta): Promise<BiliSubtitleListItem[]> {
   if (video.cid === undefined) return []
   try {
-    const data = await fetchJsonWithWbi(
-      'https://api.bilibili.com/x/player/wbi/v2',
-      { bvid: video.bvid, cid: video.cid },
-      timeoutSignal(),
-    )
+    const data = await fetchPlayerApiCached(video, timeoutSignal())
     if (!isRecord(data) || !isRecord(data.data)) {
       console.info('[bili-helper] 字幕兜底：player 接口响应形状异常', JSON.stringify(data).slice(0, 160))
       return []
@@ -265,6 +291,25 @@ export async function collectSubtitles(video: VideoMeta): Promise<Subtitle[]> {
   } catch (error) {
     console.info('[bili-helper] 字幕采集异常：', error instanceof Error ? error.message : String(error))
     return []
+  }
+}
+
+// ---------- 官方看点（章节） ----------
+
+/**
+ * 拉取官方「看点/章节」（view_points）原始数组：与字幕兜底共用 player/wbi/v2 的缓存请求。
+ * 失败（网络/形状/cid 缺失）返回 null（与「成功但无看点」的空数组区分，调用方可重试）；
+ * 解析与合并规则在 modules/content/chapters（纯函数层）。
+ */
+export async function collectViewPoints(video: VideoMeta): Promise<unknown[] | null> {
+  if (video.cid === undefined) return null
+  try {
+    const data = await fetchPlayerApiCached(video, timeoutSignal())
+    if (!isRecord(data) || !isRecord(data.data)) return null
+    const viewPoints = (data.data as Record<string, unknown>).view_points
+    return Array.isArray(viewPoints) ? viewPoints : []
+  } catch {
+    return null
   }
 }
 

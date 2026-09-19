@@ -26,7 +26,21 @@ import {
   shouldSkipManually,
   sortedAds,
 } from './logic'
+import { MarksBoxTracker } from './marks-box'
+import type { MarksPlayerAdapter, TimerApi } from './marks-box'
 import { ui } from './ui-state'
+
+// 计时器/播放器定位面类型与标记几何跟踪器同源（见 marks-box.ts）；此处 re-export 供既有引用。
+// PlayerAdapter 在定位面之上补齐视频查找（控制器管线自己用；标记跟踪器只消费定位面）。
+export type { TimerApi }
+export interface PlayerAdapter extends MarksPlayerAdapter {
+  findVideo(): HTMLVideoElement | null
+  waitForVideo(timeoutMs: number): Promise<HTMLVideoElement | null>
+}
+export {
+  MARKS_SYNC_INTERVAL_MS,
+  MARKS_HIDE_CONFIRM_TICKS,
+} from './marks-box'
 
 export const VIDEO_WAIT_TIMEOUT_MS = 15_000
 export const CHIP_DISPLAY_MS = 4_000
@@ -35,17 +49,6 @@ export const COUNTDOWN_TICK_MS = 100
 export const MANUAL_BANNER_MS = 350
 export const SEEK_VERIFY_DELAY_MS = 250
 export const MEASURE_INTERVAL_MS = 2_000
-/**
- * 标记层跟随进度条的快速同步节拍：B 站控制层闲置淡出是亚秒级动画，
- * 靠 2s 的玩家几何节拍会留下「进度条已藏、标记悬在原地」的空窗。
- */
-export const MARKS_SYNC_INTERVAL_MS = 250
-/**
- * 标记隐藏的确认拍数：250ms 一拍，连续两拍（约 500ms）确认不可见才隐藏。
- * 控制层淡出是约 300ms 的过渡动画，中间态读到的 opacity/几何会来回跳——
- * 单拍判定会把标记闪没又闪回，这就是"一直刷新/闪烁"的来源之一。
- */
-export const MARKS_HIDE_CONFIRM_TICKS = 2
 /**
  * 自动跳过置信度门槛：只有高置信段（LLM 定界确认）才弹横幅并接管进度条；
  * 极速匹配（纯检索兜底）置信度封顶 0.6——只上进度条标记，不自动跳，
@@ -62,20 +65,6 @@ export const RETRY_COOLDOWN_MS = 10_000
  * 拖动进度条也会立刻满足（用户明显在看）。典型恰饭段在 1–3 分钟处，重试节拍下不赶不上。
  */
 export const WATCH_GATE_SECONDS = 15
-
-export interface TimerApi {
-  setTimeout(handler: () => void, ms: number): number
-  clearTimeout(id: number): void
-  setInterval(handler: () => void, ms: number): number
-  clearInterval(id: number): void
-}
-
-export interface PlayerAdapter {
-  findVideo(): HTMLVideoElement | null
-  waitForVideo(timeoutMs: number): Promise<HTMLVideoElement | null>
-  findPlayerContainer(video: HTMLVideoElement): HTMLElement | null
-  findProgressElement(container: HTMLElement | null): HTMLElement | null
-}
 
 export interface AdSkipControllerDeps {
   timers: TimerApi
@@ -126,13 +115,13 @@ export class AdSkipController {
   }
   private countdownTimer: number | null = null
   private measureTimer: number | null = null
-  private marksSyncTimer: number | null = null
   private chipTimer: number | null = null
   private lastRectKey = ''
-  /** 进度条本体缓存：SPA 内一般不变，脱离文档时重找。 */
-  private barElement: HTMLElement | null = null
-  /** 连续「不可见」观察拍数：隐藏需连续确认，防淡出动画中间态造成闪烁。 */
-  private marksInvisibleStreak = 0
+  /**
+   * 标记盒几何跟踪器（isRelevant = 有广告标记）：广告标记为空时整拍跳过，
+   * 盒子归属章节标记等其他消费方管理——两类标记共用同一套防闪烁口径。
+   */
+  private readonly marksBox: MarksBoxTracker
 
   private readonly onTick = (): void => {
     this.onTimeUpdate()
@@ -150,11 +139,14 @@ export class AdSkipController {
   private readonly onMeasureTick = (): void => {
     this.measureIfMoved()
   }
-  private readonly onMarksSyncTick = (): void => {
-    this.syncMarksBox()
-  }
 
   constructor(private readonly deps: AdSkipControllerDeps) {
+    this.marksBox = new MarksBoxTracker({
+      timers: deps.timers,
+      player: deps.player,
+      getVideo: () => this.player,
+      isRelevant: () => ui.marks.length > 0,
+    })
     ui.actions.onSkipNow = () => {
       if (this.bannerAd && this.pageEnabled && this.masterEnabled) {
         void this.performSkip(this.bannerAd)
@@ -420,15 +412,12 @@ export class AdSkipController {
       window.document.addEventListener('fullscreenchange', this.onFullscreen)
     }
     this.measureTimer = this.deps.timers.setInterval(this.onMeasureTick, MEASURE_INTERVAL_MS)
-    this.marksSyncTimer = this.deps.timers.setInterval(
-      this.onMarksSyncTick,
-      MARKS_SYNC_INTERVAL_MS,
-    )
+    this.marksBox.start()
     this.measureGeometry()
   }
 
   private detachPlayer(): void {
-    if (this.player) this.player.removeEventListener('timeupdate', this.onTick)
+    this.player?.removeEventListener('timeupdate', this.onTick)
     this.player = null
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.onResize)
@@ -439,17 +428,14 @@ export class AdSkipController {
       this.deps.timers.clearInterval(this.measureTimer)
       this.measureTimer = null
     }
-    if (this.marksSyncTimer !== null) {
-      this.deps.timers.clearInterval(this.marksSyncTimer)
-      this.marksSyncTimer = null
-    }
-    this.barElement = null
+    this.marksBox.stop()
     this.stopCountdown()
   }
 
   /** 换视频/开关切换后要求重做标；fullscreenchange 也经此刷新。 */
   requestRemesh(): void {
     this.lastRectKey = ''
+    this.marksBox.requestRemesh()
     this.measureIfMoved()
   }
 
@@ -494,77 +480,12 @@ export class AdSkipController {
   }
 
   /**
-   * 标记层盒子 = 进度条本体的实时几何（相对播放器容器），并镜像控制层显隐。
-   * 找不到进度条 / 进度条被收起淡出 / 移出播放器范围，标记一律隐藏——
-   * 绝不再退回「按播放器高度猜一个固定位置」的旧行为。
-   *
-   * 防闪烁三件套：几何**取整**写入（亚像素抖动不再产生新样式值，同值赋值不触发渲染）；
-   * 隐藏需**连续两拍**确认（控制层淡出动画的中间态与边界抖动不允许把标记闪没）；
-   * 显隐恢复立即（控制层出现时标记第一时间跟上）。
+   * 标记层盒子同步：委托共享的 MarksBoxTracker（广告标记相关性 = ui.marks 非空；
+   * 几何取整/两拍隐藏确认/立即恢复的防闪烁口径见 marks-box.ts）。
+   * 章节标记是另一条独立跟踪器，互不干扰。
    */
   private syncMarksBox(): void {
-    if (ui.marks.length === 0) {
-      ui.marksBox.visible = false
-      this.marksInvisibleStreak = 0
-      return
-    }
-    const markHidden = (): void => {
-      this.marksInvisibleStreak += 1
-      if (ui.marksBox.visible && this.marksInvisibleStreak >= MARKS_HIDE_CONFIRM_TICKS) {
-        ui.marksBox.visible = false
-      }
-    }
-    const video = this.player
-    if (!video) {
-      markHidden()
-      return
-    }
-    const container = this.deps.player.findPlayerContainer(video)
-    const playerRect = container?.getBoundingClientRect() ?? video.getBoundingClientRect()
-    const bar = this.resolveBarElement(container)
-    if (!bar || playerRect.width <= 0 || playerRect.height <= 0) {
-      markHidden()
-      return
-    }
-    const barRect = bar.getBoundingClientRect()
-    const centerY = barRect.top + barRect.height / 2
-    // 收起动画可能把控制层整个下移出播放器：中心线出界即视为不可见。
-    const insidePlayer =
-      barRect.width > 0 && centerY >= playerRect.top - 2 && centerY <= playerRect.bottom + 2
-    if (!(insidePlayer && this.barEffectivelyVisible(bar, container))) {
-      markHidden()
-      return
-    }
-    this.marksInvisibleStreak = 0
-    ui.marksBox.visible = true
-    ui.marksBox.left = Math.round(barRect.left - playerRect.left)
-    ui.marksBox.top = Math.round(centerY - playerRect.top)
-    ui.marksBox.width = Math.round(barRect.width)
-  }
-
-  private resolveBarElement(container: HTMLElement | null): HTMLElement | null {
-    if (this.barElement?.isConnected) return this.barElement
-    this.barElement = this.deps.player.findProgressElement(container)
-    return this.barElement
-  }
-
-  /** B 站控制层隐藏有 opacity 淡出 / visibility / display 三种形态，从进度条逐层向上查到播放器容器。 */
-  private barEffectivelyVisible(bar: HTMLElement, container: HTMLElement | null): boolean {
-    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return true
-    let node: HTMLElement | null = bar
-    while (node) {
-      try {
-        const style = window.getComputedStyle(node)
-        if (style.display === 'none' || style.visibility === 'hidden') return false
-        const opacity = Number.parseFloat(style.opacity)
-        if (Number.isFinite(opacity) && opacity < 0.08) return false
-      } catch {
-        return true // 样式读不到时保守视为可见，不误杀标记。
-      }
-      if (container && node === container) break
-      node = node.parentElement
-    }
-    return true
+    this.marksBox.syncNow()
   }
 
   private measureIfMoved(): void {

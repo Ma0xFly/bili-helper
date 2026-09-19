@@ -80,6 +80,18 @@ export function formatHms(seconds: number): string {
   return [hours, minutes, rest].map((part) => String(part).padStart(2, '0')).join(':')
 }
 
+/** 紧凑时间（章节/刻度 tooltip 用）：不足 1 小时出 mm:ss，超出出 H:mm:ss。 */
+export function formatCompactTime(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '00:00'
+  const total = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const rest = total % 60
+  const mm = String(minutes).padStart(2, '0')
+  const ss = String(rest).padStart(2, '0')
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
 export interface DailyStats {
   /** 本地日期（YYYY-MM-DD）。 */
   date: string

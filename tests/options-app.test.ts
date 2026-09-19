@@ -86,7 +86,7 @@ describe('options AI 助手表单', () => {
     expect(wrapper.find(`input[placeholder="${SERVER_URL_PLACEHOLDER}"]`).exists()).toBe(false)
 
     // 点保存：storage 写入完整表单值（含改动后的 mode、默认关的 adSkipEnabled、
-    // 默认开的 panelEnabled；服务器地址保留，便于再开回来）。
+    // 默认开的 panelEnabled 与 chapterMarksEnabled；服务器地址保留，便于再开回来）。
     await wrapper.find('button.primary').trigger('click')
     await flushPromises()
     expect(await storedSettings()).toEqual({
@@ -106,6 +106,7 @@ describe('options AI 助手表单', () => {
       serverToken: 'tok',
       adSkipEnabled: false,
       panelEnabled: true,
+      chapterMarksEnabled: true,
     })
   })
 
@@ -557,6 +558,23 @@ describe('options AI 助手表单', () => {
 
     const checkbox = wrapper.find('input[aria-label="AI 面板显示总开关"]')
     expect((checkbox.element as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('章节标记开关默认开、回填并写回 schema', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { chapterMarksEnabled: false },
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const checkbox = wrapper.find('input[aria-label="进度条章节标记总开关"]')
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false)
+
+    await checkbox.setValue(true)
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).chapterMarksEnabled).toBe(true)
   })
 
   it('导出成功路径：写入剪贴板并报绿灯', async () => {

@@ -3,7 +3,7 @@
 // 组件不直接触碰 B 站 DOM。
 
 import { reactive } from 'vue'
-import type { AdSegment } from '../ai/port'
+import type { AdSegment, SummarySegment } from '../ai/port'
 
 export interface BannerState {
   visible: boolean
@@ -32,6 +32,19 @@ export interface AdMarkState {
   done: boolean
 }
 
+/** 章节标记渲染态：与 AdMarkState 同挂在进度条标记盒上，几何由章节跟踪器同步。 */
+export interface ChapterMarkState {
+  key: string
+  /** 相对进度条本体的横向百分比（起点位置）。 */
+  leftPct: number
+  /** 章节起点（秒）：点击跳转目标。 */
+  start: number
+  label: string
+  /** 起点时间文案（mm:ss / HH:MM:SS），tooltip 用。 */
+  timeText: string
+  source: 'official' | 'ai'
+}
+
 /**
  * 标记层盒子：直接跟随 B 站进度条本体的几何（相对播放器容器的 px），
  * 并镜像控制层显隐——B 站控制层淡出/收起时标记必须一起消失，不能悬在原地。
@@ -56,6 +69,8 @@ export interface UiActions {
   onSkipNow: () => void
   onStay: () => void
   onOpenSettings: () => void
+  /** 章节标记点击跳转（接线层注入；无播放器时忽略）。 */
+  onSeek: (seconds: number) => void
 }
 
 export const ui = reactive({
@@ -66,13 +81,25 @@ export const ui = reactive({
   chip: { visible: false, text: '' } as SavedChipState,
   vectorHint: { visible: false, text: '向量端点（Embedding）的 API 有问题，暂时只用词表匹配' },
   marks: [] as AdMarkState[],
+  /** 章节标记（官方看点 + AI 时间线合并后），接线层维护。 */
+  chapterMarks: [] as ChapterMarkState[],
   marksBox: { visible: false, left: 0, top: 0, width: 0 } as MarksBoxState,
   /**
    * 去广告检测结果镜像（控制器维护）：AI 面板分段时间线与广告区间合并打标用。
    * adSkipEnabled 关/无广告时为空数组 → 面板纯分段。
    */
   ads: [] as AdSegment[],
+  /**
+   * 最近一次总结的分段时间线镜像（SummaryTab 生成成功时写入）：
+   * 章节接线层监听它 → 持久化缓存 + 与官方看点合并上条。换视频/未生成为空数组。
+   */
+  summarySegments: [] as SummarySegment[],
   /** 播放进度（秒），面板当前分段高亮用（由面板接线层轮询驱动）。 */
   currentTime: 0,
-  actions: { onSkipNow: () => {}, onStay: () => {}, onOpenSettings: () => {} } as UiActions,
+  actions: {
+    onSkipNow: () => {},
+    onStay: () => {},
+    onOpenSettings: () => {},
+    onSeek: (_seconds: number) => {},
+  } as UiActions,
 })

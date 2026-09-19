@@ -73,6 +73,7 @@ interface FormModel {
   serverToken: string
   adSkipEnabled: boolean
   panelEnabled: boolean
+  chapterMarksEnabled: boolean
 }
 
 const form = reactive<FormModel>({
@@ -92,6 +93,7 @@ const form = reactive<FormModel>({
   serverToken: '',
   adSkipEnabled: false,
   panelEnabled: true,
+  chapterMarksEnabled: true,
 })
 
 const loadError = ref('')
@@ -115,6 +117,7 @@ function applyStoredToForm(settings: AiSettings): void {
   form.serverToken = settings.serverToken
   form.adSkipEnabled = settings.adSkipEnabled
   form.panelEnabled = settings.panelEnabled
+  form.chapterMarksEnabled = settings.chapterMarksEnabled
 }
 
 onMounted(async () => {
@@ -1000,6 +1003,24 @@ onMounted(loadFailures)
             </span>
             <span class="switch">
               <input v-model="form.panelEnabled" type="checkbox" aria-label="AI 面板显示总开关" />
+              <span class="switch-track" aria-hidden="true" />
+              <span class="switch-knob" aria-hidden="true" />
+            </span>
+          </label>
+          <label class="switch-row">
+            <span class="switch-info">
+              <span class="switch-name">进度条章节标记</span>
+              <span class="field-hint">
+                在进度条上显示可点击的章节刻度：B 站官方看点免费提供；生成过总结的视频再叠加
+                AI 分段时间线（按视频缓存，刷新不丢）。点击刻度直达章节，零 token 开销。
+              </span>
+            </span>
+            <span class="switch">
+              <input
+                v-model="form.chapterMarksEnabled"
+                type="checkbox"
+                aria-label="进度条章节标记总开关"
+              />
               <span class="switch-track" aria-hidden="true" />
               <span class="switch-knob" aria-hidden="true" />
             </span>

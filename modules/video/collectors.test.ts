@@ -7,7 +7,9 @@ import {
   collectDanmaku,
   collectSubtitles,
   collectVideoMeta,
+  collectViewPoints,
   extractBvidFromUrl,
+  resetPlayerApiCache,
 } from './collectors'
 import { parseDanmakuXml } from './collectors'
 import { md5, resetWbiKeyCache } from './wbi'
@@ -26,6 +28,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 afterEach(() => {
   delete (window as unknown as Record<string, unknown>).__INITIAL_STATE__
   resetWbiKeyCache()
+  resetPlayerApiCache()
   vi.unstubAllGlobals()
 })
 
@@ -155,6 +158,68 @@ describe('collectSubtitles', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     expect(await collectSubtitles({ ...VIDEO, cid: undefined })).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('collectViewPoints（官方看点）', () => {
+  it('view_points 原样透传（解析合并在 chapters 纯函数层）；重复调用命中缓存只发一次请求', async () => {
+    let playerCalls = 0
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url)
+      if (target.includes('/x/web-interface/nav')) {
+        return jsonResponse({
+          code: 0,
+          data: {
+            wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/a.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/b.png' },
+          },
+        })
+      }
+      if (target.includes('/x/player/wbi/v2')) {
+        playerCalls += 1
+        return jsonResponse({
+          code: 0,
+          data: {
+            view_points: [
+              { from: 0, to: 90, content: '开场', type: 1 },
+              { from: 90, to: 600, content: '正片', type: 1 },
+            ],
+          },
+        })
+      }
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const points = await collectViewPoints(VIDEO)
+    expect(points).toEqual([
+      { from: 0, to: 90, content: '开场', type: 1 },
+      { from: 90, to: 600, content: '正片', type: 1 },
+    ])
+    await collectViewPoints(VIDEO)
+    expect(playerCalls).toBe(1) // bvid:cid 缓存命中，字幕兜底同享这一次请求
+  })
+
+  it('接口正常但无 view_points → 空数组（成功无数据）；网络失败 → null（可重试）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url)
+      if (target.includes('/x/web-interface/nav')) {
+        return jsonResponse({
+          code: 0,
+          data: { wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/a.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/b.png' } },
+        })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }))
+    expect(await collectViewPoints(VIDEO)).toEqual([])
+
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('offline'))))
+    expect(await collectViewPoints({ ...VIDEO, cid: 777 })).toBeNull()
+  })
+
+  it('cid 缺失 → null，不发请求', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await collectViewPoints({ ...VIDEO, cid: undefined })).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

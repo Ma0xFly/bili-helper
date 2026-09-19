@@ -58,6 +58,14 @@ describe('readAiSettings', () => {
     await writeAiSettings({ panelEnabled: true })
     expect((await readAiSettings()).panelEnabled).toBe(true)
   })
+
+  it('chapterMarksEnabled 默认 true（章节标记是被动 UI，官方看点零 token）', async () => {
+    expect((await readAiSettings()).chapterMarksEnabled).toBe(true)
+    await chrome.storage.sync.set({ aiAssistantSettings: { chapterMarksEnabled: 1 } })
+    expect((await readAiSettings()).chapterMarksEnabled).toBe(true) // 非布尔收敛默认
+    await writeAiSettings({ chapterMarksEnabled: false })
+    expect((await readAiSettings()).chapterMarksEnabled).toBe(false)
+  })
 })
 
 describe('writeAiSettings', () => {

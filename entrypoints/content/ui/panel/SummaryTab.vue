@@ -64,6 +64,8 @@ async function generate(): Promise<void> {
     const generated = await panelActions.summarize({ video, subtitles, danmaku, signal })
     if (signal.aborted) return
     result.value = generated
+    // 时间线镜像进共享状态：章节接线层监听它 → 持久化缓存 + 与官方看点合并上进度条。
+    ui.summarySegments = generated.segments
     ownsGeneration = false
     panelActivity.summaryDoneAt = Date.now()
     panelActivity.summaryStatus = 'done'

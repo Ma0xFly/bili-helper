@@ -43,6 +43,11 @@ export interface AiSettings {
    * popup 的「总结面板」快开关是页内临时开关，与此总开关正交。
    */
   panelEnabled: boolean
+  /**
+   * 进度条章节标记（官方看点 + AI 总结时间线）总开关：默认 true——标记是被动 UI、
+   * 官方看点零 token；AI 时间线只在用户手动点总结后才可能出现。
+   */
+  chapterMarksEnabled: boolean
 }
 
 export interface EmbeddingEndpoint {
@@ -79,6 +84,7 @@ export const DEFAULT_SETTINGS: AiSettings = {
   serverToken: '',
   adSkipEnabled: false,
   panelEnabled: true,
+  chapterMarksEnabled: true,
 }
 
 function isAiMode(value: unknown): value is AiMode {
@@ -116,6 +122,10 @@ function normalizeSettings(raw: unknown): AiSettings {
         : DEFAULT_SETTINGS.adSkipEnabled,
     panelEnabled:
       typeof source.panelEnabled === 'boolean' ? source.panelEnabled : DEFAULT_SETTINGS.panelEnabled,
+    chapterMarksEnabled:
+      typeof source.chapterMarksEnabled === 'boolean'
+        ? source.chapterMarksEnabled
+        : DEFAULT_SETTINGS.chapterMarksEnabled,
   }
 }
 

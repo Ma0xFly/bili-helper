@@ -371,6 +371,110 @@
   font-weight: 600;
 }
 
+/* ---------- 进度条章节标记（与广告标记同盒几何：细竖线刻度，悬停出章节，点击跳转） ---------- */
+.bh-chapters {
+  position: absolute;
+  height: 0;
+  pointer-events: none;
+  transition:
+    left 0.18s ease-out,
+    top 0.18s ease-out,
+    width 0.18s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bh-chapters {
+    transition: none;
+  }
+}
+
+/* 命中区比可见线宽（细线难点击），可见线是 ::线 元素；官方/AI 两种来源同形不同色。 */
+.bh-chapter {
+  position: absolute;
+  top: 0;
+  width: 12px;
+  height: 16px;
+  transform: translate(-50%, -50%);
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bh-chapter-line {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--bh-primary);
+  opacity: 0.55;
+  transition: opacity 0.15s ease, height 0.15s ease;
+}
+
+.bh-chapter.ai .bh-chapter-line {
+  background: var(--bh-primary-bright);
+  opacity: 0.4;
+}
+
+.bh-chapter:hover .bh-chapter-line,
+.bh-chapter:focus-visible .bh-chapter-line {
+  opacity: 1;
+  height: 100%;
+}
+
+.bh-chapter:focus-visible {
+  outline: none;
+}
+
+.bh-chapter:focus-visible .bh-chapter-line {
+  box-shadow: 0 0 0 2px var(--bh-primary);
+}
+
+.bh-chapter-tip {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 12px;
+  padding: 6px 13px;
+  box-shadow: 0 8px 24px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 11.5px;
+  color: var(--bh-text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bh-chapter:hover .bh-chapter-tip,
+.bh-chapter:focus-visible .bh-chapter-tip {
+  display: flex;
+}
+
+.bh-chapter-title {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bh-chapter-meta {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--bh-primary);
+  font-weight: 600;
+}
+
 /* 可访问性底线：偏好减弱动效时倒计时环退化为静态数字（信息不丢）。 */
 @media (prefers-reduced-motion: reduce) {
   .bh-ring-fill {
