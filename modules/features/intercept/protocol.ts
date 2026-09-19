@@ -81,6 +81,8 @@ export interface ShortCircuitResponse {
 /**
  * 网络拦截器：match 必须是同步纯函数（只看 URL）。
  * priority 升序参与判定；afterResponse 与 shortCircuit 可只实现其一。
+ * dispose（可选）：拦截器被替换/注销时的清理口——有状态拦截器（样式注入、DOM 改动）
+ * 必须实现，保证「配置变化重建」不留半启用状态。
  */
 export interface NetworkInterceptor {
   id: string
@@ -90,4 +92,6 @@ export interface NetworkInterceptor {
   afterResponse?(event: InterceptedEvent): void
   /** 短路：返回非 null 即吞掉真实请求（换一换回放用）。抛错按未命中处理（页面照常请求）。 */
   shortCircuit?(event: ShortCircuitEvent): ShortCircuitResponse | null
+  /** 注销/被替换时清理（样式、class、观察器、提示节点）。 */
+  dispose?(): void
 }

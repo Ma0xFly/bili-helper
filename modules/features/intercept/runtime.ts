@@ -17,27 +17,52 @@ import type {
 export class InterceptRuntime {
   private interceptors: NetworkInterceptor[] = []
 
-  /** 全量替换（配置变化的重建语义）。构建失败：清空并上抛，调用方负责记日志。 */
+  /** 全量替换（配置变化的重建语义）。构建失败：清空并上抛，调用方负责记日志。
+   * 被替换掉的拦截器先 dispose——有状态拦截器（筛选的样式/节点）不留半启用状态。 */
   setInterceptors(list: NetworkInterceptor[]): void {
     const seen = new Set<string>()
     for (const interceptor of list) {
       if (typeof interceptor?.id !== 'string' || interceptor.id === '') {
+        this.disposeAll(list)
         this.interceptors = []
         throw new Error('拦截器缺少 id')
       }
       if (seen.has(interceptor.id)) {
+        this.disposeAll(list)
         this.interceptors = []
         throw new Error(`拦截器 id 重复：${interceptor.id}`)
       }
       if (typeof interceptor.match !== 'function') {
+        this.disposeAll(list)
         this.interceptors = []
         throw new Error(`拦截器 ${interceptor.id} 缺少 match(url)`)
       }
       seen.add(interceptor.id)
     }
+    // 旧列表里不在新列表中的逐个 dispose（同 id 视为替换，也先 dispose 旧实例）。
+    for (const old of this.interceptors) {
+      if (!list.some((item) => item.id === old.id)) old.dispose?.()
+    }
     this.interceptors = [...list].sort(
       (a, b) => a.priority - b.priority || a.id.localeCompare(b.id),
     )
+  }
+
+  private disposeAll(list: NetworkInterceptor[]): void {
+    for (const interceptor of list) {
+      try {
+        interceptor?.dispose?.()
+      } catch (error) {
+        console.error(`[bili-helper:intercept] dispose 抛错 ${interceptor?.id}:`, String(error))
+      }
+    }
+    for (const old of this.interceptors) {
+      try {
+        old.dispose?.()
+      } catch (error) {
+        console.error(`[bili-helper:intercept] dispose 抛错 ${old.id}:`, String(error))
+      }
+    }
   }
 
   get size(): number {

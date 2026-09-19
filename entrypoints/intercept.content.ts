@@ -12,6 +12,7 @@ import {
   type InterceptorFactoryRegistration,
 } from '../modules/features/intercept/runtime'
 import { installFetchPatch, installXhrPatch } from '../modules/features/intercept/install'
+import { videoFilterInterceptorRegistration } from '../modules/features/filter/feed-interceptor'
 
 export default defineContentScript({
   matches: [
@@ -27,8 +28,8 @@ export default defineContentScript({
     installFetchPatch(runtime, window)
     installXhrPatch(runtime, window.XMLHttpRequest, window)
 
-    // 功能拦截器注册表（Epic 2/4 填充；当前为空 = 全站零拦截开销）。
-    const registrations: InterceptorFactoryRegistration[] = []
+    // 功能拦截器注册表（Epic 2/4 填充）：视频筛选（首页推荐流，observe-only + 卡片隐藏）。
+    const registrations: InterceptorFactoryRegistration[] = [videoFilterInterceptorRegistration]
 
     onInterceptConfigs(window, (configs) => {
       try {
