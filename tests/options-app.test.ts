@@ -40,6 +40,11 @@ function findButton(wrapper: ReturnType<typeof mount>, text: string) {
   return button
 }
 
+/** 连接页的「保存设置」：v-show 下八页都在 DOM 里，按页定位而非依赖文档顺序。 */
+function saveSettingsButton(wrapper: ReturnType<typeof mount>) {
+  return wrapper.find('.page[aria-label="连接"] button.primary')
+}
+
 async function storedSettings(): Promise<AiSettings> {
   const result = await chrome.storage.sync.get('aiAssistantSettings')
   return result.aiAssistantSettings as AiSettings
@@ -87,7 +92,7 @@ describe('options AI 助手表单', () => {
 
     // 点保存：storage 写入完整表单值（含改动后的 mode、默认关的 adSkipEnabled、
     // 默认开的 panelEnabled 与 chapterMarksEnabled；服务器地址保留，便于再开回来）。
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect(await storedSettings()).toEqual({
       apiUrl: 'https://chat.example/v1',
@@ -125,7 +130,7 @@ describe('options AI 助手表单', () => {
     expect((fallback.element as HTMLInputElement).checked).toBe(true)
 
     await fallback.setValue(false)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).mode).toBe('server')
   })
@@ -138,12 +143,12 @@ describe('options AI 助手表单', () => {
     expect(wrapper.find(`input[placeholder="${SERVER_URL_PLACEHOLDER}"]`).exists()).toBe(false)
 
     await wrapper.find('input[aria-label="使用自己的服务器"]').setValue(true)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).mode).toBe('server')
 
     await wrapper.find('input[aria-label="服务器失败时回退直连"]').setValue(true)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).mode).toBe('auto')
   })
@@ -161,7 +166,7 @@ describe('options AI 助手表单', () => {
       (wrapper.find('input[aria-label="服务器失败时回退直连"]').element as HTMLInputElement).checked,
     ).toBe(true)
 
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).mode).toBe('auto')
   })
@@ -183,7 +188,7 @@ describe('options AI 助手表单', () => {
 
     const embedModel = wrapper.find('input[aria-label="嵌入模型"]')
     await embedModel.setValue('bge-m3')
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).embedModel).toBe('bge-m3')
   })
@@ -301,7 +306,7 @@ describe('options AI 助手表单', () => {
       'gpt-4o-mini',
     )
     // 保存后表单值保持手动填的地址，不被预设覆盖。
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).apiUrl).toBe('https://my-proxy.example/v1')
   })
@@ -530,7 +535,7 @@ describe('options AI 助手表单', () => {
     expect((checkbox.element as HTMLInputElement).checked).toBe(true)
 
     await checkbox.setValue(false)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).adSkipEnabled).toBe(false)
   })
@@ -543,7 +548,7 @@ describe('options AI 助手表单', () => {
     expect((checkbox.element as HTMLInputElement).checked).toBe(true)
 
     await checkbox.setValue(false)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).panelEnabled).toBe(false)
   })
@@ -572,7 +577,7 @@ describe('options AI 助手表单', () => {
     expect((checkbox.element as HTMLInputElement).checked).toBe(false)
 
     await checkbox.setValue(true)
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).chapterMarksEnabled).toBe(true)
   })
@@ -759,7 +764,7 @@ describe('options AI 助手表单', () => {
     expect((select.element as HTMLSelectElement).value).toBe('anthropic')
 
     await select.setValue('openai')
-    await wrapper.find('button.primary').trigger('click')
+    await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).apiFormat).toBe('openai')
   })
@@ -861,11 +866,27 @@ describe('功能分组（Epic1-S1.4）', () => {
     await flushPromises()
   }
 
-  it('侧栏只含 AI 助手 + 三个功能组（净化与占位组已移除）；功能行带标题/描述/适用范围', async () => {
+  /** 切到某个 AI 页（六页各自聚焦，页内 v-show 切换，状态不丢）。 */
+  async function openAiPage(wrapper: ReturnType<typeof mount>, label: string): Promise<void> {
+    await openGroup(wrapper, label)
+  }
+
+  it('侧栏分两个大类共 8 个聚焦页；功能行带标题/描述/适用范围', async () => {
     const wrapper = mount(App)
     await flushPromises()
     const navTexts = wrapper.findAll('button.sidebar-item').map((item) => item.text())
-    expect(navTexts).toEqual(['AI 助手', '过滤视频', '功能增强'])
+    // AI 助手拆成 6 页（原先 8 张卡挤在一列滚）+ 功能 2 类；大类标题把两组分开。
+    expect(navTexts).toEqual([
+      '连接',
+      '总开关',
+      '去广告识别',
+      '广告词库',
+      '配置方案与备份',
+      '诊断',
+      '过滤视频',
+      '功能增强',
+    ])
+    expect(wrapper.findAll('.sidebar-section').map((item) => item.text())).toEqual(['AI 助手', '功能'])
 
     await openGroup(wrapper, '过滤视频')
     const names = wrapper.findAll('.switch-name').map((item) => item.text())
@@ -875,7 +896,9 @@ describe('功能分组（Epic1-S1.4）', () => {
     expect(names.some((t) => t.includes('标签视频'))).toBe(true)
     // 适用范围标签在场；默认全部关闭。
     expect(wrapper.findAll('.applies-tag').length).toBe(4)
-    for (const box of wrapper.findAll('input[type="checkbox"]')) {
+    // 只断言功能页自身的开关默认全关（AI 页的面板/章节标记默认是开的，也在同一棵 DOM 里）。
+    const featurePage = wrapper.find('.page[aria-label="功能"]')
+    for (const box of featurePage.findAll('input[type="checkbox"]')) {
       expect((box.element as HTMLInputElement).checked).toBe(false)
     }
   })
@@ -969,7 +992,8 @@ describe('筛选规则面板（Epic2-S2.6）', () => {
     await keywords.setValue('带货\n恰饭, 广告')
     const durationMin = wrapper.find('input[aria-label="视频时长最小值"]')
     await durationMin.setValue('2') // 分钟 → 存储为秒
-    await wrapper.find('button.primary').trigger('click')
+    // 按页内定位：v-show 让所有页面都挂载，全局 button.primary 会命中连接页的「保存设置」。
+    await wrapper.find('.video-filter-editor button.primary').trigger('click')
     await flushPromises()
 
     const stored = (await chrome.storage.local.get('biliHelperFeatures')) as {

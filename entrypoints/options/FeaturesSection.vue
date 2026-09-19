@@ -22,6 +22,48 @@ const features = computed(() =>
   Object.values(FEATURE_REGISTRY).filter((feature) => feature.group === props.groupId),
 )
 
+/**
+ * 组内切卡：把"一个组一张长卡"拆成语义清楚的两张（原来是 4 个开关 + 规则面板 + 明细面板
+ * 全堆在同一张卡里，层次全靠间距，看着就是一坨）。
+ *   过滤组：卡片拦截（DOM 移除类，带今日拦截计数）｜按规则筛选（八维规则 + 规则/明细面板）
+ *   增强组：单卡（播放器与评论）
+ */
+const BLOCKER_FEATURE_IDS: FeatureId[] = ['adVideoBlocker', 'promotedVideoBlocker', 'labelVideoBlocker']
+
+interface CardSection {
+  key: string
+  title: string
+  note: string
+  features: typeof features.value
+}
+
+const sections = computed<CardSection[]>(() => {
+  if (props.groupId !== 'filter') {
+    return [
+      {
+        key: 'enhance',
+        title: '播放器与评论',
+        note: '只作用于视频页；关掉后播放器与评论区恢复 B 站原样。',
+        features: features.value,
+      },
+    ]
+  }
+  return [
+    {
+      key: 'blockers',
+      title: '推荐流卡片拦截',
+      note: '按 B 站自带的标记整张移除：广告标识、小火箭推广、直播/番剧等非普通视频卡。计数进「今日拦截」。',
+      features: features.value.filter((feature) => BLOCKER_FEATURE_IDS.includes(feature.id)),
+    },
+    {
+      key: 'rules',
+      title: '按规则筛选',
+      note: '按标题关键词、UP 主、时长与互动数据等八维度判定，命中即隐藏且不留空槽；作用于首页推荐、热门与搜索结果。',
+      features: features.value.filter((feature) => !BLOCKER_FEATURE_IDS.includes(feature.id)),
+    },
+  ]
+})
+
 const entries = reactive<Partial<Record<FeatureId, FeatureEntry>>>({})
 const blockedToday = reactive<Partial<Record<FeatureId, number>>>({})
 const hint = ref<{ kind: 'ok' | 'fail'; text: string } | null>(null)
@@ -67,47 +109,61 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 </script>
 
 <template>
-  <section class="card" aria-labelledby="features-group-title">
-    <h2 id="features-group-title" class="card-title">{{ group?.title ?? '功能' }}</h2>
-    <label
-      v-for="feature in features"
-      :key="feature.id"
-      class="switch-row"
-      :for="`feature-${feature.id}`"
+  <div class="feature-sections">
+    <section
+      v-for="section in sections"
+      :key="section.key"
+      class="card"
+      :aria-labelledby="`features-${section.key}-title`"
     >
-      <span class="switch-info">
-        <span class="switch-name">
-          {{ feature.title }}
-          <span class="applies-tag">{{ feature.appliesTo.join(' / ') }}</span>
-          <span
-            v-if="feature.counted && (blockedToday[feature.id] ?? 0) > 0"
-            class="stat-badge"
-          >今日拦截 {{ blockedToday[feature.id] }}</span>
+      <h2 :id="`features-${section.key}-title`" class="card-title">{{ section.title }}</h2>
+      <p class="card-note">{{ section.note }}</p>
+      <label
+        v-for="feature in section.features"
+        :key="feature.id"
+        class="switch-row"
+        :for="`feature-${feature.id}`"
+      >
+        <span class="switch-info">
+          <span class="switch-name">
+            {{ feature.title }}
+            <span class="applies-tag">{{ feature.appliesTo.join(' / ') }}</span>
+            <span
+              v-if="feature.counted && (blockedToday[feature.id] ?? 0) > 0"
+              class="stat-badge"
+            >今日拦截 {{ blockedToday[feature.id] }}</span>
+          </span>
+          <span class="switch-desc">{{ feature.description }}</span>
         </span>
-        <span class="switch-desc">{{ feature.description }}</span>
-      </span>
-      <span class="switch">
-        <input
-          :id="`feature-${feature.id}`"
-          type="checkbox"
-          :checked="entries[feature.id]?.enabled ?? false"
-          :disabled="busyId === feature.id"
-          :aria-label="`${feature.title}开关`"
-          @change="onToggle(feature.id, $event)"
-        />
-        <span class="switch-track" aria-hidden="true" />
-        <span class="switch-knob" aria-hidden="true" />
-      </span>
-    </label>
-    <!-- 视频筛选开启后展开规则面板（关闭时收起，开关与规则一体）；
-         拦截明细面板常驻（有明细才知道规则拦了什么、为什么）。 -->
-    <FilterRulesPanel v-if="groupId === 'filter' && entries.videoFilter?.enabled" />
-    <FilterLogPanel v-if="groupId === 'filter'" />
+        <span class="switch">
+          <input
+            :id="`feature-${feature.id}`"
+            type="checkbox"
+            :checked="entries[feature.id]?.enabled ?? false"
+            :disabled="busyId === feature.id"
+            :aria-label="`${feature.title}开关`"
+            @change="onToggle(feature.id, $event)"
+          />
+          <span class="switch-track" aria-hidden="true" />
+          <span class="switch-knob" aria-hidden="true" />
+        </span>
+      </label>
+      <!-- 视频筛选开启后展开规则面板（关闭时收起，开关与规则一体）；
+           拦截明细面板常驻（有明细才知道规则拦了什么、为什么）。 -->
+      <FilterRulesPanel v-if="section.key === 'rules' && entries.videoFilter?.enabled" />
+      <FilterLogPanel v-if="section.key === 'rules'" />
+    </section>
     <p v-if="hint" class="section-hint" :class="hint.kind" aria-live="polite">{{ hint.text }}</p>
-  </section>
+  </div>
 </template>
 
 <style scoped>
+.feature-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .card {
   background: var(--bh-surface-glass);
   border: 1px solid var(--bh-glass-border);
@@ -121,7 +177,14 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
   font-size: 15px;
   font-weight: 700;
   color: var(--bh-text-primary);
-  margin: 0 0 12px;
+  margin: 0 0 4px;
+}
+
+.card-note {
+  font-size: 12px;
+  color: var(--bh-text-muted);
+  line-height: 1.6;
+  margin: 0 0 14px;
 }
 
 .switch-row {
@@ -226,7 +289,7 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 }
 
 .section-hint {
-  margin: 12px 0 0;
+  margin: 0;
   font-size: 12px;
 }
 

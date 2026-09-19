@@ -55,10 +55,36 @@ import ModelCombo from './ModelCombo.vue'
 
 // 侧栏分组：AI 助手 + 三个功能组（过滤视频/布局优化/功能增强）。
 // 「净化」按 PRD 砍掉不再出现；旧占位组（服务器等）一并移除——服务器配置在 AI 助手内。
-const groups = ['AI 助手', ...FEATURE_GROUPS.map((group) => group.title)]
-const active = ref<string>(groups[0] ?? 'AI 助手')
-const activeGroupId = computed<FeatureGroupId | null>(
-  () => FEATURE_GROUPS.find((group) => group.title === active.value)?.id ?? null,
+/**
+ * 侧栏两大类的页面表：AI 助手拆成 6 个聚焦页（连接 / 总开关 / 识别 / 词库 / 备份 / 诊断），
+ * 功能沿用功能注册表的两组。原先 AI 组是 8 张卡挤在一列里长滚，现在每页只放一到两张卡。
+ */
+type AiPageKey = 'connect' | 'switches' | 'detect' | 'corpus' | 'backup' | 'diagnostics'
+
+interface AiPage {
+  key: AiPageKey
+  label: string
+}
+
+const AI_PAGES: AiPage[] = [
+  { key: 'connect', label: '连接' },
+  { key: 'switches', label: '总开关' },
+  { key: 'detect', label: '去广告识别' },
+  { key: 'corpus', label: '广告词库' },
+  { key: 'backup', label: '配置方案与备份' },
+  { key: 'diagnostics', label: '诊断' },
+]
+
+/** 当前页键：6 个 AI 页 + 2 个功能组共用一枚 active（驱动侧栏高亮与页内 v-show）。 */
+const active = ref<AiPageKey | FeatureGroupId>('connect')
+
+const activeGroupId = computed<FeatureGroupId | null>(() =>
+  active.value === 'filter' || active.value === 'enhance' ? active.value : null,
+)
+
+/** 功能页标题（与侧栏同源）。 */
+const activeGroupTitle = computed(
+  () => FEATURE_GROUPS.find((group) => group.id === activeGroupId.value)?.title ?? '功能',
 )
 
 interface FormModel {
@@ -156,6 +182,36 @@ const useFallback = computed({
 
 /** 本机直连端点在纯 server 模式下用不到，给一句说明而不是整块藏起来（切回即用）。 */
 const localEndpointsInUse = computed(() => form.mode !== 'server')
+
+/** 端点是否可用（页头摘要的琥珀色提醒依据）：地址与模型都填了才算。 */
+const endpointReady = computed(() => form.apiUrl.trim() !== '' && form.model.trim() !== '')
+
+/** 运行模式的用户语言（界面不暴露 local/server/auto 术语）。 */
+const modeLabel = computed(() => {
+  if (form.mode === 'local') return '浏览器直连'
+  return form.mode === 'auto' ? '服务器转发 · 失败回退' : '服务器转发'
+})
+
+const settingHint = ref<Feedback | null>(null)
+
+/**
+ * 三个总开关即时生效：勾选即写 storage（内容脚本按 storage.onChanged 立即响应），
+ * 不再要求"改完记得去点保存"——开关是状态、端点是表单，写入时机本就不同。
+ */
+async function toggleSetting(
+  key: 'adSkipEnabled' | 'panelEnabled' | 'chapterMarksEnabled',
+  value: boolean,
+): Promise<void> {
+  form[key] = value
+  settingHint.value = null
+  try {
+    await writeAiSettings({ [key]: value } as Partial<AiSettings>)
+    settingHint.value = { kind: 'ok', text: '已生效' }
+  } catch {
+    form[key] = !value // 写失败回拨，不留"界面开着但没生效"的假象
+    settingHint.value = { kind: 'fail', text: '写入失败，请重试' }
+  }
+}
 
 // 向量端点默认折叠：留空即继承对话端点，展开才有输入框（高级用户才需要拆分）。
 const advancedOpen = ref(false)
@@ -775,697 +831,871 @@ onMounted(loadFailures)
   <div class="options-shell">
     <nav class="sidebar" aria-label="设置分组">
       <span class="sidebar-title">设置</span>
+      <span class="sidebar-section">AI 助手</span>
       <button
-        v-for="group in groups"
-        :key="group"
+        v-for="page in AI_PAGES"
+        :key="page.key"
         type="button"
         class="sidebar-item"
-        :class="{ active: group === active }"
-        :aria-current="group === active ? 'page' : undefined"
-        @click="active = group"
+        :class="{ active: active === page.key }"
+        :aria-current="active === page.key ? 'page' : undefined"
+        @click="active = page.key"
       >
-        {{ group }}
+        {{ page.label }}
+      </button>
+      <span class="sidebar-section">功能</span>
+      <button
+        v-for="group in FEATURE_GROUPS"
+        :key="group.id"
+        type="button"
+        class="sidebar-item"
+        :class="{ active: active === group.id }"
+        :aria-current="active === group.id ? 'page' : undefined"
+        @click="active = group.id"
+      >
+        {{ group.title }}
       </button>
     </nav>
 
     <main class="content">
-      <template v-if="active === 'AI 助手'">
+      <section v-show="active === 'connect'" class="page" aria-label="连接">
         <header class="content-head">
-          <h1>AI 助手</h1>
-          <p class="content-sub">直连 OpenAI 兼容端点，或转发到你自己的服务器</p>
+          <div class="head-main">
+            <h1>连接</h1>
+            <p class="content-sub">配置 AI 端点：总结 / 提问走这里；也可以把请求转发到自己的服务器。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
         </header>
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
-        <section class="card" aria-labelledby="profiles-title">
-          <h2 id="profiles-title" class="card-title">配置方案</h2>
-          <p class="card-note">
-            把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
-          </p>
-          <div class="profile-row">
-            <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
-              <option value="" disabled>暂无方案，先在下面保存一个</option>
-              <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
-                {{ profile.name }}
-              </option>
-            </select>
-            <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onApplyProfile">
-              应用
-            </button>
-            <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
-              删除
-            </button>
-          </div>
-          <div class="profile-row">
-            <input
-              v-model="profileName"
-              type="text"
-              placeholder="方案名，如：硅基流动·本地直连"
-              aria-label="方案名称"
-              class="grow"
-            />
-            <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
-              存为方案
-            </button>
-          </div>
-          <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">
-            <span class="badge" aria-hidden="true">
-              {{ profileHint.kind === 'ok' ? '✓' : profileHint.kind === 'warn' ? '!' : '✕' }}
-            </span>
-            <span>{{ profileHint.text }}</span>
-          </div>
-        </section>
-
-        <section class="card" aria-labelledby="chat-endpoint-title">
-          <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
-          <p class="card-note">
-            总结 / 提问必须有对话端点；只配向量端点时去广告自动走「极速匹配」（纯检索定界，精度略低、零对话开销）。
-          </p>
-          <p v-if="!localEndpointsInUse" class="card-note">
-            当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
-          </p>
-          <div class="field">
-            <span class="field-label">服务商预设</span>
-            <select :value="chatPresetName" aria-label="服务商预设" @change="applyChatPreset">
-              <option value="custom">自定义（手动填写）</option>
-              <option v-for="preset in CHAT_PRESETS" :key="preset.name" :value="preset.name">
-                {{ preset.name }}
-              </option>
-            </select>
-            <span class="field-hint">
-              选中即填入对应地址，模型可点「拉取模型」取真实列表。请求经扩展后台发起，
-              不受页面跨域（CORS）限制；但会走系统代理——本地代理工具（如 Clash）
-              需放行端点域名，被拦时可在代理里配直连规则或改走「服务器转发」。
-            </span>
-          </div>
-          <div class="field">
-            <span class="field-label">API 协议</span>
-            <select v-model="form.apiFormat" aria-label="API 协议">
-              <option value="openai">OpenAI 兼容（chat/completions）</option>
-              <option value="anthropic">Anthropic Messages（messages）</option>
-            </select>
-            <span class="field-hint">
-              Claude 官方 API 与部分中转/网关（如火山方舟 Coding 端点
-              https://ark.cn-beijing.volces.com/api/coding）走 Anthropic 协议。地址带不带 /v1
-              都可以，两种拼法会自动尝试。只影响浏览器直连；服务器转发由服务端自身配置决定。
-            </span>
-          </div>
-          <label class="field">
-            <span class="field-label">Base URL</span>
-            <input v-model.trim="form.apiUrl" type="url" placeholder="https://api.openai.com/v1" />
-          </label>
-          <label class="field">
-            <span class="field-label">API Key</span>
-            <input v-model="form.apiKey" type="password" placeholder="sk-…" autocomplete="off" />
-          </label>
-          <div class="field">
-            <span class="field-label">模型</span>
-            <div class="combo-row">
-              <ModelCombo
-                v-model="form.model"
-                :options="chatModelOptions"
-                :loading="chatModelsLoading"
-                :placeholder="chatModelPlaceholder"
-                label="对话模型"
-              />
-              <button
-                type="button"
-                class="ghost"
-                :disabled="chatModelsLoading"
-                @click="fetchChatModels"
-              >
-                {{ chatModelsLoading ? '拉取中…' : '拉取模型' }}
-              </button>
-            </div>
-            <span v-if="chatModelsHint" class="field-hint">{{ chatModelsHint }}</span>
-          </div>
-          <div class="field">
-            <button
-              type="button"
-              class="ghost"
-              :disabled="chatTest.running"
-              aria-label="测试对话端点"
-              @click="testChatInline"
-            >
-              {{ chatTest.running ? '测试中…' : '测试连接' }}
-            </button>
-            <div
-              v-if="chatTest.result"
-              class="feedback"
-              :class="chatTest.result.kind"
-              aria-live="polite"
-            >
-              <span class="badge" aria-hidden="true">
-                {{ chatTest.result.kind === 'ok' ? '✓' : chatTest.result.kind === 'warn' ? '!' : '✕' }}
-              </span>
-              <span>{{ chatTest.result.text }}</span>
-            </div>
-          </div>
-        </section>
-
-        <section class="card" aria-labelledby="server-title">
-          <h2 id="server-title" class="card-title">服务器转发</h2>
-          <label class="switch-row">
-            <span class="switch-info">
-              <span class="switch-name">我有自己的服务器</span>
-              <span class="field-hint">
-                开启后，AI 请求统一发到你的服务器，由服务端做检索与模型调用；关闭则由浏览器直连上方端点。
-              </span>
-            </span>
-            <span class="switch">
-              <input v-model="useServer" type="checkbox" aria-label="使用自己的服务器" />
-              <span class="switch-track" aria-hidden="true" />
-              <span class="switch-knob" aria-hidden="true" />
-            </span>
-          </label>
-
-          <template v-if="useServer">
-            <label class="field">
-              <span class="field-label">Server Base URL</span>
-              <input
-                v-model.trim="form.serverBaseUrl"
-                type="url"
-                placeholder="https://your-service.example.com"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Server Token</span>
-              <input
-                v-model="form.serverToken"
-                type="password"
-                placeholder="可留空"
-                autocomplete="off"
-              />
-              <span class="field-hint">非空时所有转发请求统一携带 Authorization: Bearer ⟨token⟩。</span>
-            </label>
-            <label class="switch-row">
-              <span class="switch-info">
-                <span class="switch-name">服务器失败时回退浏览器直连</span>
-                <span class="field-hint">
-                  服务器不可用时自动改用上方端点继续工作（需要上方端点也配好）。
-                  回退只发生在请求还没出结果时——已经开始输出的回答不会中途换源。
-                </span>
-              </span>
-              <span class="switch">
-                <input v-model="useFallback" type="checkbox" aria-label="服务器失败时回退直连" />
-                <span class="switch-track" aria-hidden="true" />
-                <span class="switch-knob" aria-hidden="true" />
-              </span>
-            </label>
+          <section class="card" aria-labelledby="chat-endpoint-title">
+            <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
+            <p class="card-note">
+              总结 / 提问必须有对话端点；只配向量端点时去广告自动走「极速匹配」（纯检索定界，精度略低、零对话开销）。
+            </p>
+            <p v-if="!localEndpointsInUse" class="card-note">
+              当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
+            </p>
             <div class="field">
-              <button
-                type="button"
-                class="ghost"
-                :disabled="serverTest.running"
-                aria-label="测试服务器连接"
-                @click="testServerInline"
-              >
-                {{ serverTest.running ? '测试中…' : '测试连接' }}
-              </button>
-              <div
-                v-if="serverTest.result"
-                class="feedback"
-                :class="serverTest.result.kind"
-                aria-live="polite"
-              >
-                <span class="badge" aria-hidden="true">
-                  {{ serverTest.result.kind === 'ok' ? '✓' : serverTest.result.kind === 'warn' ? '!' : '✕' }}
-                </span>
-                <span>{{ serverTest.result.text }}</span>
-              </div>
+              <span class="field-label">服务商预设</span>
+              <select :value="chatPresetName" aria-label="服务商预设" @change="applyChatPreset">
+                <option value="custom">自定义（手动填写）</option>
+                <option v-for="preset in CHAT_PRESETS" :key="preset.name" :value="preset.name">
+                  {{ preset.name }}
+                </option>
+              </select>
+              <span class="field-hint">
+                选中即填入对应地址，模型可点「拉取模型」取真实列表。请求经扩展后台发起，
+                不受页面跨域（CORS）限制；但会走系统代理——本地代理工具（如 Clash）
+                需放行端点域名，被拦时可在代理里配直连规则或改走「服务器转发」。
+              </span>
             </div>
-          </template>
-        </section>
-
-        <section class="card" aria-labelledby="diag-log-title">
-          <h2 id="diag-log-title" class="card-title">诊断控制台</h2>
-          <p class="card-note">
-            AI 失败的终端视图（最近 {{ failures.length }}/20 条：总结 / 提问 / 去广告 / 连通测试 / 模型列表），
-            含模型原始响应摘录；下方「去广告开销」逐次记录检测走了哪条路、花了多少 token。
-            点开即刷新、展开期间每 5 秒自动刷新；点击终端本体也可手动刷新。不含任何密钥。
-          </p>
-          <div class="diag-log-actions">
-            <button
-              type="button"
-              class="ghost"
-              :aria-expanded="consoleOpen ? 'true' : 'false'"
-              @click="toggleConsole"
-            >
-              {{ consoleOpen ? '收起控制台' : '打开控制台' }}
-            </button>
-            <button
-              type="button"
-              class="ghost danger"
-              :disabled="failures.length === 0"
-              @click="onClearFailures"
-            >
-              清空
-            </button>
-          </div>
-          <div v-show="consoleOpen" class="bh-terminal" role="log" @click="loadFailures">
-            <div class="terminal-head" aria-hidden="true">
-              <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
-              <span class="terminal-title">ai-diagnostics</span>
-              <span class="terminal-count">{{ failures.length }}/20</span>
+            <div class="field">
+              <span class="field-label">API 协议</span>
+              <select v-model="form.apiFormat" aria-label="API 协议">
+                <option value="openai">OpenAI 兼容（chat/completions）</option>
+                <option value="anthropic">Anthropic Messages（messages）</option>
+              </select>
+              <span class="field-hint">
+                Claude 官方 API 与部分中转/网关（如火山方舟 Coding 端点
+                https://ark.cn-beijing.volces.com/api/coding）走 Anthropic 协议。地址带不带 /v1
+                都可以，两种拼法会自动尝试。只影响浏览器直连；服务器转发由服务端自身配置决定。
+              </span>
             </div>
-            <div class="terminal-body">
-              <template v-if="failures.length > 0">
-                <div v-for="(entry, index) in failures" :key="index" class="diag-log-item">
-                  <div class="diag-log-line">
-                    <span class="terminal-prompt">[{{ failureTimeText(entry) }}]</span>
-                    <span class="diag-log-feature">{{ entry.feature }}</span>
-                    <span class="diag-log-kind" :class="entry.kind">{{ entry.kind }}</span>
-                    <span class="diag-log-msg">{{ entry.message }}</span>
-                  </div>
-                  <pre v-if="entry.rawExcerpt" class="diag-log-raw">  ↳ {{ entry.rawExcerpt }}</pre>
-                  <div v-if="entry.endpoint || entry.model" class="diag-log-meta">
-                    ↳ {{ entry.endpoint }}{{ entry.endpoint && entry.model ? ' · ' : '' }}{{ entry.model }}
-                  </div>
-                </div>
-              </template>
-              <div v-else class="terminal-empty">$ 暂无失败记录<span class="terminal-cursor">▊</span></div>
-              <template v-if="costs.length > 0">
-                <div class="terminal-divider">$ 去广告开销 {{ costSummary }}</div>
-                <div v-for="(entry, index) in costs" :key="`cost-${index}`" class="diag-log-item">
-                  <div class="diag-log-line">
-                    <span class="terminal-prompt">[{{ costTimeText(entry) }}]</span>
-                    <span class="diag-log-feature">{{ costPathText(entry.path) }}</span>
-                    <span class="diag-log-msg">
-                      {{ entry.bvid || '未知视频' }} · 广告段 {{ entry.ads }}（可跳 {{ entry.skippable }}） ·
-                      {{ entry.elapsedMs >= 1000 ? `${(entry.elapsedMs / 1000).toFixed(1)}s` : `${entry.elapsedMs}ms` }} ·
-                      {{ entry.llmCalls === 0 ? '0 token' : `入${(entry.inputTokens ?? 0).toLocaleString()}/出${(entry.outputTokens ?? 0).toLocaleString()}` }}
-                    </span>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </div>
-        </section>
-
-        <section class="card" aria-labelledby="features-title">
-          <h2 id="features-title" class="card-title">功能开关</h2>
-          <label class="switch-row">
-            <span class="switch-info">
-              <span class="switch-name">AI 去广告</span>
-              <span class="field-hint">
-                识别并自动跳过恰饭段。默认关闭，请先配好上方端点再开启；popup 里的「AI
-                去广告」开关只对当前页临时生效，这里的总开关控制所有页。
-              </span>
-            </span>
-            <span class="switch">
-              <input v-model="form.adSkipEnabled" type="checkbox" aria-label="AI 去广告总开关" />
-              <span class="switch-track" aria-hidden="true" />
-              <span class="switch-knob" aria-hidden="true" />
-            </span>
-          </label>
-          <label class="switch-row">
-            <span class="switch-info">
-              <span class="switch-name">AI 面板显示</span>
-              <span class="field-hint">
-                在视频页右侧显示「总结 / 提问」面板（被动 UI，默认开启）。popup
-                里的「总结面板」开关只对当前页临时生效，这里的总开关控制所有页。
-              </span>
-            </span>
-            <span class="switch">
-              <input v-model="form.panelEnabled" type="checkbox" aria-label="AI 面板显示总开关" />
-              <span class="switch-track" aria-hidden="true" />
-              <span class="switch-knob" aria-hidden="true" />
-            </span>
-          </label>
-          <label class="switch-row">
-            <span class="switch-info">
-              <span class="switch-name">进度条章节标记</span>
-              <span class="field-hint">
-                在进度条上显示可点击的章节刻度：B 站官方看点免费提供；生成过总结的视频再叠加
-                AI 分段时间线（按视频缓存，刷新不丢）。点击刻度直达章节，零 token 开销。
-              </span>
-            </span>
-            <span class="switch">
-              <input
-                v-model="form.chapterMarksEnabled"
-                type="checkbox"
-                aria-label="进度条章节标记总开关"
-              />
-              <span class="switch-track" aria-hidden="true" />
-              <span class="switch-knob" aria-hidden="true" />
-            </span>
-          </label>
-        </section>
-
-        <section class="card" aria-labelledby="corpus-title">
-          <h2 id="corpus-title" class="card-title">广告词库</h2>
-          <p class="card-note">
-            内置 {{ builtinCorpusCount }} 条（随版本更新，不可改）+ 你补录的
-            {{ userEntries.length }} 条。
-            <template v-if="corpusTakesEffect">
-              遇到没识别出来的广告，把它的关键词补在这里：保存即生效，下次识别自动重算语料向量。
-            </template>
-            <template v-else>
-              当前识别在服务器上做，补录的词条只在浏览器直连时生效（关掉服务器开关，或服务器失败回退时）；
-              要让服务器也认识它，请用下面的「导出入库 patch」交给服务端词库合入。
-            </template>
-          </p>
-
-          <div class="corpus-add">
-            <input
-              v-model.trim="corpusText"
-              class="grow"
-              placeholder="漏掉的广告关键词，如「某某品牌」"
-              aria-label="补录词条"
-              @keydown.enter.prevent="addCorpusEntry"
-            />
-            <select v-model="corpusCategory" aria-label="词条品类">
-              <option v-for="category in corpusCategories" :key="category" :value="category">
-                {{ category }}
-              </option>
-            </select>
-            <button type="button" class="ghost" :disabled="corpusAdding" @click="addCorpusEntry">
-              {{ corpusAdding ? '添加中…' : '补录' }}
-            </button>
-          </div>
-          <input
-            v-model.trim="corpusNote"
-            class="corpus-note-input"
-            placeholder="来源备注（可选），如 BV1xx 03:20 漏检"
-            aria-label="词条来源备注"
-          />
-
-          <div class="corpus-actions">
-            <button
-              type="button"
-              class="ghost"
-              :aria-expanded="corpusBatchOpen ? 'true' : 'false'"
-              @click="corpusBatchOpen = !corpusBatchOpen"
-            >
-              {{ corpusBatchOpen ? '收起批量粘贴' : '批量粘贴' }}
-            </button>
-          </div>
-          <div v-show="corpusBatchOpen" class="corpus-batch">
-            <textarea
-              v-model="corpusBatchText"
-              class="corpus-batch-input"
-              rows="4"
-              placeholder="一行一个词条，如：&#10;某某品牌&#10;限时国补&#10;以换代修"
-              aria-label="批量补录词条"
-            />
-            <button
-              type="button"
-              class="ghost"
-              :disabled="corpusBatchBusy"
-              @click="addCorpusBatch"
-            >
-              {{ corpusBatchBusy ? '入库中…' : '全部入库（用上方品类与备注）' }}
-            </button>
-          </div>
-
-          <ul v-if="userEntries.length > 0" class="corpus-list">
-            <li v-for="entry in userEntries" :key="entry.text" class="corpus-item">
-              <span class="corpus-word">{{ entry.text }}</span>
-              <span class="corpus-tag">{{ entry.category }}</span>
-              <span
-                class="corpus-hits"
-                :class="{ zero: entry.hitCount === 0 }"
-                :title="entry.lastHitAt ? `最近命中：${entry.lastHitAt}` : '尚未在检测中命中过'"
-              >
-                命中 {{ entry.hitCount }}
-              </span>
-              <span v-if="entry.note !== ''" class="corpus-note">{{ entry.note }}</span>
-              <button
-                type="button"
-                class="corpus-del"
-                :aria-label="`删除 ${entry.text}`"
-                @click="removeCorpusEntry(entry.text)"
-              >
-                删除
-              </button>
-            </li>
-          </ul>
-          <p v-else class="field-hint">你还没有补录词条。</p>
-
-          <div class="corpus-actions">
-            <button type="button" class="ghost" @click="exportCorpus">导出入库 patch</button>
-            <button
-              v-if="userEntries.length > 0"
-              type="button"
-              class="ghost danger"
-              @click="clearCorpusEntries"
-            >
-              清空补录
-            </button>
-          </div>
-          <textarea
-            v-if="corpusPatch !== ''"
-            v-model="corpusPatch"
-            class="corpus-patch"
-            rows="8"
-            readonly
-            aria-label="导出的词库 patch"
-          />
-
-          <div v-if="corpusHint" class="feedback" :class="corpusHint.kind" aria-live="polite">
-            <span class="badge" aria-hidden="true">
-              {{ corpusHint.kind === 'ok' ? '✓' : corpusHint.kind === 'warn' ? '!' : '✕' }}
-            </span>
-            <span>{{ corpusHint.text }}</span>
-          </div>
-        </section>
-
-        <section class="card" aria-labelledby="backup-title">
-          <h2 id="backup-title" class="card-title">配置备份（导出 / 导入）</h2>
-          <p class="card-note">
-            一键带走：AI 端点与配置方案、功能开关与筛选规则、补录的广告词库、广告误判反馈。
-            换浏览器、重装、多设备同步都用得上。默认<b>不含密钥</b>（导入时保留本机已有的
-            Key），可放心共享；要连密钥一起搬再勾选下方选项。
-          </p>
-          <label class="switch-row">
-            <span class="switch-info">
-              <span class="switch-name">导出时包含密钥</span>
-              <span class="field-hint">
-                勾选后 API Key / Server Token 会以<b>明文</b>写入备份文件，请只在自己的设备间传递。
-              </span>
-            </span>
-            <span class="switch">
-              <input
-                v-model="backupIncludeSecrets"
-                type="checkbox"
-                aria-label="导出时包含密钥"
-              />
-              <span class="switch-track" aria-hidden="true" />
-              <span class="switch-knob" aria-hidden="true" />
-            </span>
-          </label>
-          <div class="corpus-actions">
-            <button type="button" class="ghost" :disabled="backupBusy" @click="onExportBackup">
-              {{ backupBusy ? '处理中…' : '导出备份' }}
-            </button>
-            <button type="button" class="ghost" :disabled="backupBusy" @click="onImportBackup">
-              导入备份
-            </button>
-            <label class="ghost backup-file">
-              选择备份文件
-              <input
-                type="file"
-                accept="application/json,.json"
-                aria-label="选择备份文件"
-                @change="onBackupFile"
-              />
-            </label>
-          </div>
-          <textarea
-            v-model="backupText"
-            class="corpus-patch"
-            rows="6"
-            placeholder="导出后在此显示备份内容（可直接复制保存）；导入时把备份粘贴到这里再点「导入备份」"
-            aria-label="备份内容"
-          />
-          <div v-if="backupHint" class="feedback" :class="backupHint.kind" aria-live="polite">
-            <span class="badge" aria-hidden="true">
-              {{ backupHint.kind === 'ok' ? '✓' : backupHint.kind === 'warn' ? '!' : '✕' }}
-            </span>
-            <span>{{ backupHint.text }}</span>
-          </div>
-        </section>
-
-        <section class="card" aria-labelledby="advanced-title">
-          <h2 id="advanced-title" class="card-title">高级</h2>
-          <button
-            type="button"
-            class="ghost"
-            :aria-expanded="advancedOpen ? 'true' : 'false'"
-            aria-controls="advanced-embed"
-            @click="advancedOpen = !advancedOpen"
-          >
-            {{ advancedOpen ? '收起向量端点' : '向量端点（语义分段检索）' }}
-          </button>
-          <p class="card-note">
-            三项全留空即继承上方对话端点——多数人不需要展开。只有对话与向量走不同服务商时才拆。
-            向量端点只需要 embed（/embeddings）；rerank 用不上，无需配置。
-            <template v-if="form.apiFormat === 'anthropic'">
-              注意：Anthropic 协议没有向量接口——对话走 Anthropic 时，这里必须单独配一个 OpenAI
-              兼容的向量服务（如硅基流动的 bge-m3），否则去广告识别退化为纯词表检索。
-            </template>
-          </p>
-          <div v-show="advancedOpen" id="advanced-embed">
             <label class="field">
               <span class="field-label">Base URL</span>
-              <input
-                v-model.trim="form.embedBaseUrl"
-                type="url"
-                placeholder="留空则继承对话端点"
-                :class="{ inheriting: embedBaseInherits }"
-              />
-              <span v-if="embedBaseInherits" class="field-hint">{{ embedBaseHint }}</span>
+              <input v-model.trim="form.apiUrl" type="url" placeholder="https://api.openai.com/v1" />
             </label>
             <label class="field">
               <span class="field-label">API Key</span>
-              <input
-                v-model="form.embedKey"
-                type="password"
-                placeholder="留空则继承对话端点"
-                :class="{ inheriting: embedKeyInherits }"
-                autocomplete="off"
-              />
-              <span v-if="embedKeyInherits" class="field-hint">{{ embedKeyHint }}</span>
+              <input v-model="form.apiKey" type="password" placeholder="sk-…" autocomplete="off" />
             </label>
             <div class="field">
-              <span class="field-label">嵌入模型</span>
+              <span class="field-label">模型</span>
               <div class="combo-row">
                 <ModelCombo
-                  v-model="form.embedModel"
-                  :options="embedModelOptions"
-                  :loading="embedModelsLoading"
-                  placeholder="留空则继承对话端点"
-                  label="嵌入模型"
+                  v-model="form.model"
+                  :options="chatModelOptions"
+                  :loading="chatModelsLoading"
+                  :placeholder="chatModelPlaceholder"
+                  label="对话模型"
                 />
                 <button
                   type="button"
                   class="ghost"
-                  :disabled="embedModelsLoading"
-                  @click="fetchEmbedModels"
+                  :disabled="chatModelsLoading"
+                  @click="fetchChatModels"
                 >
-                  {{ embedModelsLoading ? '拉取中…' : '拉取模型' }}
+                  {{ chatModelsLoading ? '拉取中…' : '拉取模型' }}
                 </button>
               </div>
-              <span v-if="embedModelInherits && !embedModelsHint" class="field-hint">
-                {{ embedModelHint }}
+              <span v-if="chatModelsHint" class="field-hint">{{ chatModelsHint }}</span>
+            </div>
+            <div class="field">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="chatTest.running"
+                aria-label="测试对话端点"
+                @click="testChatInline"
+              >
+                {{ chatTest.running ? '测试中…' : '测试连接' }}
+              </button>
+              <div
+                v-if="chatTest.result"
+                class="feedback"
+                :class="chatTest.result.kind"
+                aria-live="polite"
+              >
+                <span class="badge" aria-hidden="true">
+                  {{ chatTest.result.kind === 'ok' ? '✓' : chatTest.result.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ chatTest.result.text }}</span>
+              </div>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="server-title">
+            <h2 id="server-title" class="card-title">服务器转发</h2>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">我有自己的服务器</span>
+                <span class="field-hint">
+                  开启后，AI 请求统一发到你的服务器，由服务端做检索与模型调用；关闭则由浏览器直连上方端点。
+                </span>
               </span>
-              <span v-if="embedModelsHint" class="field-hint">{{ embedModelsHint }}</span>
-            </div>
-            <div class="field">
-              <button
-                type="button"
-                class="ghost"
-                :disabled="embedTest.running"
-                aria-label="测试向量端点"
-                @click="testEmbedInline"
-              >
-                {{ embedTest.running ? '测试中…' : '测试连接' }}
-              </button>
-              <div
-                v-if="embedTest.result"
-                class="feedback"
-                :class="embedTest.result.kind"
-                aria-live="polite"
-              >
-                <span class="badge" aria-hidden="true">
-                  {{ embedTest.result.kind === 'ok' ? '✓' : embedTest.result.kind === 'warn' ? '!' : '✕' }}
-                </span>
-                <span>{{ embedTest.result.text }}</span>
-              </div>
-            </div>
-          </div>
+              <span class="switch">
+                <input v-model="useServer" type="checkbox" aria-label="使用自己的服务器" />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
 
-          <button
-            type="button"
-            class="ghost"
-            :aria-expanded="detectOpen ? 'true' : 'false'"
-            aria-controls="advanced-detect"
-            @click="detectOpen = !detectOpen"
-          >
-            {{ detectOpen ? '收起去广告端点' : '去广告端点（可选 · 省 token）' }}
-          </button>
-          <p class="card-note">
-            留空即继承对话端点。广告定界是约束很强的结构化任务，flash 档的便宜模型就够用——
-            高频的去广告走这里，总结/提问仍走对话端点，token 成本能降一个量级。
-            另有免 token 通道：词表与弹幕双源强一致时直接出结果，不调模型。
-          </p>
-          <div v-show="detectOpen" id="advanced-detect">
-            <label class="field">
-              <span class="field-label">Base URL</span>
-              <input
-                v-model.trim="form.detectApiUrl"
-                type="url"
-                placeholder="留空则继承对话端点"
-                :class="{ inheriting: detectBaseInherits }"
-              />
-              <span v-if="detectBaseInherits" class="field-hint">{{ detectBaseHint }}</span>
-            </label>
-            <label class="field">
-              <span class="field-label">API Key</span>
-              <input
-                v-model="form.detectApiKey"
-                type="password"
-                placeholder="留空则继承对话端点"
-                :class="{ inheriting: detectKeyInherits }"
-                autocomplete="off"
-              />
-              <span v-if="detectKeyInherits" class="field-hint">{{ detectKeyHint }}</span>
-            </label>
-            <label class="field">
-              <span class="field-label">模型</span>
-              <input
-                v-model.trim="form.detectModel"
-                placeholder="留空则继承对话端点"
-                :class="{ inheriting: detectModelInherits }"
-              />
-              <span v-if="detectModelInherits" class="field-hint">{{ detectModelHint }}</span>
-            </label>
-            <label class="field">
-              <span class="field-label">协议</span>
-              <select v-model="form.detectApiFormat">
-                <option value="inherit">继承对话端点的协议</option>
-                <option value="openai">OpenAI 兼容</option>
-                <option value="anthropic">Anthropic Messages</option>
-              </select>
-            </label>
-            <div class="field">
-              <button
-                type="button"
-                class="ghost"
-                :disabled="detectTest.running"
-                aria-label="测试去广告端点"
-                @click="testDetectInline"
-              >
-                {{ detectTest.running ? '测试中…' : '测试连接' }}
-              </button>
-              <div
-                v-if="detectTest.result"
-                class="feedback"
-                :class="detectTest.result.kind"
-                aria-live="polite"
-              >
-                <span class="badge" aria-hidden="true">
-                  {{ detectTest.result.kind === 'ok' ? '✓' : detectTest.result.kind === 'warn' ? '!' : '✕' }}
+            <template v-if="useServer">
+              <label class="field">
+                <span class="field-label">Server Base URL</span>
+                <input
+                  v-model.trim="form.serverBaseUrl"
+                  type="url"
+                  placeholder="https://your-service.example.com"
+                />
+              </label>
+              <label class="field">
+                <span class="field-label">Server Token</span>
+                <input
+                  v-model="form.serverToken"
+                  type="password"
+                  placeholder="可留空"
+                  autocomplete="off"
+                />
+                <span class="field-hint">非空时所有转发请求统一携带 Authorization: Bearer ⟨token⟩。</span>
+              </label>
+              <label class="switch-row">
+                <span class="switch-info">
+                  <span class="switch-name">服务器失败时回退浏览器直连</span>
+                  <span class="field-hint">
+                    服务器不可用时自动改用上方端点继续工作（需要上方端点也配好）。
+                    回退只发生在请求还没出结果时——已经开始输出的回答不会中途换源。
+                  </span>
                 </span>
-                <span>{{ detectTest.result.text }}</span>
+                <span class="switch">
+                  <input v-model="useFallback" type="checkbox" aria-label="服务器失败时回退直连" />
+                  <span class="switch-track" aria-hidden="true" />
+                  <span class="switch-knob" aria-hidden="true" />
+                </span>
+              </label>
+              <div class="field">
+                <button
+                  type="button"
+                  class="ghost"
+                  :disabled="serverTest.running"
+                  aria-label="测试服务器连接"
+                  @click="testServerInline"
+                >
+                  {{ serverTest.running ? '测试中…' : '测试连接' }}
+                </button>
+                <div
+                  v-if="serverTest.result"
+                  class="feedback"
+                  :class="serverTest.result.kind"
+                  aria-live="polite"
+                >
+                  <span class="badge" aria-hidden="true">
+                    {{ serverTest.result.kind === 'ok' ? '✓' : serverTest.result.kind === 'warn' ? '!' : '✕' }}
+                  </span>
+                  <span>{{ serverTest.result.text }}</span>
+                </div>
               </div>
-            </div>
-          </div>
-        </section>
+            </template>
+          </section>
 
         <div class="actions">
           <button type="button" class="primary" @click="save">保存设置</button>
           <span v-if="saveHint" class="field-hint" aria-live="polite">{{ saveHint }}</span>
+          <span class="actions-note">本页改动需点「保存设置」；其它页的开关都是即时生效的</span>
         </div>
-      </template>
 
-      <template v-else>
+      </section>
+
+      <section v-show="active === 'switches'" class="page" aria-label="总开关">
         <header class="content-head">
-          <h1>{{ active }}</h1>
-          <p class="content-sub">按开关启停，改动即时保存并持久化（默认全部关闭）。</p>
+          <div class="head-main">
+            <h1>总开关</h1>
+            <p class="content-sub">三个总开关控制所有页面；改完立即生效，无需保存。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
+        </header>
+
+        <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
+
+          <section class="card" aria-labelledby="features-title">
+            <h2 id="features-title" class="card-title">功能开关</h2>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">AI 去广告</span>
+                <span class="field-hint">
+                  识别并自动跳过恰饭段。首次使用请先在「连接」页配好端点；这里的总开关控制所有页（改完立即生效），popup 里的快开关只对当前页临时生效。
+                </span>
+              </span>
+              <span class="switch">
+                <input
+                  :checked="form.adSkipEnabled"
+                  type="checkbox"
+                  aria-label="AI 去广告总开关"
+                  @change="toggleSetting('adSkipEnabled', ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">AI 面板显示</span>
+                <span class="field-hint">
+                  在视频页右侧显示「总结 / 提问」面板（被动 UI，默认开启）。这里的总开关控制所有页（改完立即生效），popup 里的快开关只对当前页临时生效。
+                </span>
+              </span>
+              <span class="switch">
+                <input
+                  :checked="form.panelEnabled"
+                  type="checkbox"
+                  aria-label="AI 面板显示总开关"
+                  @change="toggleSetting('panelEnabled', ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">进度条章节标记</span>
+                <span class="field-hint">
+                  在进度条上显示可点击的章节刻度：B 站官方看点免费提供；生成过总结的视频再叠加
+                  AI 分段时间线（按视频缓存，刷新不丢）。点击刻度直达章节，零 token 开销。
+                </span>
+              </span>
+              <span class="switch">
+                <input
+                  :checked="form.chapterMarksEnabled"
+                  type="checkbox"
+                  aria-label="进度条章节标记总开关"
+                  @change="toggleSetting('chapterMarksEnabled', ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
+          </section>
+          <div v-if="settingHint" class="feedback" :class="settingHint.kind" aria-live="polite">
+            <span class="badge" aria-hidden="true">{{ settingHint.kind === 'ok' ? '✓' : '✕' }}</span>
+            <span>{{ settingHint.text }}</span>
+          </div>
+      </section>
+
+      <section v-show="active === 'detect'" class="page" aria-label="去广告识别">
+        <header class="content-head">
+          <div class="head-main">
+            <h1>去广告识别</h1>
+            <p class="content-sub">可选细节：给高频的去广告任务指定更便宜的模型，或把向量端点拆到另一家服务商；留空即继承连接页的端点。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
+        </header>
+
+        <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
+
+          <section class="card" aria-labelledby="advanced-title">
+            <h2 id="advanced-title" class="card-title">高级</h2>
+            <button
+              type="button"
+              class="ghost"
+              :aria-expanded="advancedOpen ? 'true' : 'false'"
+              aria-controls="advanced-embed"
+              @click="advancedOpen = !advancedOpen"
+            >
+              {{ advancedOpen ? '收起向量端点' : '向量端点（语义分段检索）' }}
+            </button>
+            <p class="card-note">
+              三项全留空即继承上方对话端点——多数人不需要展开。只有对话与向量走不同服务商时才拆。
+              向量端点只需要 embed（/embeddings）；rerank 用不上，无需配置。
+              <template v-if="form.apiFormat === 'anthropic'">
+                注意：Anthropic 协议没有向量接口——对话走 Anthropic 时，这里必须单独配一个 OpenAI
+                兼容的向量服务（如硅基流动的 bge-m3），否则去广告识别退化为纯词表检索。
+              </template>
+            </p>
+            <div v-show="advancedOpen" id="advanced-embed">
+              <label class="field">
+                <span class="field-label">Base URL</span>
+                <input
+                  v-model.trim="form.embedBaseUrl"
+                  type="url"
+                  placeholder="留空则继承对话端点"
+                  :class="{ inheriting: embedBaseInherits }"
+                />
+                <span v-if="embedBaseInherits" class="field-hint">{{ embedBaseHint }}</span>
+              </label>
+              <label class="field">
+                <span class="field-label">API Key</span>
+                <input
+                  v-model="form.embedKey"
+                  type="password"
+                  placeholder="留空则继承对话端点"
+                  :class="{ inheriting: embedKeyInherits }"
+                  autocomplete="off"
+                />
+                <span v-if="embedKeyInherits" class="field-hint">{{ embedKeyHint }}</span>
+              </label>
+              <div class="field">
+                <span class="field-label">嵌入模型</span>
+                <div class="combo-row">
+                  <ModelCombo
+                    v-model="form.embedModel"
+                    :options="embedModelOptions"
+                    :loading="embedModelsLoading"
+                    placeholder="留空则继承对话端点"
+                    label="嵌入模型"
+                  />
+                  <button
+                    type="button"
+                    class="ghost"
+                    :disabled="embedModelsLoading"
+                    @click="fetchEmbedModels"
+                  >
+                    {{ embedModelsLoading ? '拉取中…' : '拉取模型' }}
+                  </button>
+                </div>
+                <span v-if="embedModelInherits && !embedModelsHint" class="field-hint">
+                  {{ embedModelHint }}
+                </span>
+                <span v-if="embedModelsHint" class="field-hint">{{ embedModelsHint }}</span>
+              </div>
+              <div class="field">
+                <button
+                  type="button"
+                  class="ghost"
+                  :disabled="embedTest.running"
+                  aria-label="测试向量端点"
+                  @click="testEmbedInline"
+                >
+                  {{ embedTest.running ? '测试中…' : '测试连接' }}
+                </button>
+                <div
+                  v-if="embedTest.result"
+                  class="feedback"
+                  :class="embedTest.result.kind"
+                  aria-live="polite"
+                >
+                  <span class="badge" aria-hidden="true">
+                    {{ embedTest.result.kind === 'ok' ? '✓' : embedTest.result.kind === 'warn' ? '!' : '✕' }}
+                  </span>
+                  <span>{{ embedTest.result.text }}</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              class="ghost"
+              :aria-expanded="detectOpen ? 'true' : 'false'"
+              aria-controls="advanced-detect"
+              @click="detectOpen = !detectOpen"
+            >
+              {{ detectOpen ? '收起去广告端点' : '去广告端点（可选 · 省 token）' }}
+            </button>
+            <p class="card-note">
+              留空即继承对话端点。广告定界是约束很强的结构化任务，flash 档的便宜模型就够用——
+              高频的去广告走这里，总结/提问仍走对话端点，token 成本能降一个量级。
+              另有免 token 通道：词表与弹幕双源强一致时直接出结果，不调模型。
+            </p>
+            <div v-show="detectOpen" id="advanced-detect">
+              <label class="field">
+                <span class="field-label">Base URL</span>
+                <input
+                  v-model.trim="form.detectApiUrl"
+                  type="url"
+                  placeholder="留空则继承对话端点"
+                  :class="{ inheriting: detectBaseInherits }"
+                />
+                <span v-if="detectBaseInherits" class="field-hint">{{ detectBaseHint }}</span>
+              </label>
+              <label class="field">
+                <span class="field-label">API Key</span>
+                <input
+                  v-model="form.detectApiKey"
+                  type="password"
+                  placeholder="留空则继承对话端点"
+                  :class="{ inheriting: detectKeyInherits }"
+                  autocomplete="off"
+                />
+                <span v-if="detectKeyInherits" class="field-hint">{{ detectKeyHint }}</span>
+              </label>
+              <label class="field">
+                <span class="field-label">模型</span>
+                <input
+                  v-model.trim="form.detectModel"
+                  placeholder="留空则继承对话端点"
+                  :class="{ inheriting: detectModelInherits }"
+                />
+                <span v-if="detectModelInherits" class="field-hint">{{ detectModelHint }}</span>
+              </label>
+              <label class="field">
+                <span class="field-label">协议</span>
+                <select v-model="form.detectApiFormat">
+                  <option value="inherit">继承对话端点的协议</option>
+                  <option value="openai">OpenAI 兼容</option>
+                  <option value="anthropic">Anthropic Messages</option>
+                </select>
+              </label>
+              <div class="field">
+                <button
+                  type="button"
+                  class="ghost"
+                  :disabled="detectTest.running"
+                  aria-label="测试去广告端点"
+                  @click="testDetectInline"
+                >
+                  {{ detectTest.running ? '测试中…' : '测试连接' }}
+                </button>
+                <div
+                  v-if="detectTest.result"
+                  class="feedback"
+                  :class="detectTest.result.kind"
+                  aria-live="polite"
+                >
+                  <span class="badge" aria-hidden="true">
+                    {{ detectTest.result.kind === 'ok' ? '✓' : detectTest.result.kind === 'warn' ? '!' : '✕' }}
+                  </span>
+                  <span>{{ detectTest.result.text }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+      </section>
+
+      <section v-show="active === 'corpus'" class="page" aria-label="广告词库">
+        <header class="content-head">
+          <div class="head-main">
+            <h1>广告词库</h1>
+            <p class="content-sub">内置词库随版本更新；漏检时在这里补一条，保存即生效。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
+        </header>
+
+        <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
+
+          <section class="card" aria-labelledby="corpus-title">
+            <h2 id="corpus-title" class="card-title">广告词库</h2>
+            <p class="card-note">
+              内置 {{ builtinCorpusCount }} 条（随版本更新，不可改）+ 你补录的
+              {{ userEntries.length }} 条。
+              <template v-if="corpusTakesEffect">
+                遇到没识别出来的广告，把它的关键词补在这里：保存即生效，下次识别自动重算语料向量。
+              </template>
+              <template v-else>
+                当前识别在服务器上做，补录的词条只在浏览器直连时生效（关掉服务器开关，或服务器失败回退时）；
+                要让服务器也认识它，请用下面的「导出入库 patch」交给服务端词库合入。
+              </template>
+            </p>
+
+            <div class="corpus-add">
+              <input
+                v-model.trim="corpusText"
+                class="grow"
+                placeholder="漏掉的广告关键词，如「某某品牌」"
+                aria-label="补录词条"
+                @keydown.enter.prevent="addCorpusEntry"
+              />
+              <select v-model="corpusCategory" aria-label="词条品类">
+                <option v-for="category in corpusCategories" :key="category" :value="category">
+                  {{ category }}
+                </option>
+              </select>
+              <button type="button" class="ghost" :disabled="corpusAdding" @click="addCorpusEntry">
+                {{ corpusAdding ? '添加中…' : '补录' }}
+              </button>
+            </div>
+            <input
+              v-model.trim="corpusNote"
+              class="corpus-note-input"
+              placeholder="来源备注（可选），如 BV1xx 03:20 漏检"
+              aria-label="词条来源备注"
+            />
+
+            <div class="corpus-actions">
+              <button
+                type="button"
+                class="ghost"
+                :aria-expanded="corpusBatchOpen ? 'true' : 'false'"
+                @click="corpusBatchOpen = !corpusBatchOpen"
+              >
+                {{ corpusBatchOpen ? '收起批量粘贴' : '批量粘贴' }}
+              </button>
+            </div>
+            <div v-show="corpusBatchOpen" class="corpus-batch">
+              <textarea
+                v-model="corpusBatchText"
+                class="corpus-batch-input"
+                rows="4"
+                placeholder="一行一个词条，如：&#10;某某品牌&#10;限时国补&#10;以换代修"
+                aria-label="批量补录词条"
+              />
+              <button
+                type="button"
+                class="ghost"
+                :disabled="corpusBatchBusy"
+                @click="addCorpusBatch"
+              >
+                {{ corpusBatchBusy ? '入库中…' : '全部入库（用上方品类与备注）' }}
+              </button>
+            </div>
+
+            <ul v-if="userEntries.length > 0" class="corpus-list">
+              <li v-for="entry in userEntries" :key="entry.text" class="corpus-item">
+                <span class="corpus-word">{{ entry.text }}</span>
+                <span class="corpus-tag">{{ entry.category }}</span>
+                <span
+                  class="corpus-hits"
+                  :class="{ zero: entry.hitCount === 0 }"
+                  :title="entry.lastHitAt ? `最近命中：${entry.lastHitAt}` : '尚未在检测中命中过'"
+                >
+                  命中 {{ entry.hitCount }}
+                </span>
+                <span v-if="entry.note !== ''" class="corpus-note">{{ entry.note }}</span>
+                <button
+                  type="button"
+                  class="corpus-del"
+                  :aria-label="`删除 ${entry.text}`"
+                  @click="removeCorpusEntry(entry.text)"
+                >
+                  删除
+                </button>
+              </li>
+            </ul>
+            <p v-else class="field-hint">你还没有补录词条。</p>
+
+            <div class="corpus-actions">
+              <button type="button" class="ghost" @click="exportCorpus">导出入库 patch</button>
+              <button
+                v-if="userEntries.length > 0"
+                type="button"
+                class="ghost danger"
+                @click="clearCorpusEntries"
+              >
+                清空补录
+              </button>
+            </div>
+            <textarea
+              v-if="corpusPatch !== ''"
+              v-model="corpusPatch"
+              class="corpus-patch"
+              rows="8"
+              readonly
+              aria-label="导出的词库 patch"
+            />
+
+            <div v-if="corpusHint" class="feedback" :class="corpusHint.kind" aria-live="polite">
+              <span class="badge" aria-hidden="true">
+                {{ corpusHint.kind === 'ok' ? '✓' : corpusHint.kind === 'warn' ? '!' : '✕' }}
+              </span>
+              <span>{{ corpusHint.text }}</span>
+            </div>
+          </section>
+      </section>
+
+      <section v-show="active === 'backup'" class="page" aria-label="配置方案与备份">
+        <header class="content-head">
+          <div class="head-main">
+            <h1>配置方案与备份</h1>
+            <p class="content-sub">多套连接存成命名方案一键换家；整套配置（端点 / 规则 / 词库 / 纠错）可导出成一份文件带走。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
+        </header>
+
+        <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
+
+          <section class="card" aria-labelledby="profiles-title">
+            <h2 id="profiles-title" class="card-title">配置方案</h2>
+            <p class="card-note">
+              把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
+            </p>
+            <div class="profile-row">
+              <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
+                <option value="" disabled>暂无方案，先在下面保存一个</option>
+                <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name }}
+                </option>
+              </select>
+              <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onApplyProfile">
+                应用
+              </button>
+              <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
+                删除
+              </button>
+            </div>
+            <div class="profile-row">
+              <input
+                v-model="profileName"
+                type="text"
+                placeholder="方案名，如：硅基流动·本地直连"
+                aria-label="方案名称"
+                class="grow"
+              />
+              <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
+                存为方案
+              </button>
+            </div>
+            <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">
+              <span class="badge" aria-hidden="true">
+                {{ profileHint.kind === 'ok' ? '✓' : profileHint.kind === 'warn' ? '!' : '✕' }}
+              </span>
+              <span>{{ profileHint.text }}</span>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="backup-title">
+            <h2 id="backup-title" class="card-title">配置备份（导出 / 导入）</h2>
+            <p class="card-note">
+              一键带走：AI 端点与配置方案、功能开关与筛选规则、补录的广告词库、广告误判反馈。
+              换浏览器、重装、多设备同步都用得上。默认<b>不含密钥</b>（导入时保留本机已有的
+              Key），可放心共享；要连密钥一起搬再勾选下方选项。
+            </p>
+            <label class="switch-row">
+              <span class="switch-info">
+                <span class="switch-name">导出时包含密钥</span>
+                <span class="field-hint">
+                  勾选后 API Key / Server Token 会以<b>明文</b>写入备份文件，请只在自己的设备间传递。
+                </span>
+              </span>
+              <span class="switch">
+                <input
+                  v-model="backupIncludeSecrets"
+                  type="checkbox"
+                  aria-label="导出时包含密钥"
+                />
+                <span class="switch-track" aria-hidden="true" />
+                <span class="switch-knob" aria-hidden="true" />
+              </span>
+            </label>
+            <div class="corpus-actions">
+              <button type="button" class="ghost" :disabled="backupBusy" @click="onExportBackup">
+                {{ backupBusy ? '处理中…' : '导出备份' }}
+              </button>
+              <button type="button" class="ghost" :disabled="backupBusy" @click="onImportBackup">
+                导入备份
+              </button>
+              <label class="ghost backup-file">
+                选择备份文件
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  aria-label="选择备份文件"
+                  @change="onBackupFile"
+                />
+              </label>
+            </div>
+            <textarea
+              v-model="backupText"
+              class="corpus-patch"
+              rows="6"
+              placeholder="导出后在此显示备份内容（可直接复制保存）；导入时把备份粘贴到这里再点「导入备份」"
+              aria-label="备份内容"
+            />
+            <div v-if="backupHint" class="feedback" :class="backupHint.kind" aria-live="polite">
+              <span class="badge" aria-hidden="true">
+                {{ backupHint.kind === 'ok' ? '✓' : backupHint.kind === 'warn' ? '!' : '✕' }}
+              </span>
+              <span>{{ backupHint.text }}</span>
+            </div>
+          </section>
+      </section>
+
+      <section v-show="active === 'diagnostics'" class="page" aria-label="诊断">
+        <header class="content-head">
+          <div class="head-main">
+            <h1>诊断</h1>
+            <p class="content-sub">失败记录与每次检测的 token 开销；展开即刷新，不含任何密钥。</p>
+          </div>
+          <ul class="status-chips" aria-label="当前配置状态">
+            <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
+              {{ endpointReady ? '端点已配置' : '端点未配置' }}
+            </li>
+            <li class="status-chip">{{ modeLabel }}</li>
+            <li class="status-chip" :class="form.adSkipEnabled ? 'on' : ''">
+              去广告 {{ form.adSkipEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.panelEnabled ? 'on' : ''">
+              面板 {{ form.panelEnabled ? '开' : '关' }}
+            </li>
+            <li class="status-chip" :class="form.chapterMarksEnabled ? 'on' : ''">
+              章节标记 {{ form.chapterMarksEnabled ? '开' : '关' }}
+            </li>
+          </ul>
+        </header>
+
+        <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
+
+          <section class="card" aria-labelledby="diag-log-title">
+            <h2 id="diag-log-title" class="card-title">诊断控制台</h2>
+            <p class="card-note">
+              AI 失败的终端视图（最近 {{ failures.length }}/20 条：总结 / 提问 / 去广告 / 连通测试 / 模型列表），
+              含模型原始响应摘录；下方「去广告开销」逐次记录检测走了哪条路、花了多少 token。
+              点开即刷新、展开期间每 5 秒自动刷新；点击终端本体也可手动刷新。不含任何密钥。
+            </p>
+            <div class="diag-log-actions">
+              <button
+                type="button"
+                class="ghost"
+                :aria-expanded="consoleOpen ? 'true' : 'false'"
+                @click="toggleConsole"
+              >
+                {{ consoleOpen ? '收起控制台' : '打开控制台' }}
+              </button>
+              <button
+                type="button"
+                class="ghost danger"
+                :disabled="failures.length === 0"
+                @click="onClearFailures"
+              >
+                清空
+              </button>
+            </div>
+            <div v-show="consoleOpen" class="bh-terminal" role="log" @click="loadFailures">
+              <div class="terminal-head" aria-hidden="true">
+                <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
+                <span class="terminal-title">ai-diagnostics</span>
+                <span class="terminal-count">{{ failures.length }}/20</span>
+              </div>
+              <div class="terminal-body">
+                <template v-if="failures.length > 0">
+                  <div v-for="(entry, index) in failures" :key="index" class="diag-log-item">
+                    <div class="diag-log-line">
+                      <span class="terminal-prompt">[{{ failureTimeText(entry) }}]</span>
+                      <span class="diag-log-feature">{{ entry.feature }}</span>
+                      <span class="diag-log-kind" :class="entry.kind">{{ entry.kind }}</span>
+                      <span class="diag-log-msg">{{ entry.message }}</span>
+                    </div>
+                    <pre v-if="entry.rawExcerpt" class="diag-log-raw">  ↳ {{ entry.rawExcerpt }}</pre>
+                    <div v-if="entry.endpoint || entry.model" class="diag-log-meta">
+                      ↳ {{ entry.endpoint }}{{ entry.endpoint && entry.model ? ' · ' : '' }}{{ entry.model }}
+                    </div>
+                  </div>
+                </template>
+                <div v-else class="terminal-empty">$ 暂无失败记录<span class="terminal-cursor">▊</span></div>
+                <template v-if="costs.length > 0">
+                  <div class="terminal-divider">$ 去广告开销 {{ costSummary }}</div>
+                  <div v-for="(entry, index) in costs" :key="`cost-${index}`" class="diag-log-item">
+                    <div class="diag-log-line">
+                      <span class="terminal-prompt">[{{ costTimeText(entry) }}]</span>
+                      <span class="diag-log-feature">{{ costPathText(entry.path) }}</span>
+                      <span class="diag-log-msg">
+                        {{ entry.bvid || '未知视频' }} · 广告段 {{ entry.ads }}（可跳 {{ entry.skippable }}） ·
+                        {{ entry.elapsedMs >= 1000 ? `${(entry.elapsedMs / 1000).toFixed(1)}s` : `${entry.elapsedMs}ms` }} ·
+                        {{ entry.llmCalls === 0 ? '0 token' : `入${(entry.inputTokens ?? 0).toLocaleString()}/出${(entry.outputTokens ?? 0).toLocaleString()}` }}
+                      </span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </section>
+      </section>
+      <section v-show="active === 'filter' || active === 'enhance'" class="page" aria-label="功能">
+        <header class="content-head">
+          <div class="head-main">
+            <h1>{{ activeGroupTitle }}</h1>
+            <p class="content-sub">按开关启停，改动即时保存并持久化（默认全部关闭）。</p>
+          </div>
         </header>
         <FeaturesSection v-if="activeGroupId" :group-id="activeGroupId" />
-      </template>
+      </section>
     </main>
   </div>
 </template>
@@ -1505,6 +1735,19 @@ onMounted(loadFailures)
   color: var(--bh-text-primary);
 }
 
+/* 侧栏大类：AI 助手 6 页 / 功能 2 类，分隔标题把两组分开。 */
+.sidebar-section {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--bh-text-faint);
+  padding: 12px 10px 6px;
+}
+
+.sidebar-section:first-of-type {
+  padding-top: 0;
+}
+
 .sidebar-item {
   text-align: left;
   padding: 8px 12px;
@@ -1528,12 +1771,63 @@ onMounted(loadFailures)
 
 .content {
   flex: 1;
-  padding: 32px 40px;
-  max-width: 840px;
+  padding: 36px 44px 24px;
+  /* 单列、每页一到两张卡：宽松优先（并排双列读着紧张，已按反馈改回单列）。 */
+  max-width: 880px;
+  min-width: 0;
 }
 
 .content-head {
-  margin-bottom: 16px;
+  margin-bottom: 22px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.head-main {
+  min-width: 0;
+  max-width: 580px;
+}
+
+/* 状态摘要：一眼确认「配好了没、开了没」，不必逐页翻。 */
+.status-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+  justify-content: flex-end;
+}
+
+.status-chip {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--bh-text-muted);
+  background: var(--bh-surface-ghost);
+  border: 1px solid var(--bh-border-hairline);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.status-chip.on {
+  color: var(--bh-success-deep);
+  background: var(--bh-success-soft);
+  border-color: var(--bh-border-success);
+}
+
+.status-chip.warn {
+  color: var(--bh-warn-deep);
+  background: var(--bh-warn-soft);
+  border-color: var(--bh-border-warn);
+}
+
+/* 一页一到两张卡：层次靠间距，不靠并排。 */
+.page > .card + .card {
+  margin-top: 18px;
 }
 
 .content-head h1 {
@@ -1558,7 +1852,7 @@ onMounted(loadFailures)
   border: 1px solid var(--bh-glass-border);
   border-radius: 16px;
   padding: 20px 24px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
   box-shadow: 0 8px 24px var(--bh-shadow-card);
   backdrop-filter: blur(12px);
 }
@@ -2131,11 +2425,25 @@ button {
   font-size: 11px;
 }
 
+/* 保存条吸底：连接页表单长，保存入口不该只在最底部（其它页无未保存表单，不出现）。 */
 .actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 4px 0 24px;
+  margin-top: 20px;
+  padding: 12px 0 16px;
+  background: linear-gradient(to top, var(--bh-page-to) 62%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.actions-note {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--bh-text-faint);
+  text-align: right;
 }
 
 .primary {
