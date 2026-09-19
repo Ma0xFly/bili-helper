@@ -1,0 +1,240 @@
+/* 扩展页面（设置页 / 弹窗）的设计 token 唯一登记处。
+ *
+ * 与内容脚本浮层的登记处（entrypoints/content/ui/overlay.css）**同键名、同取值**：
+ * 浮层那份注入 Shadow DOM（:host 作用域，跟随 B 站夜间模式用 [data-dark]），
+ * 这份挂在页面根（跟随系统 prefers-color-scheme）——一处改设计语言，两处一起变。
+ * 同名 token 的取值一致性由 tests/theme-tokens.test.ts 兜底（改了这边忘改那边会红）。
+ *
+ * 另一个镜像：uno.config.ts 的主题色（utility 用）——同一套主色，同样在测试里对账。
+ *
+ * 纪律：
+ *   1. 组件样式只准用 var(--bh-*)（含 terminal 族），不得写裸色值；
+ *   2. 组件里只写几何（尺寸/间距/圆角/阴影偏移），颜色一律来自这里；
+ *   3. 新增 token 必须亮暗成对登记（暗色不是"调深一点"，是对齐浮层暗色那套）。
+ */
+
+:root {
+  /* 让原生控件（滚动条、下拉、日期选择器）跟随配色，不必逐个手写。 */
+  color-scheme: light dark;
+
+  --bh-font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+
+  /* ---------- 页面底色（设置页原有的三段渐变） ---------- */
+  --bh-page-from: #eeeaf7;
+  --bh-page-via: #fbeff2;
+  --bh-page-to: #fff3e8;
+
+  /* ---------- 文本层级（四级 + 禁用） ---------- */
+  --bh-text-primary: #2e2a3b;
+  --bh-text-secondary: #6f6a80;
+  --bh-text-muted: #736b8a;
+  --bh-text-faint: #8b84a0;
+  --bh-text-disabled: #a49cb8;
+  --bh-text-strong: #4c4661;
+  --bh-text-on-accent: #ffffff;
+
+  /* ---------- 主色与强调色 ---------- */
+  --bh-primary: #7c5cfc;
+  --bh-primary-deep: #7452f4;
+  --bh-primary-bright: #b47cf5;
+  --bh-primary-bright-deep: #8857df;
+  --bh-accent-pink: #ff8fb1;
+  --bh-purple-soft: #f1edff;
+  --bh-purple-tint: rgba(124, 92, 252, 0.1);
+  --bh-purple-tint-weak: rgba(124, 92, 252, 0.03);
+  --bh-primary-ink: #5b3fd4;
+  --bh-pink-soft: #ffe3ec;
+
+  /* ---------- 表面（玻璃拟态族；卡片与浮层同一套语言） ---------- */
+  --bh-surface-glass: rgba(255, 255, 255, 0.62);
+  --bh-surface-ghost: rgba(255, 255, 255, 0.7);
+  --bh-surface-item: rgba(255, 255, 255, 0.6);
+  --bh-surface-input: #ffffff;
+  --bh-surface-subtle: #fbfaff;
+  --bh-surface-inherit: rgba(255, 255, 255, 0.55);
+  --bh-surface-knob: #ffffff;
+  --bh-surface-warm: rgba(255, 243, 232, 0.9);
+  --bh-surface-popover: #ffffff;
+  --bh-glass-border: rgba(255, 255, 255, 0.8);
+  --bh-glass-border-faint: rgba(255, 255, 255, 0.8);
+  --bh-inner-glow: rgba(255, 255, 255, 0.9);
+
+  /* ---------- 描边（hairline = 卡片/分隔；strong = 密集表单控件） ---------- */
+  --bh-border-hairline: #e3def0;
+  --bh-border-strong: #d9d4e8;
+  --bh-border-primary: rgba(124, 92, 252, 0.25);
+  --bh-border-success: rgba(85, 212, 143, 0.35);
+  --bh-border-danger: rgba(255, 143, 163, 0.45);
+  --bh-border-warn: rgba(240, 196, 120, 0.4);
+
+  /* ---------- 语义色（深色变体 -deep 用于浅底上的文字） ---------- */
+  --bh-success: #2fa96b;
+  --bh-success-deep: #1f8848;
+  --bh-success-soft: #e9f6ee;
+  --bh-success-tint: rgba(31, 136, 72, 0.1);
+  --bh-danger: #e5484d;
+  --bh-danger-deep: #c04040;
+  --bh-danger-soft: #fdecee;
+  --bh-warn: #b5822a;
+  --bh-warn-deep: #8a6d1a;
+  --bh-warn-soft: #fdf5e6;
+
+  /* ---------- 阴影（颜色 token；偏移/模糊属几何，写在组件里） ---------- */
+  --bh-shadow-card: rgba(124, 92, 252, 0.06);
+  --bh-shadow-purple: rgba(124, 92, 252, 0.16);
+  --bh-shadow-accent: rgba(124, 92, 252, 0.35);
+  --bh-shadow-chip: rgba(124, 92, 252, 0.1);
+  --bh-shadow-focus: rgba(124, 92, 252, 0.12);
+  --bh-shadow-popover: rgba(124, 92, 252, 0.14);
+  --bh-shadow-knob: rgba(0, 0, 0, 0.2);
+
+  /* ---------- 诊断控制台（终端）：刻意常暗，亮暗两套同值 ---------- */
+  --bh-term-bg: #0f1117;
+  --bh-term-head: #161922;
+  --bh-term-border: #2d2b3a;
+  --bh-term-divider: #2a2e3d;
+  --bh-term-dot: #3a3d47;
+  --bh-term-dot-red: #e5565c;
+  --bh-term-dot-yellow: #d9a94e;
+  --bh-term-green: #43b661;
+  --bh-term-prompt: #43b661;
+  --bh-term-title: #8b93a7;
+  --bh-term-dim: #6b7280;
+  --bh-term-text: #c9d1d9;
+  --bh-term-feature: #79c0ff;
+  --bh-term-error: #f85149;
+  --bh-term-error-bg: rgba(248, 81, 73, 0.18);
+  --bh-term-warn: #d29914;
+  --bh-term-warn-bg: rgba(210, 153, 34, 0.18);
+  --bh-term-raw-bg: #161b27;
+  --bh-term-raw-border: #30364a;
+  --bh-term-raw-text: #9aa4b8;
+  --bh-term-shadow: rgba(15, 17, 23, 0.35);
+}
+
+/* 暗色：取值对齐 overlay.css 的 [data-dark]（同键位），而不是各自调深。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bh-page-from: #14111d;
+    --bh-page-via: #1c1524;
+    --bh-page-to: #221a20;
+
+    --bh-text-primary: #ece8f5;
+    --bh-text-secondary: #b5aec9;
+    --bh-text-muted: #8e86a5;
+    --bh-text-faint: #7d7691;
+    --bh-text-disabled: #615a74;
+    --bh-text-strong: #ddd7ea;
+    --bh-text-on-accent: #191426;
+
+    --bh-primary: #9c85ff;
+    --bh-primary-deep: #9c85ff;
+    --bh-primary-bright: #c29bf8;
+    --bh-primary-bright-deep: #c29bf8;
+    --bh-accent-pink: #ffa0bd;
+    --bh-purple-soft: #2b2442;
+    --bh-purple-tint: rgba(156, 133, 255, 0.16);
+    --bh-purple-tint-weak: rgba(156, 133, 255, 0.08);
+    --bh-primary-ink: #c29bf8;
+    --bh-pink-soft: #3d2431;
+
+    --bh-surface-glass: rgba(41, 34, 58, 0.66);
+    --bh-surface-ghost: rgba(43, 36, 66, 0.8);
+    --bh-surface-item: rgba(43, 36, 66, 0.6);
+    --bh-surface-input: rgba(20, 17, 32, 0.7);
+    --bh-surface-subtle: rgba(24, 20, 36, 0.6);
+    --bh-surface-inherit: rgba(20, 17, 32, 0.4);
+    --bh-surface-knob: #ffffff;
+    --bh-surface-warm: rgba(61, 36, 49, 0.75);
+    --bh-surface-popover: #221c33;
+    --bh-glass-border: rgba(255, 255, 255, 0.14);
+    --bh-glass-border-faint: rgba(255, 255, 255, 0.08);
+    --bh-inner-glow: rgba(255, 255, 255, 0.07);
+
+    --bh-border-hairline: #342d47;
+    --bh-border-strong: #453c5c;
+    --bh-border-primary: rgba(156, 133, 255, 0.35);
+    --bh-border-success: rgba(85, 212, 143, 0.35);
+    --bh-border-danger: rgba(255, 160, 189, 0.35);
+    --bh-border-warn: rgba(224, 177, 92, 0.4);
+
+    --bh-success: #55d48f;
+    --bh-success-deep: #55d48f;
+    --bh-success-soft: #1b3227;
+    --bh-success-tint: rgba(85, 212, 143, 0.16);
+    --bh-danger: #ff8fa3;
+    --bh-danger-deep: #ff8fa3;
+    --bh-danger-soft: #3a2130;
+    --bh-warn: #e0b15c;
+    --bh-warn-deep: #e0b15c;
+    --bh-warn-soft: #3a2f1b;
+
+    --bh-shadow-card: rgba(0, 0, 0, 0.35);
+    --bh-shadow-purple: rgba(0, 0, 0, 0.5);
+    --bh-shadow-accent: rgba(156, 133, 255, 0.4);
+    --bh-shadow-chip: rgba(0, 0, 0, 0.4);
+    --bh-shadow-focus: rgba(156, 133, 255, 0.18);
+    --bh-shadow-popover: rgba(0, 0, 0, 0.5);
+    --bh-shadow-knob: rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* ---------- 页面基线（两页共用；原先各自缺一段） ---------- */
+html,
+body {
+  /* 浏览器默认 body 有 8px 外边距：弹窗里就是一圈白边，设置页会多出滚动条。 */
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--bh-font-family);
+  color: var(--bh-text-primary);
+  background: linear-gradient(
+    135deg,
+    var(--bh-page-from) 0%,
+    var(--bh-page-via) 55%,
+    var(--bh-page-to) 100%
+  );
+  background-attachment: fixed;
+}
+
+/* 焦点态单点：组件不再各自声明（scoped 选择器权重更高会盖掉这里，故组件里已移除）。 */
+:focus-visible {
+  outline: 2px solid var(--bh-primary);
+  outline-offset: 2px;
+}
+
+/* 滚动条：设置页有整页与若干内滚区，深色下默认亮滚动条很跳。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bh-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--bh-border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--bh-text-disabled);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

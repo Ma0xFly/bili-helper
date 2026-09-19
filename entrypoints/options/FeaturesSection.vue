@@ -109,16 +109,18 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 
 <style scoped>
 .card {
-  background: #ffffff;
+  background: var(--bh-surface-glass);
+  border: 1px solid var(--bh-glass-border);
   border-radius: 16px;
   padding: 18px 20px;
-  box-shadow: 0 6px 24px rgba(124, 92, 252, 0.08);
+  box-shadow: 0 8px 24px var(--bh-shadow-card);
+  backdrop-filter: blur(12px);
 }
 
 .card-title {
   font-size: 15px;
   font-weight: 700;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
   margin: 0 0 12px;
 }
 
@@ -143,7 +145,7 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 .switch-name {
   font-size: 13.5px;
   font-weight: 600;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -153,8 +155,8 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 .applies-tag {
   font-size: 11px;
   font-weight: 500;
-  color: #7c5cfc;
-  background: rgba(124, 92, 252, 0.1);
+  color: var(--bh-primary);
+  background: var(--bh-purple-tint);
   border-radius: 6px;
   padding: 1px 6px;
 }
@@ -162,15 +164,15 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 .stat-badge {
   font-size: 11px;
   font-weight: 600;
-  color: #1f8848;
-  background: rgba(31, 136, 72, 0.1);
+  color: var(--bh-success-deep);
+  background: var(--bh-success-tint);
   border-radius: 6px;
   padding: 1px 6px;
 }
 
 .switch-desc {
   font-size: 12px;
-  color: #6f6a80;
+  color: var(--bh-text-secondary);
   line-height: 1.5;
 }
 
@@ -194,7 +196,7 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: #e3def0;
+  background: var(--bh-border-hairline);
   transition: background 180ms ease;
 }
 
@@ -205,13 +207,13 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  background: var(--bh-surface-knob);
+  box-shadow: 0 1px 3px var(--bh-shadow-knob);
   transition: transform 180ms ease;
 }
 
 .switch input:checked ~ .switch-track {
-  background: linear-gradient(135deg, #7c5cfc, #ff8fb1);
+  background: linear-gradient(135deg, var(--bh-primary), var(--bh-accent-pink));
 }
 
 .switch input:checked ~ .switch-knob {
@@ -219,7 +221,7 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 }
 
 .switch input:focus-visible ~ .switch-track {
-  outline: 2px solid #7c5cfc;
+  outline: 2px solid var(--bh-primary);
   outline-offset: 2px;
 }
 
@@ -229,10 +231,10 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
 }
 
 .section-hint.ok {
-  color: #1f8848;
+  color: var(--bh-success-deep);
 }
 
 .section-hint.fail {
-  color: #c04040;
+  color: var(--bh-danger-deep);
 }
 </style>

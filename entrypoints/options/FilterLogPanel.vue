@@ -95,21 +95,21 @@ function timeText(time: number): string {
 .filter-log {
   margin-top: 14px;
   padding-top: 12px;
-  border-top: 1px dashed #ece7f7;
+  border-top: 1px dashed var(--bh-border-hairline);
 }
 
 .log-toggle {
-  border: 1px solid #e3def0;
-  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--bh-border-hairline);
+  background: var(--bh-surface-ghost);
   border-radius: 10px;
   padding: 7px 12px;
   font-size: 12px;
-  color: #7c5cfc;
+  color: var(--bh-primary);
   cursor: pointer;
 }
 
 .log-toggle:hover {
-  background: #f1edff;
+  background: var(--bh-purple-soft);
 }
 
 .log-summary {
@@ -121,8 +121,8 @@ function timeText(time: number): string {
 
 .log-chip {
   font-size: 11px;
-  color: #6f6a80;
-  background: #f6f3ff;
+  color: var(--bh-text-secondary);
+  background: var(--bh-purple-soft);
   border-radius: 999px;
   padding: 2px 9px;
 }
@@ -144,7 +144,7 @@ function timeText(time: number): string {
   gap: 8px;
   padding: 6px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--bh-surface-item);
   font-size: 12px;
   min-width: 0;
 }
@@ -152,21 +152,21 @@ function timeText(time: number): string {
 .log-time {
   font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
   font-size: 11px;
-  color: #a49cb8;
+  color: var(--bh-text-disabled);
   flex-shrink: 0;
 }
 
 .log-surface {
   font-size: 10.5px;
-  color: #7c5cfc;
-  background: rgba(124, 92, 252, 0.1);
+  color: var(--bh-primary);
+  background: var(--bh-purple-tint);
   border-radius: 6px;
   padding: 1px 6px;
   flex-shrink: 0;
 }
 
 .log-reason {
-  color: #b5822a;
+  color: var(--bh-warn);
   font-weight: 600;
   flex-shrink: 0;
   max-width: 130px;
@@ -176,7 +176,7 @@ function timeText(time: number): string {
 }
 
 .log-title {
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
   text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -184,14 +184,14 @@ function timeText(time: number): string {
 }
 
 .log-title:hover {
-  color: #7c5cfc;
+  color: var(--bh-primary);
   text-decoration: underline;
 }
 
 .log-empty {
   margin: 10px 0 0;
   font-size: 12px;
-  color: #8b84a0;
+  color: var(--bh-text-faint);
 }
 
 .log-actions {
@@ -201,17 +201,17 @@ function timeText(time: number): string {
 }
 
 .ghost.danger {
-  border: 1px solid rgba(255, 143, 163, 0.45);
-  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--bh-border-danger);
+  background: var(--bh-surface-ghost);
   border-radius: 10px;
   padding: 7px 12px;
   font-size: 12px;
-  color: #e5484d;
+  color: var(--bh-danger);
   cursor: pointer;
 }
 
 .ghost.danger:hover:not(:disabled) {
-  background: #fdecee;
+  background: var(--bh-danger-soft);
 }
 
 .ghost.danger:disabled {
@@ -222,6 +222,6 @@ function timeText(time: number): string {
 .log-hint {
   margin: 8px 0 0;
   font-size: 12px;
-  color: #6f6a80;
+  color: var(--bh-text-secondary);
 }
 </style>

@@ -145,17 +145,17 @@ function pickOnMouseDown(event: MouseEvent, option: string): void {
   list-style: none;
   max-height: 240px;
   overflow-y: auto;
-  background: #ffffff;
-  border: 1px solid #e3def0;
+  background: var(--bh-surface-popover);
+  border: 1px solid var(--bh-border-hairline);
   border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(124, 92, 252, 0.14);
+  box-shadow: 0 10px 30px var(--bh-shadow-popover);
 }
 
 .model-list li {
   padding: 7px 10px;
   border-radius: 7px;
   font-size: 13px;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -164,8 +164,8 @@ function pickOnMouseDown(event: MouseEvent, option: string): void {
 
 .model-list li.active,
 .model-list li:hover {
-  background: #f1edff;
-  color: #5b3fd4;
+  background: var(--bh-purple-soft);
+  color: var(--bh-primary-ink);
 }
 
 .model-loading {
@@ -174,7 +174,7 @@ function pickOnMouseDown(event: MouseEvent, option: string): void {
   top: 50%;
   transform: translateY(-50%);
   font-size: 11px;
-  color: #857fa0;
+  color: var(--bh-text-faint);
   pointer-events: none;
 }
 </style>

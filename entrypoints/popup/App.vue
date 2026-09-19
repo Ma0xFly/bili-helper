@@ -213,8 +213,7 @@ onMounted(async () => {
   gap: 12px;
   width: 240px;
   padding: 16px;
-  font-family: 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
 }
 
 .popup-row {
@@ -235,7 +234,7 @@ onMounted(async () => {
 .hint {
   margin: 0;
   font-size: 11.5px;
-  color: #736b8a;
+  color: var(--bh-text-muted);
   line-height: 1.6;
 }
 
@@ -245,17 +244,17 @@ onMounted(async () => {
   gap: 7px;
   font-size: 12px;
   font-weight: 500;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
   padding: 6px 10px;
   border-radius: 999px;
-  background: rgba(255, 243, 232, 0.9);
+  background: var(--bh-surface-warm);
 }
 
 .ach-orb {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #7c5cfc, #ff8fb1);
+  background: linear-gradient(135deg, var(--bh-primary), var(--bh-accent-pink));
   flex-shrink: 0;
 }
 
@@ -280,7 +279,7 @@ onMounted(async () => {
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: #e3def0;
+  background: var(--bh-border-hairline);
   transition: background 180ms ease;
 }
 
@@ -291,13 +290,13 @@ onMounted(async () => {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  background: var(--bh-surface-knob);
+  box-shadow: 0 1px 3px var(--bh-shadow-knob);
   transition: transform 180ms ease;
 }
 
 .switch input:checked ~ .switch-track {
-  background: linear-gradient(135deg, #7c5cfc, #ff8fb1);
+  background: linear-gradient(135deg, var(--bh-primary), var(--bh-accent-pink));
 }
 
 .switch input:checked ~ .switch-knob {
@@ -309,7 +308,7 @@ onMounted(async () => {
 }
 
 .switch input:focus-visible ~ .switch-track {
-  outline: 2px solid #7c5cfc;
+  outline: 2px solid var(--bh-primary);
   outline-offset: 2px;
 }
 
@@ -321,13 +320,13 @@ onMounted(async () => {
   padding: 8px 12px;
   border: none;
   border-radius: 9999px;
-  background: #7c5cfc;
-  color: #fff;
+  background: var(--bh-primary);
+  color: var(--bh-text-on-accent);
   cursor: pointer;
   font-size: 13px;
 }
 
 .open-options:hover {
-  background: #7452f4;
+  background: var(--bh-primary-deep);
 }
 </style>

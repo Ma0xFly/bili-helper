@@ -272,9 +272,9 @@ onMounted(async () => {
 .video-filter-editor {
   margin-top: 14px;
   padding: 14px 16px;
-  border: 1px solid rgba(124, 92, 252, 0.25);
+  border: 1px solid var(--bh-border-primary);
   border-radius: 12px;
-  background: rgba(124, 92, 252, 0.03);
+  background: var(--bh-purple-tint-weak);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -285,31 +285,31 @@ onMounted(async () => {
   align-items: baseline;
   gap: 10px;
   font-size: 13px;
-  color: #2e2a3b;
+  color: var(--bh-text-primary);
 }
 
-.vf-count { color: #7c5cfc; font-size: 12px; }
-.vf-apply { color: #9b95ad; font-size: 11.5px; margin-left: auto; }
+.vf-count { color: var(--bh-primary); font-size: 12px; }
+.vf-apply { color: var(--bh-text-faint); font-size: 11.5px; margin-left: auto; }
 
 .vf-risk {
   font-size: 11.5px;
   line-height: 1.6;
-  color: #8a6d1a;
-  background: #fff7d6;
+  color: var(--bh-warn-deep);
+  background: var(--bh-warn-soft);
   border-radius: 8px;
   padding: 6px 10px;
   margin: 0;
 }
 
-.vf-group { font-size: 12px; font-weight: 600; color: #6f6a80; margin-top: 4px; }
+.vf-group { font-size: 12px; font-weight: 600; color: var(--bh-text-secondary); margin-top: 4px; }
 
 .field { display: flex; flex-direction: column; gap: 4px; }
-.field-label { font-size: 12px; color: #4c4661; }
+.field-label { font-size: 12px; color: var(--bh-text-strong); }
 
 textarea {
   font: inherit;
   font-size: 12.5px;
-  border: 1px solid #d9d4e8;
+  border: 1px solid var(--bh-border-strong);
   border-radius: 8px;
   padding: 6px 10px;
   resize: vertical;
@@ -320,28 +320,28 @@ textarea {
   width: 110px;
   font: inherit;
   font-size: 12.5px;
-  border: 1px solid #d9d4e8;
+  border: 1px solid var(--bh-border-strong);
   border-radius: 8px;
   padding: 6px 10px;
 }
-.range-sep { color: #9b95ad; }
+.range-sep { color: var(--bh-text-faint); }
 
-.vf-help { font-size: 11px; color: #9b95ad; margin: -6px 0 0; }
+.vf-help { font-size: 11px; color: var(--bh-text-faint); margin: -6px 0 0; }
 
-.vf-errors { color: #c04040; font-size: 12px; }
+.vf-errors { color: var(--bh-danger-deep); font-size: 12px; }
 .vf-errors p { margin: 0; }
 
 .vf-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.vf-status { font-size: 12px; color: #b8860b; }
-.vf-status.ok { color: #1f8848; }
-.vf-status.synced { color: #9b95ad; }
+.vf-status { font-size: 12px; color: var(--bh-warn); }
+.vf-status.ok { color: var(--bh-success-deep); }
+.vf-status.synced { color: var(--bh-text-faint); }
 
 button.ghost {
   font: inherit;
   font-size: 12.5px;
-  border: 1px solid #d9d4e8;
-  background: #fff;
-  color: #4c4661;
+  border: 1px solid var(--bh-border-strong);
+  background: var(--bh-surface-input);
+  color: var(--bh-text-strong);
   border-radius: 8px;
   padding: 5px 12px;
   cursor: pointer;
@@ -351,11 +351,19 @@ button.primary {
   font: inherit;
   font-size: 12.5px;
   border: none;
-  background: linear-gradient(135deg, #7c5cfc, #ff8fb1);
-  color: #fff;
+  /* 与「保存设置」用同一支渐变（primary 端偏浅，白字对比不足；深端起步才读得清）。 */
+  background: linear-gradient(135deg, var(--bh-primary-deep), var(--bh-primary-bright));
+  color: var(--bh-text-on-accent);
   border-radius: 8px;
   padding: 6px 14px;
   cursor: pointer;
+  box-shadow: 0 3px 10px var(--bh-shadow-accent);
 }
-button.primary:disabled { opacity: 0.5; cursor: default; }
+
+/* 禁用态必须看得出来：无改动可存时这个按钮不可点（原先只是"变淡"得像可点）。 */
+button.primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+  box-shadow: none;
+}
 </style>
