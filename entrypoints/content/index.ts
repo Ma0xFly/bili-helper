@@ -11,6 +11,7 @@ import { AdSkipController } from '../../modules/content/ad-skip-controller'
 import type { PlayerAdapter, TimerApi } from '../../modules/content/ad-skip-controller'
 import { MarksBoxTracker } from '../../modules/content/marks-box'
 import { formatCompactTime } from '../../modules/content/logic'
+import { readAdFeedback, writeAdFeedback } from '../../modules/content/ad-feedback'
 import {
   mergeChapterSources,
   parseViewPoints,
@@ -235,6 +236,8 @@ export default defineContentScript({
       createBackend: (settings, hooks) => resolveBackend(settings, hooks),
       recordSkipped,
       openOptions: openOptionsViaBackground,
+      readFeedback: (bvid, cid) => readAdFeedback(bvid, cid),
+      writeFeedback: (bvid, feedback) => writeAdFeedback(bvid, feedback),
     })
 
     // ---------- 章节标记（官方看点 + AI 总结时间线 → 进度条刻度，点击跳转） ----------

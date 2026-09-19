@@ -15,6 +15,8 @@ export interface BannerState {
   countdown: number | null
   /** 环进度 0..1（剩余秒数 / 3），随播放推进衰减。 */
   progress: number
+  /** 当前段身份键（segmentKey）：「不是广告」纠错按钮用它定位段。 */
+  key: string
 }
 
 export interface SavedChipState {
@@ -40,9 +42,17 @@ export interface ChapterMarkState {
   /** 章节起点（秒）：点击跳转目标。 */
   start: number
   label: string
-  /** 起点时间文案（mm:ss / HH:MM:SS），tooltip 用。 */
+  /** 起点时间文案（mm:ss / H:mm:ss），tooltip 用。 */
   timeText: string
   source: 'official' | 'ai'
+}
+
+/** 漏报标记态：两次点击之间（起点已记、终点未定）的进行中提示。 */
+export interface MarkingState {
+  active: boolean
+  /** 标记起点（秒）。 */
+  start: number
+  startText: string
 }
 
 /**
@@ -71,13 +81,19 @@ export interface UiActions {
   onOpenSettings: () => void
   /** 章节标记点击跳转（接线层注入；无播放器时忽略）。 */
   onSeek: (seconds: number) => void
+  /** 「这段不是广告」纠错（key = segmentKey；横幅/标记 tooltip 都走这里）。 */
+  onMarkNotAd: (key: string) => void
+  /** 漏报标记两拍流：开始（记当前播放位置）/ 结束并入广告段 / 取消。 */
+  onStartMarkAd: () => void
+  onFinishMarkAd: () => void
+  onCancelMarkAd: () => void
 }
 
 export const ui = reactive({
   /** 跟随 B 站夜间模式；true 时整套 token 切暗色。 */
   dark: false,
   overlay: { visible: false, left: 0, top: 0, width: 0, height: 0 } as OverlayGeometry,
-  banner: { visible: false, copy: '', sub: '', countdown: 3, progress: 1 } as BannerState,
+  banner: { visible: false, copy: '', sub: '', countdown: 3, progress: 1, key: '' } as BannerState,
   chip: { visible: false, text: '' } as SavedChipState,
   vectorHint: { visible: false, text: '向量端点（Embedding）的 API 有问题，暂时只用词表匹配' },
   marks: [] as AdMarkState[],
@@ -96,10 +112,16 @@ export const ui = reactive({
   summarySegments: [] as SummarySegment[],
   /** 播放进度（秒），面板当前分段高亮用（由面板接线层轮询驱动）。 */
   currentTime: 0,
+  /** 漏报标记进行中态（MarkingChip 渲染）。 */
+  marking: { active: false, start: 0, startText: '' } as MarkingState,
   actions: {
     onSkipNow: () => {},
     onStay: () => {},
     onOpenSettings: () => {},
     onSeek: (_seconds: number) => {},
+    onMarkNotAd: (_key: string) => {},
+    onStartMarkAd: () => {},
+    onFinishMarkAd: () => {},
+    onCancelMarkAd: () => {},
   } as UiActions,
 })

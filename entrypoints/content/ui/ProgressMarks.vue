@@ -32,6 +32,14 @@ function boxStyle(): Record<string, string> {
       <div class="bh-mark-tip">
         <span>{{ mark.productName ? `${mark.productName} · 恰饭段` : '恰饭段' }}</span>
         <span class="bh-mark-range">{{ mark.range }}<template v-if="mark.done"> · 已跳过</template></span>
+        <button
+          type="button"
+          class="bh-mark-reject"
+          title="从本视频移除该段并记住：不再自动跳"
+          @click.stop="ui.actions.onMarkNotAd(mark.key)"
+        >
+          不是广告
+        </button>
       </div>
     </div>
   </div>

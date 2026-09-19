@@ -11,6 +11,12 @@ import type { DetectHooks } from '../ai/rag/detect'
 import { detectCacheFingerprint, readDetectCache, writeDetectCache } from '../ai/rag/result-cache'
 import { recordDetectCost } from '../ai/diagnostics-log'
 import { extractBvidFromUrl } from '../video/collectors'
+import {
+  applyAdFeedback,
+  mergeAdIntervals,
+  type AdFeedback,
+  type AdFeedbackInterval,
+} from './ad-feedback'
 import type { AdSkipPageState, AdSkipToggleResponse } from './protocol'
 import {
   BANNER_LEAD_SECONDS,
@@ -19,6 +25,7 @@ import {
   bannerSubCopy,
   countdownAdAt,
   countdownSeconds,
+  formatCompactTime,
   formatHms,
   insideAdAt,
   savedChipText,
@@ -80,6 +87,9 @@ export interface AdSkipControllerDeps {
   createBackend: (settings: AiSettings, hooks: DetectHooks) => Pick<AiCapabilities, 'detectAds'>
   recordSkipped: (segmentKey: string, savedSeconds: number) => Promise<number | null>
   openOptions: () => void
+  /** 误判反馈存储（默认接 modules/content/ad-feedback 的实现；测试注入）。 */
+  readFeedback: (bvid: string, cid: number | null) => Promise<AdFeedback | null>
+  writeFeedback: (bvid: string, feedback: AdFeedback) => Promise<void>
 }
 
 export class AdSkipController {
@@ -99,6 +109,8 @@ export class AdSkipController {
   private skippedOnce = new Set<string>()
   private skipScheduled = new Set<string>()
   private hintShown = false
+  /** 漏报标记两拍流的起点（秒）；null = 未在标记。 */
+  private markingStart: number | null = null
 
   /**
    * 降级一次性提示（报错式不静默）：向量故障 / 对话故障退极速匹配共用同一出口，
@@ -160,6 +172,15 @@ export class AdSkipController {
       }
     }
     ui.actions.onOpenSettings = () => this.deps.openOptions()
+    ui.actions.onMarkNotAd = (key) => {
+      const ad =
+        this.ads.find((item) => segmentKey(item) === key) ??
+        (this.bannerAd !== null && segmentKey(this.bannerAd) === key ? this.bannerAd : null)
+      if (ad) void this.markNotAd(ad)
+    }
+    ui.actions.onStartMarkAd = () => this.startMarking()
+    ui.actions.onFinishMarkAd = () => this.finishMarking()
+    ui.actions.onCancelMarkAd = () => this.cancelMarking()
   }
 
   // ---------- 启动 / 生命周期 ----------
@@ -188,6 +209,7 @@ export class AdSkipController {
     }
     ui.banner.visible = false
     ui.chip.visible = false
+    ui.marking = { active: false, start: 0, startText: '' }
     ui.ads = []
   }
 
@@ -384,9 +406,21 @@ export class AdSkipController {
         skippable,
       })
       if (!this.pageEnabled || !this.masterEnabled) return
-      this.ads = sortedAds(result.ads)
-      this.skipAds = this.ads.filter((ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE)
-      ui.ads = [...this.ads]
+      // 用户纠错叠加（token 闸门外的第零道门——零成本）：检测结果 × 误判反馈。
+      // 反馈存独立仓（result-cache 之外），语料/端点变化重检测时依然生效。
+      let feedback: AdFeedback | null = null
+      try {
+        feedback = await this.deps.readFeedback(meta.bvid, cacheCid)
+      } catch {
+        feedback = null // 反馈读失败不拦检测主链路
+      }
+      const effectiveAds = applyAdFeedback(result.ads, feedback)
+      if (feedback !== null) {
+        console.info(
+          `[bili-helper] 误判反馈叠加：误报剔除=${feedback.notAds.length}段 漏报补入=${feedback.missedAds.length}段 → 生效广告段=${effectiveAds.length}（检测原始 ${result.ads.length}）`,
+        )
+      }
+      this.applyAds(effectiveAds)
       if (this.ads.length === 0) {
         this.pipelineStarted = true // 无广告 = 链路成功走完，静默既是终点。
         return
@@ -398,6 +432,13 @@ export class AdSkipController {
     } finally {
       this.running = false
     }
+  }
+
+  /** 检测结果（含反馈叠加）落进运行态：排序、置信度分流、面板镜像。 */
+  private applyAds(ads: AdSegment[]): void {
+    this.ads = sortedAds(ads)
+    this.skipAds = this.ads.filter((ad) => ad.confidence >= AUTO_SKIP_MIN_CONFIDENCE)
+    ui.ads = [...this.ads]
   }
 
   // ---------- 播放器接线 / 几何做标 ----------
@@ -513,6 +554,7 @@ export class AdSkipController {
     this.bannerAd = ad
     ui.banner.copy = bannerCopy(ad)
     ui.banner.sub = bannerSubCopy(ad)
+    ui.banner.key = segmentKey(ad)
     ui.banner.countdown = this.player ? countdownSeconds(ad, this.player.currentTime) : 3
     ui.banner.progress = 1
     ui.banner.visible = true
@@ -664,11 +706,98 @@ export class AdSkipController {
     })
   }
 
+  // ---------- 误判纠错（用户裁决闭环） ----------
+
+  /**
+   * 「这段不是广告」：本页立即剔除该段（标记/横幅/跳过全撤），并持久化到该视频的
+   * 误报反馈——下次进入（缓存命中或重新检测）都会被同一份反馈修正。
+   */
+  private async markNotAd(ad: AdSegment): Promise<void> {
+    const key = segmentKey(ad)
+    this.optedOut.delete(key)
+    this.skippedOnce.delete(key)
+    if (this.bannerAd !== null && segmentKey(this.bannerAd) === key) this.hideBanner()
+    this.applyAds(applyAdFeedback(this.ads, { notAds: [{ start: ad.start, end: ad.end }], missedAds: [] }))
+    this.requestRemesh()
+    const bvid = this.activeBvid
+    const cid = this.videoMeta?.cid ?? null
+    console.info(
+      `[bili-helper] 误判反馈：${bvid ?? '未知视频'} ${Math.round(ad.start)}–${Math.round(ad.end)}s 不是广告（已记住，此视频不再跳）`,
+    )
+    if (bvid === null || cid === null) return
+    try {
+      const current = await this.deps.readFeedback(bvid, cid)
+      const notAds = mergeAdIntervals([...(current?.notAds ?? []), { start: ad.start, end: ad.end }])
+      await this.deps.writeFeedback(bvid, {
+        cid,
+        notAds,
+        missedAds: current?.missedAds ?? [],
+        updatedAt: Date.now(),
+      })
+    } catch (error) {
+      // 持久化失败：本页已生效，只是下次进来会再犯——留日志可排障。
+      console.error('[bili-helper] 误判反馈持久化失败:', String(error))
+    }
+  }
+
+  /** 「标记漏掉的广告段」：并入生效列表（置信度 1 直接可跳）并持久化。 */
+  markMissedAd(start: number, end: number): void {
+    if (!(end > start + 0.5)) return
+    const interval: AdFeedbackInterval = { start, end }
+    this.applyAds(applyAdFeedback(this.ads, { notAds: [], missedAds: [interval] }))
+    this.requestRemesh()
+    const bvid = this.activeBvid
+    const cid = this.videoMeta?.cid ?? null
+    console.info(
+      `[bili-helper] 漏报标记：${bvid ?? '未知视频'} ${Math.round(start)}–${Math.round(end)}s 并入广告段（置信度 1）`,
+    )
+    if (bvid === null || cid === null) return
+    void (async () => {
+      try {
+        const current = await this.deps.readFeedback(bvid, cid)
+        const missedAds = mergeAdIntervals([...(current?.missedAds ?? []), interval])
+        await this.deps.writeFeedback(bvid, {
+          cid,
+          notAds: current?.notAds ?? [],
+          missedAds,
+          updatedAt: Date.now(),
+        })
+      } catch (error) {
+        console.error('[bili-helper] 漏报标记持久化失败:', String(error))
+      }
+    })()
+  }
+
+  /** 漏报标记两拍流：第一拍记起点（浮出 MarkingChip），第二拍收终点并入。 */
+  startMarking(): void {
+    const video = this.player ?? this.deps.player.findVideo()
+    const at = video?.currentTime
+    if (typeof at !== 'number' || !Number.isFinite(at)) return
+    this.markingStart = at
+    ui.marking = { active: true, start: at, startText: formatCompactTime(at) }
+  }
+
+  finishMarking(): void {
+    const start = this.markingStart
+    this.cancelMarking()
+    if (start === null) return
+    const video = this.player ?? this.deps.player.findVideo()
+    const end = video?.currentTime
+    if (typeof end !== 'number' || !Number.isFinite(end)) return
+    this.markMissedAd(start, Math.max(end, start + 1))
+  }
+
+  cancelMarking(): void {
+    this.markingStart = null
+    if (ui.marking.active) ui.marking = { active: false, start: 0, startText: '' }
+  }
+
   // ---------- 页内开关 / 导航复位 ----------
 
   private applyPageVisibility(): void {
     if (!this.pageEnabled || !this.masterEnabled) {
       this.hideBanner()
+      this.cancelMarking()
       ui.marks = []
       ui.ads = []
       ui.chip.visible = false
@@ -695,6 +824,7 @@ export class AdSkipController {
     this.optedOut.clear()
     this.skippedOnce.clear()
     this.skipScheduled.clear()
+    this.cancelMarking()
     this.pageEnabled = true // 页内开关状态复位：新视频页默认开。
     this.pipelineStarted = false
     this.lastAttemptAt = 0

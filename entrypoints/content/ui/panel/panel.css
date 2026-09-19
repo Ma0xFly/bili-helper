@@ -935,6 +935,14 @@
   border: 1px solid var(--bh-glass-border);
 }
 
+/* 两个纠错入口并排：词级补录 + 段级标记。 */
+.bh-corpus-links {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
 .bh-corpus-tip {
   margin: 8px 0 6px;
   font-size: 11.5px;

@@ -251,11 +251,23 @@ onBeforeUnmount(() => {
       </div>
     </template>
 
-    <!-- 漏检补录工具：广告没被认出来时，从当前位置 ±30s 字幕里选词入库 -->
+    <!-- 漏检补录工具：广告没被认出来时，从当前位置 ±30s 字幕里选词入库；
+         或两拍式直接把整段标成广告（段级纠错，标记完立即生效并记住） -->
     <div v-if="contextReady && !generating" class="bh-corpus-tool">
-      <button type="button" class="bh-link" @click="corpusToolOpen ? (corpusToolOpen = false) : openCorpusTool()">
-        {{ corpusToolOpen ? '收起漏检补录' : '有广告没被认出来？漏检补录' }}
-      </button>
+      <div class="bh-corpus-links">
+        <button type="button" class="bh-link" @click="corpusToolOpen ? (corpusToolOpen = false) : openCorpusTool()">
+          {{ corpusToolOpen ? '收起漏检补录' : '有广告没被认出来？漏检补录' }}
+        </button>
+        <button
+          v-if="!ui.marking.active"
+          type="button"
+          class="bh-link"
+          title="点一下记起点，播到广告结束再点一下完成"
+          @click="ui.actions.onStartMarkAd()"
+        >
+          标记整段为广告
+        </button>
+      </div>
       <template v-if="corpusToolOpen">
         <p v-if="corpusCandidates.length > 0" class="bh-corpus-tip">
           点选下方候选词（来自当前位置 ±30 秒字幕），选中后入库：

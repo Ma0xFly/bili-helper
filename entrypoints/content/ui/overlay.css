@@ -371,6 +371,59 @@
   font-weight: 600;
 }
 
+/* 标记 tooltip 里的「不是广告」纠错入口：小号文字按钮，与 tooltip 同层。 */
+.bh-mark-reject {
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--bh-danger);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bh-mark-reject:hover {
+  opacity: 0.8;
+}
+
+.bh-mark-reject:focus-visible {
+  outline: 2px solid var(--bh-danger);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---------- 漏报标记进行中提示（两拍流：起点已记、终点待收） ---------- */
+.bh-marking-chip {
+  position: absolute;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 999px;
+  box-shadow: 0 10px 30px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--bh-text-primary);
+  white-space: nowrap;
+  pointer-events: auto;
+  max-width: 92%;
+}
+
+.bh-marking-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---------- 进度条章节标记（与广告标记同盒几何：细竖线刻度，悬停出章节，点击跳转） ---------- */
 .bh-chapters {
   position: absolute;

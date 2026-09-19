@@ -103,6 +103,8 @@ async function makeHarness(overrides: {
     createBackend: (_s, _hooks) => ({ detectAds }),
     recordSkipped,
     openOptions: vi.fn(),
+    readFeedback: async () => null,
+    writeFeedback: vi.fn(async () => undefined),
   }
   const controller = new AdSkipController(deps)
   return { video, container, recordSkipped, detectAds, controller, setHref: (next) => (href = next) }
@@ -122,6 +124,9 @@ beforeEach(() => {
   ui.marksBox = { visible: false, left: 0, top: 0, width: 0 }
   ui.ads = []
   ui.dark = false
+  ui.marking = { active: false, start: 0, startText: '' }
+  ui.summarySegments = []
+  ui.chapterMarks = []
 })
 
 afterEach(() => {
@@ -432,5 +437,213 @@ describe('进度条广告标记跟随', () => {
     stubRect(bar, { ...BAR, top: 300 })
     await vi.advanceTimersByTimeAsync(MARKS_SYNC_INTERVAL_MS)
     expect(ui.marksBox).toEqual({ visible: true, left: 20, top: 403, width: 760 })
+  })
+})
+
+describe('误判纠错闭环', () => {
+  const PLAYER = { left: 100, top: 200, width: 800, height: 450 }
+  const BAR = { left: 120, top: 600, width: 760, height: 6 }
+
+  it('「这段不是广告」：横幅收起、段从列表剔除并持久化；时间推进不再跳', async () => {
+    const writeFeedback = vi.fn(async () => undefined)
+    const video = makeVideo()
+    video.currentTime = 30
+    const container = document.createElement('div')
+    container.appendChild(video)
+    const bar = document.createElement('div')
+    container.appendChild(bar)
+    document.body.appendChild(container)
+    stubRect(container, PLAYER)
+    stubRect(bar, BAR)
+    const deps: AdSkipControllerDeps = {
+      timers: {
+        setTimeout: (h, ms) => setTimeout(h, ms) as unknown as number,
+        clearTimeout: (id) => clearTimeout(id),
+        setInterval: (h, ms) => setInterval(h, ms) as unknown as number,
+        clearInterval: (id) => clearInterval(id),
+      },
+      now: () => 0,
+      player: {
+        findVideo: () => video,
+        waitForVideo: async () => video,
+        findPlayerContainer: () => container,
+        findProgressElement: () => bar,
+      },
+      pageHref: () => 'https://www.bilibili.com/video/BV1xx411c7mD/',
+      isDark: () => false,
+      collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
+      collectSubtitles: async () => [],
+      collectDanmaku: async () => [],
+      collectComments: async () => [],
+      readSettings: async () => ({
+        ...DEFAULT_SETTINGS,
+        apiUrl: 'https://llm.example/v1',
+        model: 'm-1',
+        apiKey: 'k-1',
+        adSkipEnabled: true,
+      }),
+      createBackend: () => ({
+        detectAds: async () => ({ ads: [AD], source: 'rag' }),
+      }),
+      recordSkipped: vi.fn(async () => 30),
+      openOptions: vi.fn(),
+      readFeedback: async () => null,
+      writeFeedback,
+    }
+    const controller2 = new AdSkipController(deps)
+    await controller2.start()
+    expect(ui.ads).toEqual([AD])
+
+    // 横幅出现后点「不是广告」。
+    video.currentTime = 97.5
+    controller2.onTimeUpdate()
+    expect(ui.banner.visible).toBe(true)
+    expect(ui.banner.key).toBe('100:130')
+    ui.actions.onMarkNotAd(ui.banner.key)
+    await flushMicrotasks()
+    expect(ui.banner.visible).toBe(false)
+    expect(ui.ads).toEqual([]) // 本页立即剔除
+    expect(writeFeedback).toHaveBeenCalledWith(
+      'BV1xx411c7mD',
+      expect.objectContaining({ cid: 1, notAds: [{ start: 100, end: 130 }] }),
+    )
+
+    // 时间推进：不再有横幅/跳过。
+    video.currentTime = 110
+    controller2.onTimeUpdate()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(ui.banner.visible).toBe(false)
+    expect(video.currentTime).toBe(110)
+  })
+
+  it('已存反馈在检测加载时叠加：误报剔除 + 漏报并入（缓存命中路径同样生效）', async () => {
+    const video = makeVideo()
+    video.currentTime = 30
+    const container = document.createElement('div')
+    container.appendChild(video)
+    document.body.appendChild(container)
+    const deps: AdSkipControllerDeps = {
+      timers: {
+        setTimeout: (h, ms) => setTimeout(h, ms) as unknown as number,
+        clearTimeout: (id) => clearTimeout(id),
+        setInterval: (h, ms) => setInterval(h, ms) as unknown as number,
+        clearInterval: (id) => clearInterval(id),
+      },
+      now: () => 0,
+      player: {
+        findVideo: () => video,
+        waitForVideo: async () => video,
+        findPlayerContainer: () => container,
+        findProgressElement: () => null,
+      },
+      pageHref: () => 'https://www.bilibili.com/video/BV1xx411c7mD/',
+      isDark: () => false,
+      collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
+      collectSubtitles: async () => [],
+      collectDanmaku: async () => [],
+      collectComments: async () => [],
+      readSettings: async () => ({
+        ...DEFAULT_SETTINGS,
+        apiUrl: 'https://llm.example/v1',
+        model: 'm-1',
+        apiKey: 'k-1',
+        adSkipEnabled: true,
+      }),
+      createBackend: () => ({
+        detectAds: async () => ({ ads: [AD], source: 'rag' }),
+      }),
+      recordSkipped: vi.fn(async () => 30),
+      openOptions: vi.fn(),
+      readFeedback: async (_bvid, cid) =>
+        cid === 1
+          ? {
+              cid: 1,
+              notAds: [{ start: 100, end: 130 }],
+              missedAds: [{ start: 400, end: 430 }],
+              updatedAt: 1,
+            }
+          : null,
+      writeFeedback: vi.fn(async () => undefined),
+    }
+    const controller = new AdSkipController(deps)
+    await controller.start()
+    // 误报段被剔除、漏报段并入（confidence 1），镜像只含手动段。
+    expect(ui.ads).toEqual([
+      { start: 400, end: 430, product_name: '手动标记', ad_content: '', confidence: 1 },
+    ])
+  })
+
+  it('漏报两拍流：开始（浮 chip）→ 结束（并入可跳列表并持久化）；取消不落库', async () => {
+    const writeFeedback = vi.fn(async () => undefined)
+    const video = makeVideo()
+    video.currentTime = 30
+    const container = document.createElement('div')
+    container.appendChild(video)
+    document.body.appendChild(container)
+    const deps: AdSkipControllerDeps = {
+      timers: {
+        setTimeout: (h, ms) => setTimeout(h, ms) as unknown as number,
+        clearTimeout: (id) => clearTimeout(id),
+        setInterval: (h, ms) => setInterval(h, ms) as unknown as number,
+        clearInterval: (id) => clearInterval(id),
+      },
+      now: () => 0,
+      player: {
+        findVideo: () => video,
+        waitForVideo: async () => video,
+        findPlayerContainer: () => container,
+        findProgressElement: () => null,
+      },
+      pageHref: () => 'https://www.bilibili.com/video/BV1xx411c7mD/',
+      isDark: () => false,
+      collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
+      collectSubtitles: async () => [],
+      collectDanmaku: async () => [],
+      collectComments: async () => [],
+      readSettings: async () => ({
+        ...DEFAULT_SETTINGS,
+        apiUrl: 'https://llm.example/v1',
+        model: 'm-1',
+        apiKey: 'k-1',
+        adSkipEnabled: true,
+      }),
+      createBackend: () => ({
+        detectAds: async () => ({ ads: [], source: 'none' }),
+      }),
+      recordSkipped: vi.fn(async () => 30),
+      openOptions: vi.fn(),
+      readFeedback: async () => null,
+      writeFeedback,
+    }
+    const controller = new AdSkipController(deps)
+    await controller.start()
+    expect(ui.ads).toEqual([])
+
+    // 第一拍：记录起点，chip 浮出。
+    video.currentTime = 200
+    ui.actions.onStartMarkAd()
+    expect(ui.marking).toEqual({ active: true, start: 200, startText: '03:20' })
+
+    // 第二拍：播到广告结束，收终点。
+    video.currentTime = 245
+    ui.actions.onFinishMarkAd()
+    expect(ui.marking.active).toBe(false)
+    expect(ui.ads).toEqual([
+      { start: 200, end: 245, product_name: '手动标记', ad_content: '', confidence: 1 },
+    ])
+    await flushMicrotasks()
+    expect(writeFeedback).toHaveBeenCalledWith(
+      'BV1xx411c7mD',
+      expect.objectContaining({ missedAds: [{ start: 200, end: 245 }] }),
+    )
+
+    // 取消路径：不落库。
+    video.currentTime = 500
+    ui.actions.onStartMarkAd()
+    expect(ui.marking.active).toBe(true)
+    ui.actions.onCancelMarkAd()
+    expect(ui.marking.active).toBe(false)
+    await flushMicrotasks()
+    expect(writeFeedback).toHaveBeenCalledTimes(1)
   })
 })

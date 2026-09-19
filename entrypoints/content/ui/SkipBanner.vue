@@ -56,5 +56,13 @@ const countdownText = computed(() =>
     </span>
     <button type="button" class="bh-btn-skip" @click="ui.actions.onSkipNow()">马上跳</button>
     <button type="button" class="bh-btn-stay" @click="ui.actions.onStay()">这段想看</button>
+    <button
+      type="button"
+      class="bh-btn-stay"
+      title="从本视频移除该段并记住：不再自动跳"
+      @click="ui.actions.onMarkNotAd(ui.banner.key)"
+    >
+      不是广告
+    </button>
   </div>
 </template>

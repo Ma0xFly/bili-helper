@@ -8,6 +8,7 @@ import SavedChip from './SavedChip.vue'
 import VectorHint from './VectorHint.vue'
 import ProgressMarks from './ProgressMarks.vue'
 import ChapterMarks from './ChapterMarks.vue'
+import MarkingChip from './MarkingChip.vue'
 import { ui } from '../../../modules/content/ui-state'
 
 const overlayStyle = computed(() => {
@@ -30,6 +31,7 @@ const overlayStyle = computed(() => {
       <SkipBanner />
       <SavedChip />
       <VectorHint />
+      <MarkingChip />
     </div>
   </div>
 </template>
