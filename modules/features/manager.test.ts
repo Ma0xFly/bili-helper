@@ -97,19 +97,19 @@ describe('FeatureManager', () => {
   it('SPA 首页 → 视频页：首页功能 stop，视频页功能 start；回到首页再互换', async () => {
     const h = await makeHarness(HOME)
     const filter = h.register('videoFilter')
-    const split = h.register('leftRightSplitScreen')
+    const rate = h.register('steplessVideoRate')
     await h.manager.start()
     expect(filter.started).toBe(1)
-    expect(split.started).toBe(0)
+    expect(rate.started).toBe(0)
 
     h.href = VIDEO
     h.manager.sync()
     expect(filter.stopped).toBe(1)
-    expect(split.started).toBe(1)
+    expect(rate.started).toBe(1)
 
     h.href = HOME
     h.manager.sync()
-    expect(split.stopped).toBe(1)
+    expect(rate.stopped).toBe(1)
     expect(filter.started).toBe(2) // 跨面回来：用新配置重建
   })
 

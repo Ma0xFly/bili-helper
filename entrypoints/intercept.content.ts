@@ -13,7 +13,6 @@ import {
 } from '../modules/features/intercept/runtime'
 import { installFetchPatch, installXhrPatch } from '../modules/features/intercept/install'
 import { videoFilterInterceptorRegistration } from '../modules/features/filter/feed-interceptor'
-import { refreshHistoryRegistration } from '../modules/features/enhance/refresh-history'
 import { commentIpRegistration } from '../modules/features/enhance/comment-ip'
 
 export default defineContentScript({
@@ -30,10 +29,9 @@ export default defineContentScript({
     installFetchPatch(runtime, window)
     installXhrPatch(runtime, window.XMLHttpRequest, window)
 
-    // 功能拦截器注册表：视频筛选（首页推荐流）、换一换历史（回放短路）、评论 IP 属地。
+    // 功能拦截器注册表：视频筛选（首页推荐流）、评论 IP 属地。
     const registrations: InterceptorFactoryRegistration[] = [
       videoFilterInterceptorRegistration,
-      refreshHistoryRegistration,
       commentIpRegistration,
     ]
 

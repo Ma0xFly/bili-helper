@@ -132,12 +132,12 @@ describe('buildInterceptors', () => {
               ? interceptorOf({ id: 'feed-filter', match: () => true })
               : null,
         },
-        { featureId: 'homepageRefreshHistory', build: () => null },
+        { featureId: 'commentIpLocation', build: () => null },
       ],
       {
         videoFilter: { enabled: true, config: {} },
-        homepageRefreshHistory: { enabled: true, config: {} },
-        commentIpLocation: { enabled: true, config: {} }, // 未登记工厂：忽略
+        commentIpLocation: { enabled: true, config: {} },
+        steplessVideoRate: { enabled: true, config: {} }, // 未登记工厂：忽略
       },
     )
     expect(built.map((item) => item.id)).toEqual(['feed-filter'])

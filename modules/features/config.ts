@@ -1,12 +1,12 @@
-// 功能配置单一来源（第二阶段：过滤视频 / 布局优化 / 功能增强）。
+// 功能配置单一来源（第二阶段：过滤视频 / 功能增强；布局优化与换一换历史按产品裁决移除）。
 // 形状沿用旧产物验证过的两层结构：`biliHelperFeatures` 存 `{ [featureId]: { ...配置, enabled } }`、
 // `biliHelperFeatureStats` 存 `{ [featureId]: { statsDate, totalBlocked } }`（跨日自动归零）。
 // 纪律与 settings/user-corpus 一致：其他层禁止直接读写这两个键自造形状；
 // 读侧一律归一（脏数据不落库、不炸功能），写侧读改写串行化（并发开关不互相覆盖），
 // 写失败必须上抛——静默成功会让界面报「已保存」而实际什么都没存下。
-// 全部功能默认关闭（含旧版默认开的左右分屏：新装不该突然改布局，PRD §9 假设 1）。
+// 全部功能默认关闭。历史存储里可能残留已移除功能的键：读侧只认注册表，残留被自然忽略。
 
-export type FeatureGroupId = 'filter' | 'layout' | 'enhance'
+export type FeatureGroupId = 'filter' | 'enhance'
 export type FeatureAppliesTo = '首页' | '视频页'
 
 export const FEATURE_STORAGE_KEY = 'biliHelperFeatures'
@@ -17,7 +17,6 @@ export const FEATURE_STORAGE_STEP_TIMEOUT_MS = 10_000
 
 export const FEATURE_GROUPS: { id: FeatureGroupId; title: string }[] = [
   { id: 'filter', title: '过滤视频' },
-  { id: 'layout', title: '布局优化' },
   { id: 'enhance', title: '功能增强' },
 ]
 
@@ -39,20 +38,6 @@ export interface VideoFilterConfig {
   pubdateMaxDays: number | null
 }
 
-export type SplitScreenTab = 'detail' | 'ai' | 'comment' | 'danmaku' | 'recommend' | 'playlist'
-
-export interface SplitScreenConfig {
-  autoActivate: boolean
-  activeTab: SplitScreenTab
-  highlightControlButton: boolean
-}
-
-export interface MinimalHomepageConfig {
-  backgroundSource: 'url' | 'local'
-  backgroundUrl: string
-  backgroundVersion: number
-}
-
 export interface SteplessRateConfig {
   rate: number
 }
@@ -63,11 +48,7 @@ export interface FeatureConfigShapes {
   adVideoBlocker: Record<string, never>
   promotedVideoBlocker: Record<string, never>
   labelVideoBlocker: Record<string, never>
-  leftRightSplitScreen: SplitScreenConfig
-  rightSideComment: Record<string, never>
-  minimalHomepage: MinimalHomepageConfig
   steplessVideoRate: SteplessRateConfig
-  homepageRefreshHistory: Record<string, never>
   commentIpLocation: Record<string, never>
 }
 
@@ -124,12 +105,6 @@ function asBool(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
 }
 
-function asHttpsUrl(value: unknown, fallback: string): string {
-  if (typeof value !== 'string') return fallback
-  const trimmed = value.trim()
-  return /^https:\/\//u.test(trimmed) ? trimmed : fallback
-}
-
 // ---------- 功能注册表 ----------
 
 const EMPTY_CONFIG_NORMALIZER = (): Record<string, never> => ({})
@@ -172,28 +147,6 @@ const VIDEO_FILTER_DEFAULTS: VideoFilterConfig = {
   likeRateMax: null,
   pubdateMinDays: null,
   pubdateMaxDays: null,
-}
-
-function normalizeSplitScreen(raw: unknown): SplitScreenConfig {
-  const source = asRecord(raw)
-  const tabs: SplitScreenTab[] = ['detail', 'ai', 'comment', 'danmaku', 'recommend', 'playlist']
-  const tab = source.activeTab
-  return {
-    autoActivate: asBool(source.autoActivate, false),
-    activeTab: typeof tab === 'string' && (tabs as string[]).includes(tab) ? (tab as SplitScreenTab) : 'detail',
-    highlightControlButton: asBool(source.highlightControlButton, false),
-  }
-}
-
-export const MINIMAL_HOMEPAGE_DEFAULT_BACKGROUND = 'https://t.alcy.cc/ycy'
-
-function normalizeMinimalHomepage(raw: unknown): MinimalHomepageConfig {
-  const source = asRecord(raw)
-  return {
-    backgroundSource: source.backgroundSource === 'local' ? 'local' : 'url',
-    backgroundUrl: asHttpsUrl(source.backgroundUrl, MINIMAL_HOMEPAGE_DEFAULT_BACKGROUND),
-    backgroundVersion: asInt(source.backgroundVersion, 0) ?? 0,
-  }
 }
 
 export const STEPLESS_RATE_MIN = 0.1
@@ -247,40 +200,6 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,
   },
-  leftRightSplitScreen: {
-    id: 'leftRightSplitScreen',
-    group: 'layout',
-    title: '左右分屏',
-    description: '在播放器控制栏新增「左右分屏」按钮，左侧沉浸播放，右侧以标签页展示详情、评论、AI 助手等内容。',
-    appliesTo: '视频页',
-    counted: false,
-    defaults: { autoActivate: false, activeTab: 'detail', highlightControlButton: false },
-    normalize: normalizeSplitScreen,
-  },
-  rightSideComment: {
-    id: 'rightSideComment',
-    group: 'layout',
-    title: '右侧评论',
-    description: '开启后自动将评论区移至播放器右侧，实现边看视频边浏览评论。',
-    appliesTo: '视频页',
-    counted: false,
-    defaults: {},
-    normalize: EMPTY_CONFIG_NORMALIZER,
-  },
-  minimalHomepage: {
-    id: 'minimalHomepage',
-    group: 'layout',
-    title: '极简首页',
-    description: '首页只保留搜索框，隐藏信息流；支持自定义背景（图片 URL 或本地上传）。',
-    appliesTo: '首页',
-    counted: false,
-    defaults: {
-      backgroundSource: 'url',
-      backgroundUrl: MINIMAL_HOMEPAGE_DEFAULT_BACKGROUND,
-      backgroundVersion: 0,
-    },
-    normalize: normalizeMinimalHomepage,
-  },
   steplessVideoRate: {
     id: 'steplessVideoRate',
     group: 'enhance',
@@ -290,16 +209,6 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     counted: false,
     defaults: { rate: 1 },
     normalize: normalizeSteplessRate,
-  },
-  homepageRefreshHistory: {
-    id: 'homepageRefreshHistory',
-    group: 'enhance',
-    title: '换一换历史',
-    description: '记录首页「换一换」历史，支持前进、后退和页码提示。',
-    appliesTo: '首页',
-    counted: false,
-    defaults: {},
-    normalize: EMPTY_CONFIG_NORMALIZER,
   },
   commentIpLocation: {
     id: 'commentIpLocation',

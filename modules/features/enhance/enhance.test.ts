@@ -10,7 +10,6 @@ import {
   isLivePage,
   normalizeRate,
 } from './stepless-rate'
-import { createRefreshHistoryRuntime, HISTORY_CAP } from './refresh-history'
 import { cleanLocation, collectLocations, createCommentIpRuntime } from './comment-ip'
 
 beforeEach(() => {
@@ -79,99 +78,6 @@ describe('无级倍速', () => {
     expect(document.querySelector('[data-bili-helper-rate-slider]')).toBeNull()
   })
 })
-
-describe('换一换历史', () => {
-  function makeHome(): void {
-    document.body.innerHTML = `
-      <div class="recommended-container_floor-aside"><div class="container">
-        <button class="feed-roll-btn">换一换</button>
-        <div class="feed-card">第一批 A</div>
-        <div class="feed-card">第一批 B</div>
-      </div></div>`
-  }
-
-  it('pointerdown 快照当前批 → response 批次入史；页码与禁用态正确', async () => {
-    makeHome()
-    const runtime = createRefreshHistoryRuntime(() => document, () => 'https://www.bilibili.com/')
-    runtime.startUi()
-    try {
-    // 首页轮询装配面板。
-    await new Promise((resolve) => setTimeout(resolve, 1600))
-    const panel = document.getElementById('bili-helper-homepage-refresh-history')
-    expect(panel).not.toBeNull()
-    expect(panel?.querySelector('.bili-helper-history-indicator')?.textContent).toBe('0/0')
-
-    // 点「换一换」前快照 DOM 批。
-    document.querySelector('.feed-roll-btn')?.dispatchEvent(new Event('pointerdown', { bubbles: true }))
-    expect(panel?.querySelector('.bili-helper-history-indicator')?.textContent).toBe('1/1')
-    // 接口响应入史：当前位置即最新批（2/2），后退可用、前进禁用。
-    runtime.afterResponse!({ url: 'x', method: 'GET', status: 200, responseJson: { data: { item: [] } } })
-    expect(panel?.querySelector('.bili-helper-history-indicator')?.textContent).toBe('2/2')
-
-    // 后退可用（index 1 → 0），前进禁用。
-    const [up, down] = [...panel!.querySelectorAll('button')] as [HTMLButtonElement, HTMLButtonElement]
-    expect(up.disabled).toBe(false)
-    expect(down.disabled).toBe(true)
-    } finally {
-      runtime.stopUi()
-    }
-  })
-
-  it('DOM 回放恢复上一批内容；回放走短路缓存不发真实请求', async () => {
-    makeHome()
-    const runtime = createRefreshHistoryRuntime(() => document, () => 'https://www.bilibili.com/')
-    runtime.startUi()
-    try {
-    await new Promise((resolve) => setTimeout(resolve, 1600))
-    const cards = () => [...document.querySelectorAll('.feed-card')].map((c) => c.textContent)
-    const first = cards()
-
-    // 快照第一批 → DOM 换成第二批 → 后退应还原第一批。
-    document.querySelector('.feed-roll-btn')?.dispatchEvent(new Event('pointerdown', { bubbles: true }))
-    for (const card of document.querySelectorAll('.feed-card')) card.textContent = '第二批'
-    runtime.afterResponse!({ url: 'x', method: 'GET', status: 200, responseJson: { data: { item: [] } } })
-
-    const panel = document.getElementById('bili-helper-homepage-refresh-history')!
-    const up = panel.querySelector('button') as HTMLButtonElement
-    up.click()
-    expect(cards()).toEqual(first)
-
-    // response 型回放：入 response 批（i=1）→ 后退（i=0）→ 前进回放该批 → 短路器交出缓存。
-    runtime.afterResponse!({ url: 'x', method: 'GET', status: 200, responseJson: { cached: true } })
-    up!.click()
-    ;(panel.querySelectorAll('button')[1] as HTMLButtonElement)!.click()
-    const shorted = runtime.shortCircuit!({ url: FEED, method: 'GET', body: null })
-    expect(shorted).toMatchObject({ responseJson: { cached: true } })
-    // 回放伪造的 pointerdown 不入史（页码不虚涨）。
-    expect(panel.querySelector('.bili-helper-history-indicator')?.textContent).toBe('2/2')
-    } finally {
-      runtime.stopUi()
-    }
-  })
-
-  it('上限 30 批淘汰最旧；后退后再换新截断后续', async () => {
-    makeHome()
-    const runtime = createRefreshHistoryRuntime(() => document, () => 'https://www.bilibili.com/')
-    runtime.startUi()
-    try {
-    await new Promise((resolve) => setTimeout(resolve, 1600))
-    const panel = document.getElementById('bili-helper-homepage-refresh-history')!
-    for (let i = 0; i < HISTORY_CAP + 5; i += 1) {
-      runtime.afterResponse!({ url: 'x', method: 'GET', status: 200, responseJson: { i } })
-    }
-    expect(panel.querySelector('.bili-helper-history-indicator')?.textContent).toBe(`${HISTORY_CAP}/${HISTORY_CAP}`)
-    // 后退一步再入新批：截断后续（长度不变），当前位置回到末尾前一位处推进。
-    ;(panel.querySelector('button') as HTMLButtonElement)!.click()
-    expect(panel.querySelector('.bili-helper-history-indicator')?.textContent).toBe(`${HISTORY_CAP - 1}/${HISTORY_CAP}`)
-    runtime.afterResponse!({ url: 'x', method: 'GET', status: 200, responseJson: { fresh: true } })
-    expect(panel.querySelector('.bili-helper-history-indicator')?.textContent).toBe(`${HISTORY_CAP - 1}/${HISTORY_CAP}`)
-    } finally {
-      runtime.stopUi()
-    }
-  })
-})
-
-const FEED = 'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?fresh_type=3'
 
 describe('评论 IP 属地', () => {
   it('属地清洗与递归收集（replies/top_replies/top.upper）', () => {

@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   FEATURE_IDS,
   FEATURE_REGISTRY,
-  MINIMAL_HOMEPAGE_DEFAULT_BACKGROUND,
   clearFeatureStorage,
   bumpFeatureStat,
   readFeatureConfig,
@@ -19,10 +18,10 @@ beforeEach(async () => {
 })
 
 describe('功能注册表', () => {
-  it('11 个功能、三个分组齐全；全部默认关闭（含旧版默认开的左右分屏）', () => {
-    expect(FEATURE_IDS).toHaveLength(10)
+  it('6 个功能、两个分组齐全（布局优化与换一换历史已按产品裁决移除）；全部默认关闭', () => {
+    expect(FEATURE_IDS).toHaveLength(6)
     const groups = new Set(FEATURE_IDS.map((id) => FEATURE_REGISTRY[id].group))
-    expect([...groups].sort()).toEqual(['enhance', 'filter', 'layout'])
+    expect([...groups].sort()).toEqual(['enhance', 'filter'])
     for (const id of FEATURE_IDS) {
       const entry = FEATURE_REGISTRY[id]
       expect(entry.title.length).toBeGreaterThan(0)
@@ -41,7 +40,6 @@ describe('读取：默认值与脏值归一', () => {
     const map = await readFeatureConfigs()
     expect(map.steplessVideoRate).toEqual({ config: { rate: 1 }, enabled: false })
     expect(map.videoFilter.config.titleKeywords).toEqual([])
-    expect(map.leftRightSplitScreen.config.activeTab).toBe('detail')
     // 不落库：存储里没有该键。
     const raw = await chrome.storage.local.get(null)
     expect(Object.keys(raw)).toEqual([])
@@ -79,27 +77,7 @@ describe('读取：默认值与脏值归一', () => {
     })
   })
 
-  it('极简首页：背景只接受 https，非法回落默认', async () => {
-    await chrome.storage.local.set({
-      biliHelperFeatures: {
-        minimalHomepage: { config: { backgroundUrl: 'http://insecure.example/x.png' }, enabled: true },
-      },
-    })
-    const entry = await readFeatureConfig('minimalHomepage')
-    expect(entry.config.backgroundUrl).toBe(MINIMAL_HOMEPAGE_DEFAULT_BACKGROUND)
-    expect(entry.config.backgroundSource).toBe('url')
-    expect(entry.enabled).toBe(true)
-  })
 
-  it('分屏配置：非法标签回落 detail，布尔字段脏值回落默认', async () => {
-    await chrome.storage.local.set({
-      biliHelperFeatures: {
-        leftRightSplitScreen: { config: { activeTab: 'nope', autoActivate: 1 }, enabled: true },
-      },
-    })
-    const entry = await readFeatureConfig('leftRightSplitScreen')
-    expect(entry.config).toEqual({ autoActivate: false, activeTab: 'detail', highlightControlButton: false })
-  })
 })
 
 describe('写入：串行链与失败上抛', () => {
@@ -112,15 +90,15 @@ describe('写入：串行链与失败上抛', () => {
   })
 
   it('并发两次写同一功能不互相覆盖（链内串行读改写）', async () => {
-    await setFeatureEnabled('steplessVideoRate', true)
+    await setFeatureEnabled('videoFilter', true)
     // 两个并发 patch 各改一个字段，最终两个字段都在。
     await Promise.all([
-      writeFeatureConfig('leftRightSplitScreen', { autoActivate: true, enabled: true }),
-      writeFeatureConfig('leftRightSplitScreen', { activeTab: 'comment' }),
+      writeFeatureConfig('videoFilter', { titleKeywords: ['广告'] }),
+      writeFeatureConfig('videoFilter', { authorBlacklist: ['某UP'] }),
     ])
-    const entry = await readFeatureConfig('leftRightSplitScreen')
-    expect(entry.config.autoActivate).toBe(true)
-    expect(entry.config.activeTab).toBe('comment')
+    const entry = await readFeatureConfig('videoFilter')
+    expect(entry.config.titleKeywords).toEqual(['广告'])
+    expect(entry.config.authorBlacklist).toEqual(['某UP'])
     expect(entry.enabled).toBe(true)
   })
 

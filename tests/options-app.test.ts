@@ -847,7 +847,7 @@ describe('功能分组（Epic1-S1.4）', () => {
     const wrapper = mount(App)
     await flushPromises()
     const navTexts = wrapper.findAll('button.sidebar-item').map((item) => item.text())
-    expect(navTexts).toEqual(['AI 助手', '过滤视频', '布局优化', '功能增强'])
+    expect(navTexts).toEqual(['AI 助手', '过滤视频', '功能增强'])
 
     await openGroup(wrapper, '过滤视频')
     const names = wrapper.findAll('.switch-name').map((item) => item.text())
@@ -865,16 +865,16 @@ describe('功能分组（Epic1-S1.4）', () => {
   it('切换开关即时持久化到 biliHelperFeatures 并回显成功反馈', async () => {
     const wrapper = mount(App)
     await flushPromises()
-    await openGroup(wrapper, '布局优化')
-    const splitSwitch = wrapper.find('input[aria-label="左右分屏开关"]')
-    expect(splitSwitch.exists()).toBe(true)
-    await splitSwitch.setValue(true)
+    await openGroup(wrapper, '功能增强')
+    const rateSwitch = wrapper.find('input[aria-label="无级倍速开关"]')
+    expect(rateSwitch.exists()).toBe(true)
+    await rateSwitch.setValue(true)
     await flushPromises()
     const stored = (await chrome.storage.local.get('biliHelperFeatures')) as {
       biliHelperFeatures: Record<string, { enabled: boolean } | undefined>
     }
-    expect(stored.biliHelperFeatures.leftRightSplitScreen?.enabled).toBe(true)
-    expect(wrapper.text()).toContain('已开启左右分屏')
+    expect(stored.biliHelperFeatures.steplessVideoRate?.enabled).toBe(true)
+    expect(wrapper.text()).toContain('已开启无级倍速')
   })
 
   it('今日拦截徽标：统计 >0 才显示，未计数的功能不显示', async () => {
