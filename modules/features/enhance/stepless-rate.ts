@@ -42,6 +42,7 @@ export function createSteplessRateRuntime(options: {
   let style: HTMLStyleElement | null = null
   let menuTimer: number | undefined
   let menuRetries = 0
+  let menuObserver: MutationObserver | null = null
   let observer: MutationObserver | null = null
   let ratechangeHandler: ((event: Event) => void) | null = null
 
@@ -81,12 +82,21 @@ export function createSteplessRateRuntime(options: {
     if (result !== null) result.textContent = formatRateLabel(rate)
   }
 
+  /** 菜单懒挂载观察器：B 站倍速菜单常在首次打开时才渲染，等它出现即注入。 */
+  const watchForMenu = (): void => {
+    if (menuObserver !== null) return
+    menuObserver = new MutationObserver(() => injectMenu())
+    menuObserver.observe(doc.documentElement, { childList: true, subtree: true })
+  }
+
   const injectMenu = (): void => {
     const menu = doc.querySelector(MENU_SELECTOR)
     if (menu === null) {
       if (menuRetries < MENU_RETRY_MAX) {
         menuRetries += 1
         menuTimer = window.setTimeout(injectMenu, MENU_RETRY_MS)
+      } else {
+        watchForMenu() // 重试用尽改为观察器：菜单一旦渲染立刻注入
       }
       return
     }
@@ -165,6 +175,8 @@ export function createSteplessRateRuntime(options: {
     stop(): void {
       if (menuTimer !== undefined) window.clearTimeout(menuTimer)
       menuTimer = undefined
+      menuObserver?.disconnect()
+      menuObserver = null
       observer?.disconnect()
       observer = null
       if (ratechangeHandler !== null) {

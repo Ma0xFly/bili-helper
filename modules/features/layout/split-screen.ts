@@ -267,8 +267,7 @@ export function createSplitScreenRuntime(options: { doc?: Document } = {}): {
   const ensureButton = (): void => {
     if (button?.isConnected === true) return
     const host = doc.querySelector('.bpx-player-control-bottom-right')
-    const pip = doc.querySelector('.bpx-player-ctrl-pip')
-    if (host === null || pip === null) {
+    if (host === null) {
       if (retryCount < BUTTON_RETRY_MAX) {
         retryCount += 1
         retryTimer = window.setTimeout(ensureButton, BUTTON_RETRY_MS)
@@ -282,7 +281,10 @@ export function createSplitScreenRuntime(options: { doc?: Document } = {}): {
     button.setAttribute('aria-label', '左右分屏')
     button.textContent = '分屏'
     button.addEventListener('click', () => (active ? deactivate() : activate()))
-    pip.after(button)
+    // 锚点：画中画按钮之后；新版没有 pip 就直接挂控制栏末尾。
+    const pip = doc.querySelector('.bpx-player-ctrl-pip')
+    if (pip !== null) pip.after(button)
+    else host.append(button)
   }
 
   return {
