@@ -71,7 +71,7 @@ const AI_PAGES: AiPage[] = [
   { key: 'switches', label: '总开关' },
   { key: 'detect', label: '去广告识别' },
   { key: 'corpus', label: '广告词库' },
-  { key: 'backup', label: '配置方案与备份' },
+  { key: 'backup', label: '备份' },
   { key: 'diagnostics', label: '诊断' },
 ]
 
@@ -862,7 +862,7 @@ onMounted(loadFailures)
         <header class="content-head">
           <div class="head-main">
             <h1>连接</h1>
-            <p class="content-sub">配置 AI 端点：总结 / 提问走这里；也可以把请求转发到自己的服务器。</p>
+            <p class="content-sub">配置 AI 端点与转发方式；多套连接可存成命名方案一键换家（方案只含连接字段，不含功能开关）。</p>
           </div>
           <ul class="status-chips" aria-label="当前配置状态">
             <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
@@ -1042,6 +1042,44 @@ onMounted(loadFailures)
               </div>
             </template>
           </section>
+          <section class="card" aria-labelledby="profiles-title">
+              <h2 id="profiles-title" class="card-title">配置方案</h2>
+              <p class="card-note">
+                把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
+              </p>
+              <div class="profile-row">
+                <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
+                  <option value="" disabled>暂无方案，先在下面保存一个</option>
+                  <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
+                    {{ profile.name }}
+                  </option>
+                </select>
+                <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onApplyProfile">
+                  应用
+                </button>
+                <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
+                  删除
+                </button>
+              </div>
+              <div class="profile-row">
+                <input
+                  v-model="profileName"
+                  type="text"
+                  placeholder="方案名，如：硅基流动·本地直连"
+                  aria-label="方案名称"
+                  class="grow"
+                />
+                <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
+                  存为方案
+                </button>
+              </div>
+              <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">
+                <span class="badge" aria-hidden="true">
+                  {{ profileHint.kind === 'ok' ? '✓' : profileHint.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ profileHint.text }}</span>
+              </div>
+            </section>
 
         <div class="actions">
           <button type="button" class="primary" @click="save">保存设置</button>
@@ -1166,7 +1204,7 @@ onMounted(loadFailures)
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
           <section class="card" aria-labelledby="advanced-title">
-            <h2 id="advanced-title" class="card-title">高级</h2>
+            <h2 id="advanced-title" class="card-title">向量端点与去广告端点</h2>
             <button
               type="button"
               class="ghost"
@@ -1477,11 +1515,11 @@ onMounted(loadFailures)
           </section>
       </section>
 
-      <section v-show="active === 'backup'" class="page" aria-label="配置方案与备份">
+      <section v-show="active === 'backup'" class="page" aria-label="备份">
         <header class="content-head">
           <div class="head-main">
             <h1>配置方案与备份</h1>
-            <p class="content-sub">多套连接存成命名方案一键换家；整套配置（端点 / 规则 / 词库 / 纠错）可导出成一份文件带走。</p>
+            <p class="content-sub">整套配置（端点 / 规则 / 词库 / 纠错）导出成一份文件：换浏览器、重装、多设备同步都用得上。</p>
           </div>
           <ul class="status-chips" aria-label="当前配置状态">
             <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
@@ -1502,44 +1540,7 @@ onMounted(loadFailures)
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
-          <section class="card" aria-labelledby="profiles-title">
-            <h2 id="profiles-title" class="card-title">配置方案</h2>
-            <p class="card-note">
-              把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
-            </p>
-            <div class="profile-row">
-              <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
-                <option value="" disabled>暂无方案，先在下面保存一个</option>
-                <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
-                  {{ profile.name }}
-                </option>
-              </select>
-              <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onApplyProfile">
-                应用
-              </button>
-              <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
-                删除
-              </button>
-            </div>
-            <div class="profile-row">
-              <input
-                v-model="profileName"
-                type="text"
-                placeholder="方案名，如：硅基流动·本地直连"
-                aria-label="方案名称"
-                class="grow"
-              />
-              <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
-                存为方案
-              </button>
-            </div>
-            <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">
-              <span class="badge" aria-hidden="true">
-                {{ profileHint.kind === 'ok' ? '✓' : profileHint.kind === 'warn' ? '!' : '✕' }}
-              </span>
-              <span>{{ profileHint.text }}</span>
-            </div>
-          </section>
+  
           <section class="card" aria-labelledby="backup-title">
             <h2 id="backup-title" class="card-title">配置备份（导出 / 导入）</h2>
             <p class="card-note">
@@ -2117,7 +2118,6 @@ select:focus {
 button {
   font-family: inherit;
 }
-
 
 .ghost {
   border: 1px solid var(--bh-border-hairline);
