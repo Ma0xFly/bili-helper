@@ -1036,3 +1036,83 @@ describe('筛选规则面板（Epic2-S2.6）', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('配置备份（导出 / 导入）', () => {
+  it('导出：默认不含密钥（文件里不出现 Key 明文），可选择包含密钥', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: {
+        apiUrl: 'https://chat.example/v1',
+        model: 'm-1',
+        apiKey: 'sk-top-secret',
+        serverToken: 'tok-top-secret',
+      },
+    })
+    const written: string[] = []
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText: vi.fn(async (text: string) => written.push(text)) },
+      configurable: true,
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await findButton(wrapper, '导出备份').trigger('click')
+    await flushPromises()
+
+    const textarea = wrapper.find('textarea[aria-label="备份内容"]')
+    const text = (textarea.element as HTMLTextAreaElement).value
+    expect(text).toContain('bili-helper-backup')
+    expect(text).toContain('https://chat.example/v1')
+    expect(text).not.toContain('sk-top-secret')
+    expect(text).not.toContain('tok-top-secret')
+    expect(written[0]).toBe(text) // 同时写入剪贴板
+
+    // 勾选「包含密钥」再导出：明文出现 + 黄灯警示。
+    await wrapper.find('input[aria-label="导出时包含密钥"]').setValue(true)
+    await findButton(wrapper, '导出备份').trigger('click')
+    await flushPromises()
+    const withSecrets = (wrapper.find('textarea[aria-label="备份内容"]').element as HTMLTextAreaElement).value
+    expect(withSecrets).toContain('sk-top-secret')
+    expect(wrapper.findAll('.feedback.warn').length).toBeGreaterThan(0)
+  })
+
+  it('导入：坏 JSON 红灯；合法备份落库并回填表单、同步词库列表', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    const textarea = wrapper.find('textarea[aria-label="备份内容"]')
+
+    await textarea.setValue('{ not json')
+    await findButton(wrapper, '导入备份').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('不是合法的 JSON 文本')
+
+    const payload = {
+      format: 'bili-helper-backup',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      withSecrets: false,
+      ai: { apiUrl: 'https://imported.example/v1', model: 'm-imported', apiKey: '' },
+      features: {
+        videoFilter: {
+          enabled: true,
+          config: { titleKeywords: ['带货'], authorBlacklist: [], durationMinSeconds: 300 },
+        },
+      },
+      corpus: [{ text: '限时国补', category: 'deals', kind: 'deal', weight: 2, note: '', createdAt: 'x', hitCount: 0, lastHitAt: '' }],
+      adFeedback: {},
+    }
+    await textarea.setValue(JSON.stringify(payload))
+    await findButton(wrapper, '导入备份').trigger('click')
+    await flushPromises()
+
+    // 表单回填导入后的端点；词库列表出现导入词条；存储落库。
+    expect(inputValue(wrapper.find('input[type="url"]').element)).toBe('https://imported.example/v1')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('m-imported')
+    expect(wrapper.text()).toContain('限时国补')
+    const features = (await chrome.storage.local.get('biliHelperFeatures')) as {
+      biliHelperFeatures: { videoFilter?: { enabled: boolean; config: { titleKeywords: string[] } } }
+    }
+    expect(features.biliHelperFeatures.videoFilter?.enabled).toBe(true)
+    expect(features.biliHelperFeatures.videoFilter?.config.titleKeywords).toEqual(['带货'])
+    expect(wrapper.text()).toContain('已导入')
+  })
+})

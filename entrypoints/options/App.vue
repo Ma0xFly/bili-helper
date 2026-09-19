@@ -43,6 +43,11 @@ import {
   saveProfileFromCurrent,
 } from '../../modules/settings/profiles'
 import type { AiProfile } from '../../modules/settings/profiles'
+import {
+  applyBackup,
+  exportBackupText,
+  parseBackup,
+} from '../../modules/settings/backup'
 import { FEATURE_GROUPS } from '../../modules/features/config'
 import type { FeatureGroupId } from '../../modules/features/config'
 import FeaturesSection from './FeaturesSection.vue'
@@ -682,6 +687,86 @@ async function exportCorpus(): Promise<void> {
   }
 }
 
+// ---------- 配置备份（导出 / 导入）----------
+// 一键带走：AI 端点与方案、功能开关与八维规则、补录词库、误判反馈。
+// 密钥默认打码（空串 = 导入时保留本机现有 Key），勾选后才随文件明文导出。
+const backupIncludeSecrets = ref(false)
+const backupText = ref('')
+const backupBusy = ref(false)
+const backupHint = ref<Feedback | null>(null)
+
+async function onExportBackup(): Promise<void> {
+  backupBusy.value = true
+  backupHint.value = null
+  try {
+    const text = await exportBackupText({ withSecrets: backupIncludeSecrets.value })
+    backupText.value = text
+    try {
+      await navigator.clipboard.writeText(text)
+      backupHint.value = {
+        kind: backupIncludeSecrets.value ? 'warn' : 'ok',
+        text: backupIncludeSecrets.value
+          ? '已导出并复制：文件含明文密钥，请妥善保管'
+          : '已导出并复制到剪贴板（密钥已打码，可放心共享）',
+      }
+    } catch {
+      backupHint.value = { kind: 'warn', text: '已生成备份，请在下方文本框手动复制保存' }
+    }
+  } catch (error) {
+    backupHint.value = {
+      kind: 'fail',
+      text: `导出失败：${error instanceof Error ? error.message : String(error)}`,
+    }
+  } finally {
+    backupBusy.value = false
+  }
+}
+
+async function onImportBackup(): Promise<void> {
+  const text = backupText.value.trim()
+  if (text === '') {
+    backupHint.value = { kind: 'fail', text: '先把备份内容粘贴到文本框（或选择一个备份文件）' }
+    return
+  }
+  backupBusy.value = true
+  backupHint.value = null
+  try {
+    const summary = await applyBackup(parseBackup(text))
+    applyStoredToForm(await readAiSettings())
+    await Promise.all([loadUserCorpus(), loadProfiles()])
+    const skippedNote =
+      summary.skipped.length > 0 ? `；跳过 ${summary.skipped.length} 项（${summary.skipped.join('；')}）` : ''
+    backupHint.value =
+      summary.applied.length > 0
+        ? { kind: 'ok', text: `已导入：${summary.applied.join('、')}${skippedNote}` }
+        : { kind: 'warn', text: `备份里没有可导入的内容${skippedNote}` }
+  } catch (error) {
+    backupHint.value = {
+      kind: 'fail',
+      text: `导入失败：${error instanceof Error ? error.message : String(error)}`,
+    }
+  } finally {
+    backupBusy.value = false
+  }
+}
+
+/** 选择备份文件 → 读进文本框（同一文件可重复选择：读完即清 input 值）。 */
+function onBackupFile(event: Event): void {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    backupText.value = String(reader.result ?? '')
+    backupHint.value = { kind: 'ok', text: `已读取「${file.name}」，点「导入」应用` }
+  }
+  reader.onerror = () => {
+    backupHint.value = { kind: 'fail', text: '文件读取失败' }
+  }
+  reader.readAsText(file)
+  input.value = ''
+}
+
 onMounted(loadUserCorpus)
 onMounted(loadFailures)
 </script>
@@ -1142,6 +1227,62 @@ onMounted(loadFailures)
               {{ corpusHint.kind === 'ok' ? '✓' : corpusHint.kind === 'warn' ? '!' : '✕' }}
             </span>
             <span>{{ corpusHint.text }}</span>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="backup-title">
+          <h2 id="backup-title" class="card-title">配置备份（导出 / 导入）</h2>
+          <p class="card-note">
+            一键带走：AI 端点与配置方案、功能开关与筛选规则、补录的广告词库、广告误判反馈。
+            换浏览器、重装、多设备同步都用得上。默认<b>不含密钥</b>（导入时保留本机已有的
+            Key），可放心共享；要连密钥一起搬再勾选下方选项。
+          </p>
+          <label class="switch-row">
+            <span class="switch-info">
+              <span class="switch-name">导出时包含密钥</span>
+              <span class="field-hint">
+                勾选后 API Key / Server Token 会以<b>明文</b>写入备份文件，请只在自己的设备间传递。
+              </span>
+            </span>
+            <span class="switch">
+              <input
+                v-model="backupIncludeSecrets"
+                type="checkbox"
+                aria-label="导出时包含密钥"
+              />
+              <span class="switch-track" aria-hidden="true" />
+              <span class="switch-knob" aria-hidden="true" />
+            </span>
+          </label>
+          <div class="corpus-actions">
+            <button type="button" class="ghost" :disabled="backupBusy" @click="onExportBackup">
+              {{ backupBusy ? '处理中…' : '导出备份' }}
+            </button>
+            <button type="button" class="ghost" :disabled="backupBusy" @click="onImportBackup">
+              导入备份
+            </button>
+            <label class="ghost backup-file">
+              选择备份文件
+              <input
+                type="file"
+                accept="application/json,.json"
+                aria-label="选择备份文件"
+                @change="onBackupFile"
+              />
+            </label>
+          </div>
+          <textarea
+            v-model="backupText"
+            class="corpus-patch"
+            rows="6"
+            placeholder="导出后在此显示备份内容（可直接复制保存）；导入时把备份粘贴到这里再点「导入备份」"
+            aria-label="备份内容"
+          />
+          <div v-if="backupHint" class="feedback" :class="backupHint.kind" aria-live="polite">
+            <span class="badge" aria-hidden="true">
+              {{ backupHint.kind === 'ok' ? '✓' : backupHint.kind === 'warn' ? '!' : '✕' }}
+            </span>
+            <span>{{ backupHint.text }}</span>
           </div>
         </section>
 
@@ -1647,6 +1788,23 @@ select:focus {
   line-height: 1.6;
   color: #4a4460;
   resize: vertical;
+}
+
+/* 备份卡片：文件选择伪装成 ghost 按钮（原生 input 不参与视觉）。 */
+.backup-file {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+}
+
+.backup-file input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .field-hint {
