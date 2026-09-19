@@ -897,3 +897,92 @@ describe('功能分组（Epic1-S1.4）', () => {
     expect(filterRow?.text()).not.toContain('今日拦截')
   })
 })
+
+describe('筛选规则面板（Epic2-S2.6）', () => {
+  async function openFilterGroupWithPanel(wrapper: ReturnType<typeof mount>): Promise<void> {
+    const nav = wrapper.findAll('button.sidebar-item').find((item) => item.text() === '过滤视频')
+    await nav!.trigger('click')
+    await flushPromises()
+    // 开启「视频筛选」让面板展开。
+    const toggle = wrapper.find('input[aria-label="视频筛选开关"]')
+    await toggle.setValue(true)
+    await flushPromises()
+  }
+
+  it('视频筛选开启后展开面板；关键字编辑→保存→配置持久化（分钟↔秒换算）', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    await openFilterGroupWithPanel(wrapper)
+    expect(wrapper.find('[aria-label="筛选规则"]').exists()).toBe(true)
+
+    const keywords = wrapper.find('textarea[aria-label="标题关键字黑名单"]')
+    await keywords.setValue('带货\n恰饭, 广告')
+    const durationMin = wrapper.find('input[aria-label="视频时长最小值"]')
+    await durationMin.setValue('2') // 分钟 → 存储为秒
+    await wrapper.find('button.primary').trigger('click')
+    await flushPromises()
+
+    const stored = (await chrome.storage.local.get('biliHelperFeatures')) as {
+      biliHelperFeatures: { videoFilter?: { config?: { titleKeywords?: string[]; durationMinSeconds?: number | null } } }
+    }
+    const config = stored.biliHelperFeatures.videoFilter?.config
+    expect(config?.titleKeywords).toEqual(['带货', '恰饭', '广告'])
+    expect(config?.durationMinSeconds).toBe(120)
+    expect(wrapper.text()).toContain('已保存并应用')
+  })
+
+  it('非法值阻止保存：负数/非整数天数/min>max 按字段报错', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+    await openFilterGroupWithPanel(wrapper)
+
+    await wrapper.find('input[aria-label="浏览量最小值"]').setValue('-5')
+    await flushPromises()
+    expect(wrapper.text()).toContain('请输入大于或等于 0 的数字')
+    const save = wrapper.findAll('button').find((b) => b.text().includes('保存并应用'))!
+    expect((save.element as HTMLButtonElement).disabled).toBe(true)
+
+    await wrapper.find('input[aria-label="浏览量最小值"]').setValue('100')
+    await wrapper.find('input[aria-label="浏览量最大值"]').setValue('50')
+    await flushPromises()
+    expect(wrapper.text()).toContain('浏览量最小值不能大于最大值')
+    expect((save.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('导入账号黑名单：分页拉取并合入（去重）', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        const target = String(url)
+        calls.push(target)
+        const page = target.includes('pn=2') ? 2 : 1
+        return new Response(
+          JSON.stringify({
+            data: {
+              list:
+                page === 1
+                  ? [{ mid: 1001, uname: '黑名单甲' }, { mid: 1002, uname: '黑名单乙' }]
+                  : [], // 第二页空 → 停止
+            },
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+    const wrapper = mount(App)
+    await flushPromises()
+    await openFilterGroupWithPanel(wrapper)
+
+    const importBtn = wrapper.findAll('button').find((b) => b.text().includes('导入账号黑名单'))!
+    await importBtn.trigger('click')
+    await flushPromises()
+    expect(calls[0]).toContain('/x/relation/blacks')
+    expect(calls).toHaveLength(1) // 不足一页即停，不多拉
+    const textarea = wrapper.find('textarea[aria-label="UP主黑名单"]')
+    expect((textarea.element as HTMLTextAreaElement).value).toContain('1001')
+    expect((textarea.element as HTMLTextAreaElement).value).toContain('黑名单甲')
+    expect(wrapper.text()).toContain('已导入 4 个账号黑名单')
+    vi.unstubAllGlobals()
+  })
+})
