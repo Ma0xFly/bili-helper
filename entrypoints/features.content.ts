@@ -19,6 +19,7 @@ import {
   createMinimalHomepageRuntime,
   type MinimalHomepageConfig,
 } from '../modules/features/layout/minimal-homepage'
+import { createSteplessRateRuntime } from '../modules/features/enhance/stepless-rate'
 
 /** FeatureConfigMap → 主世界线协议（纯 JSON；函数过不了 postMessage）。 */
 function toInterceptPayload(map: FeatureConfigMap): SerializedFeatureConfigs {
@@ -80,6 +81,7 @@ export default defineContentScript({
     manager.register('minimalHomepage', (entry) =>
       createMinimalHomepageRuntime({ config: entry.config as unknown as MinimalHomepageConfig }),
     )
+    manager.register('steplessVideoRate', () => createSteplessRateRuntime())
 
     await manager.start()
     await broadcastConfigs()
