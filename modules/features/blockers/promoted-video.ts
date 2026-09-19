@@ -6,6 +6,8 @@
 // 每批移除批量计入「今日拦截」。
 
 import { bumpFeatureStat } from '../config'
+import { appendFilterLogEntries } from '../filter/filter-log'
+import { cardLogEventOf } from './card-log'
 import { createCardBlocker, type CardBlocker } from './dom'
 
 /** 创意广告 svg 的类名。 */
@@ -28,8 +30,12 @@ export function createPromotedVideoBlocker(options: { root?: ParentNode } = {}):
     root: options.root,
     logName: 'promoted-video-blocker',
     match: isPromotedCardMarker,
-    onBlocked: (count) => {
+    onBlocked: (count, _phase, cards) => {
       void bumpFeatureStat('promotedVideoBlocker', count)
+      const events = cards
+        .map((card) => cardLogEventOf(card, '推广标识'))
+        .filter((event): event is NonNullable<typeof event> => event !== null)
+      appendFilterLogEntries(events)
     },
   })
 }

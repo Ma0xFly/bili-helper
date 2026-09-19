@@ -8,8 +8,9 @@ import { defineContentScript } from 'wxt/utils/define-content-script'
 import { FEATURE_IDS, FEATURE_STORAGE_KEY, readFeatureConfigs } from '../modules/features/config'
 import type { FeatureConfigMap } from '../modules/features/config'
 import { FeatureManager } from '../modules/features/manager'
-import { pushInterceptConfigs } from '../modules/features/intercept/protocol'
+import { onFilterLogEvent, pushInterceptConfigs } from '../modules/features/intercept/protocol'
 import type { SerializedFeatureConfigs } from '../modules/features/intercept/protocol'
+import { appendFilterLogEntries } from '../modules/features/filter/filter-log'
 import { createAdVideoBlocker } from '../modules/features/blockers/ad-video'
 import { createPromotedVideoBlocker } from '../modules/features/blockers/promoted-video'
 import { createLabelVideoBlocker } from '../modules/features/blockers/label-video'
@@ -30,6 +31,8 @@ export default defineContentScript({
     'https://www.bilibili.com/index.html',
     'https://www.bilibili.com/video/*',
     'https://www.bilibili.com/list/*',
+    'https://www.bilibili.com/v/popular/*',
+    'https://search.bilibili.com/*',
   ],
   async main() {
     // 主世界拦截器需要配置（videoFilter 的规则、换一换的开关…），但主世界没有 chrome API：
@@ -71,6 +74,9 @@ export default defineContentScript({
     manager.register('promotedVideoBlocker', () => createPromotedVideoBlocker())
     manager.register('labelVideoBlocker', () => createLabelVideoBlocker())
     manager.register('steplessVideoRate', () => createSteplessRateRuntime())
+
+    // 主世界拦截明细回传（videoFilter 命中）→ 隔离侧落库（主世界没有 chrome.storage）。
+    onFilterLogEvent(window, (entry) => appendFilterLogEntries([entry]))
 
     await manager.start()
     await broadcastConfigs()

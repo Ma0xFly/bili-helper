@@ -13,6 +13,7 @@ import {
 } from '../../modules/features/config'
 import type { FeatureEntry, FeatureGroupId, FeatureId } from '../../modules/features/config'
 import FilterRulesPanel from './FilterRulesPanel.vue'
+import FilterLogPanel from './FilterLogPanel.vue'
 
 const props = defineProps<{ groupId: FeatureGroupId }>()
 
@@ -77,7 +78,7 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
       <span class="switch-info">
         <span class="switch-name">
           {{ feature.title }}
-          <span class="applies-tag">{{ feature.appliesTo }}</span>
+          <span class="applies-tag">{{ feature.appliesTo.join(' / ') }}</span>
           <span
             v-if="feature.counted && (blockedToday[feature.id] ?? 0) > 0"
             class="stat-badge"
@@ -98,8 +99,10 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
         <span class="switch-knob" aria-hidden="true" />
       </span>
     </label>
-    <!-- 视频筛选开启后展开规则面板（关闭时收起，开关与规则一体）。 -->
+    <!-- 视频筛选开启后展开规则面板（关闭时收起，开关与规则一体）；
+         拦截明细面板常驻（有明细才知道规则拦了什么、为什么）。 -->
     <FilterRulesPanel v-if="groupId === 'filter' && entries.videoFilter?.enabled" />
+    <FilterLogPanel v-if="groupId === 'filter'" />
     <p v-if="hint" class="section-hint" :class="hint.kind" aria-live="polite">{{ hint.text }}</p>
   </section>
 </template>

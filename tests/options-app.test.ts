@@ -914,6 +914,38 @@ describe('功能分组（Epic1-S1.4）', () => {
     const filterRow = wrapper.findAll('.switch-row').find((row) => row.text().includes('视频筛选'))
     expect(filterRow?.text()).not.toContain('今日拦截')
   })
+
+  it('拦截明细面板：存储中的明细按规则聚合展示，可清空', async () => {
+    await chrome.storage.local.set({
+      biliHelperFilterLog: [
+        { time: Date.now() - 1000, bvid: 'BV18vY969EHJ', title: '带货一号', reason: '标题关键词:带货', surface: '首页' },
+        { time: Date.now() - 2000, bvid: 'BV2xx411c7mE', title: '广告卡', reason: '广告标识', surface: '首页' },
+        { time: Date.now() - 3000, bvid: 'BV3xx411c7mF', title: '旧带货', reason: '标题关键词:带货', surface: '热门' },
+      ],
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    await openGroup(wrapper, '过滤视频')
+
+    // 折叠态给出条数提示；展开后按规则聚合 + 明细行（标题/BV 链接/注入面）。
+    const toggle = wrapper.findAll('button').find((item) => item.text().includes('拦截明细'))
+    expect(toggle?.text()).toContain('3/100')
+    await toggle!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('标题关键词:带货 × 2')
+    expect(wrapper.text()).toContain('广告标识 × 1')
+    const items = wrapper.findAll('.log-item')
+    expect(items.length).toBe(3)
+    const link = wrapper.find('a.log-title')
+    expect(link.attributes('href')).toBe('https://www.bilibili.com/video/BV18vY969EHJ')
+
+    // 清空后回到空态提示。
+    await wrapper.find('.log-actions button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('还没有拦截记录')
+    const raw = (await chrome.storage.local.get('biliHelperFilterLog')) as Record<string, unknown>
+    expect(raw.biliHelperFilterLog).toBeUndefined()
+  })
 })
 
 describe('筛选规则面板（Epic2-S2.6）', () => {

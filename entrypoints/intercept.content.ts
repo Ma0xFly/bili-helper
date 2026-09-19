@@ -21,6 +21,8 @@ export default defineContentScript({
     'https://www.bilibili.com/index.html',
     'https://www.bilibili.com/video/*',
     'https://www.bilibili.com/list/*',
+    'https://www.bilibili.com/v/popular/*',
+    'https://search.bilibili.com/*',
   ],
   world: 'MAIN',
   runAt: 'document_start',

@@ -55,6 +55,55 @@ export function onInterceptConfigs(
   return () => win.removeEventListener('message', handler)
 }
 
+// ---------- 拦截明细回传（主世界 → 隔离侧） ----------
+
+/** 主世界没有 chrome.storage：过滤命中的明细经 postMessage 回传，隔离侧落库供设置页展示。 */
+export const FILTER_LOG_MESSAGE = 'bili-helper:filter-log'
+
+export interface FilterLogEventPayload {
+  bvid: string
+  title: string
+  reason: string
+  surface: string
+}
+
+export function isFilterLogMessage(data: unknown): data is { type: typeof FILTER_LOG_MESSAGE; payload: FilterLogEventPayload } {
+  if (typeof data !== 'object' || data === null) return false
+  const message = data as Record<string, unknown>
+  if (message.type !== FILTER_LOG_MESSAGE) return false
+  const payload = message.payload
+  if (typeof payload !== 'object' || payload === null) return false
+  const record = payload as Record<string, unknown>
+  return (
+    typeof record.bvid === 'string' &&
+    typeof record.title === 'string' &&
+    typeof record.reason === 'string' &&
+    typeof record.surface === 'string'
+  )
+}
+
+/** 主世界侧：单条明细回传（win 缺省时静默跳过，如非浏览器测试环境）。 */
+export function pushFilterLogEvent(win: Window | undefined, entry: FilterLogEventPayload): void {
+  try {
+    win?.postMessage({ type: FILTER_LOG_MESSAGE, payload: entry }, '*')
+  } catch {
+    // postMessage 失败只丢一条明细，不影响过滤本身。
+  }
+}
+
+/** 隔离侧：订阅明细回传。 */
+export function onFilterLogEvent(
+  win: Window,
+  listener: (entry: FilterLogEventPayload) => void,
+): () => void {
+  const handler = (event: MessageEvent): void => {
+    if (!isFilterLogMessage(event.data)) return
+    listener(event.data.payload)
+  }
+  win.addEventListener('message', handler)
+  return () => win.removeEventListener('message', handler)
+}
+
 // ---------- 拦截器契约（主世界内使用；隔离侧只见类型不见实现） ----------
 
 /** 响应观察事件：请求照常发生，解析出的 JSON 交给回调；响应体不做任何修改。 */

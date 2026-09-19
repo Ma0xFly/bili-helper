@@ -12,8 +12,8 @@ export interface CardBlockerOptions {
   logName: string
   /** 命中判定：true 表示该元素是「标记了一张要移除卡片」的元素。 */
   match: (element: Element) => boolean
-  /** 一批移除 count>0 后回调（统计上报用）。 */
-  onBlocked?: (count: number, phase: 'initial' | 'mutation') => void
+  /** 一批移除 count>0 后回调（统计上报用）；cards 为本批移除的卡片（已脱文档，仍可读标题/链接）。 */
+  onBlocked?: (count: number, phase: 'initial' | 'mutation', cards: Element[]) => void
 }
 
 export interface CardBlocker {
@@ -42,62 +42,65 @@ export function createCardBlocker(options: CardBlockerOptions): CardBlocker {
   let scheduled = false
   let running = false
 
-  const removeCardOf = (marker: Element): boolean => {
+  const removeCardOf = (marker: Element): Element | null => {
     const card = removeTargetOf(marker)
-    if (removed.has(card)) return false
+    if (removed.has(card)) return null
     removed.add(card)
     card.remove()
-    return true
+    return card
   }
 
-  /** 扫描一棵子树（含其下所有 shadowRoot）：返回移除的卡片数，并把遇到的 shadowRoot 挂上观察器。 */
-  const scanTree = (parent: ParentNode): number => {
-    let count = 0
+  /** 扫描一棵子树（含其下所有 shadowRoot）：返回移除的卡片，并把遇到的 shadowRoot 挂上观察器。 */
+  const scanTree = (parent: ParentNode): Element[] => {
+    const cards: Element[] = []
     for (const element of parent.querySelectorAll('*')) {
       if (options.match(element)) {
-        if (removeCardOf(element)) count += 1
+        const card = removeCardOf(element)
+        if (card) cards.push(card)
         continue // 卡片已随标记移除，其后代不必再看
       }
       if (element.shadowRoot !== null) {
         attachObserver(element.shadowRoot)
-        count += scanTree(element.shadowRoot)
+        cards.push(...scanTree(element.shadowRoot))
       }
     }
-    return count
+    return cards
   }
 
-  const report = (count: number, phase: 'initial' | 'mutation'): void => {
-    if (count <= 0) return
-    console.info(`[bili-helper:${options.logName}] ${phase === 'initial' ? 'initial scan complete' : 'mutation blocked'}`, { blocked: count })
-    options.onBlocked?.(count, phase)
+  const report = (cards: Element[], phase: 'initial' | 'mutation'): void => {
+    if (cards.length <= 0) return
+    console.info(`[bili-helper:${options.logName}] ${phase === 'initial' ? 'initial scan complete' : 'mutation blocked'}`, { blocked: cards.length })
+    options.onBlocked?.(cards.length, phase, cards)
   }
 
   const flush = (): void => {
     scheduled = false
     const nodes = pending.splice(0)
-    let count = 0
+    const cards: Element[] = []
     for (const element of nodes) {
       if (!element.isConnected) continue // 批处理前已被移走（可能就是我们删的卡片）
       if (options.match(element)) {
-        if (removeCardOf(element)) count += 1
+        const card = removeCardOf(element)
+        if (card) cards.push(card)
         continue
       }
       if (element.shadowRoot !== null) {
         attachObserver(element.shadowRoot)
-        count += scanTree(element.shadowRoot)
+        cards.push(...scanTree(element.shadowRoot))
       }
       for (const desc of element.querySelectorAll('*')) {
         if (options.match(desc)) {
-          if (removeCardOf(desc)) count += 1
+          const card = removeCardOf(desc)
+          if (card) cards.push(card)
           continue
         }
         if (desc.shadowRoot !== null) {
           attachObserver(desc.shadowRoot)
-          count += scanTree(desc.shadowRoot)
+          cards.push(...scanTree(desc.shadowRoot))
         }
       }
     }
-    report(count, 'mutation')
+    report(cards, 'mutation')
   }
 
   const schedule = (): void => {
@@ -125,7 +128,7 @@ export function createCardBlocker(options: CardBlockerOptions): CardBlocker {
       if (running) return
       running = true
       const blocked = scanTree(root)
-      console.info(`[bili-helper:${options.logName}] started`, { rootBlocked: blocked })
+      console.info(`[bili-helper:${options.logName}] started`, { rootBlocked: blocked.length })
       report(blocked, 'initial')
       attachObserver(root)
     },

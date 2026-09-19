@@ -2,9 +2,13 @@
 // 配置同步协议测试（Epic1-S1.3）：postMessage 往返、形状校验拒收、退订。
 import { describe, expect, it } from 'vitest'
 import {
+  FILTER_LOG_MESSAGE,
   INTERCEPT_SYNC_MESSAGE,
+  isFilterLogMessage,
   isInterceptSyncMessage,
+  onFilterLogEvent,
   onInterceptConfigs,
+  pushFilterLogEvent,
   pushInterceptConfigs,
 } from './protocol'
 
@@ -54,5 +58,26 @@ describe('拦截配置同步（隔离世界 ⇄ 主世界）', () => {
       expect(received).toHaveLength(0)
       off()
     })
+  })
+})
+
+describe('拦截明细回传（主世界 → 隔离侧）', () => {
+  it('push → on 往返：明细原样到达；非法形状拒收', async () => {
+    const received: unknown[] = []
+    const off = onFilterLogEvent(window, (entry) => received.push(entry))
+    pushFilterLogEvent(window, { bvid: 'BV18vY969EHJ', title: '带货', reason: '标题关键词:带货', surface: '首页' })
+    // reason 缺字段 = 非法形状（空串是合法值——内容层的 normalize 再把关）。
+    window.postMessage({ type: FILTER_LOG_MESSAGE, payload: { bvid: 'x', title: '', surface: '' } }, '*')
+    window.postMessage({ type: 'unrelated' }, '*')
+    await flushTasks()
+    expect(received).toEqual([{ bvid: 'BV18vY969EHJ', title: '带货', reason: '标题关键词:带货', surface: '首页' }])
+    expect(isFilterLogMessage({ type: FILTER_LOG_MESSAGE, payload: { bvid: 'x', title: '', reason: '', surface: '' } })).toBe(true)
+    expect(isFilterLogMessage({ type: FILTER_LOG_MESSAGE, payload: { bvid: 'x', title: '', surface: '' } })).toBe(false)
+    expect(isFilterLogMessage({ type: 'other', payload: { bvid: 'x', title: '', reason: 'r', surface: 's' } })).toBe(false)
+    off()
+  })
+
+  it('win 缺省时静默跳过（非浏览器环境不炸）', () => {
+    expect(() => pushFilterLogEvent(undefined, { bvid: 'x', title: '', reason: 'r', surface: 's' })).not.toThrow()
   })
 })

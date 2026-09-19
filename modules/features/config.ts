@@ -7,7 +7,7 @@
 // 全部功能默认关闭。历史存储里可能残留已移除功能的键：读侧只认注册表，残留被自然忽略。
 
 export type FeatureGroupId = 'filter' | 'enhance'
-export type FeatureAppliesTo = '首页' | '视频页'
+export type FeatureAppliesTo = '首页' | '视频页' | '热门' | '搜索'
 
 export const FEATURE_STORAGE_KEY = 'biliHelperFeatures'
 export const FEATURE_STATS_STORAGE_KEY = 'biliHelperFeatureStats'
@@ -59,7 +59,8 @@ export interface FeatureDefinition<K extends FeatureId = FeatureId> {
   group: FeatureGroupId
   title: string
   description: string
-  appliesTo: FeatureAppliesTo
+  /** 适用注入面（可多面：视频筛选覆盖首页推荐 + 热门 + 搜索）。 */
+  appliesTo: FeatureAppliesTo[]
   /** 该功能是否参与「今日拦截」类日统计（只有两个 DOM 拦截器参与）。 */
   counted: boolean
   defaults: FeatureConfigShapes[K]
@@ -164,8 +165,9 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     id: 'videoFilter',
     group: 'filter',
     title: '视频筛选',
-    description: '按标题、时长、互动数据（含点赞率）、发布日期和作者黑名单等筛选首页普通视频。',
-    appliesTo: '首页',
+    description:
+      '按标题、时长、互动数据（含点赞率）、发布日期和作者黑名单筛选首页推荐、热门与搜索结果里的普通视频。',
+    appliesTo: ['首页', '热门', '搜索'],
     counted: false,
     defaults: VIDEO_FILTER_DEFAULTS,
     normalize: normalizeVideoFilter,
@@ -175,7 +177,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'filter',
     title: '广告视频',
     description: '过滤首页带「广告」标识的商业推广内容。',
-    appliesTo: '首页',
+    appliesTo: ['首页'],
     counted: true,
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,
@@ -185,7 +187,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'filter',
     title: '推广视频',
     description: '过滤首页「小火箭」标识的推广/充电视频，还原真实推荐流。',
-    appliesTo: '首页',
+    appliesTo: ['首页'],
     counted: true,
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,
@@ -195,7 +197,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'filter',
     title: '标签视频',
     description: '过滤首页直播、番剧、综艺、课堂等非普通视频卡片，让推荐流更纯粹。',
-    appliesTo: '首页',
+    appliesTo: ['首页'],
     counted: false,
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,
@@ -205,7 +207,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'enhance',
     title: '无级倍速',
     description: '接管播放器倍速：0.1x–5.0x 无级滑杆，一次设置持续生效。',
-    appliesTo: '视频页',
+    appliesTo: ['视频页'],
     counted: false,
     defaults: { rate: 1 },
     normalize: normalizeSteplessRate,
@@ -215,7 +217,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'enhance',
     title: '评论 IP 归属',
     description: '在视频评论区的用户名右侧显示用户 IP 归属地。',
-    appliesTo: '视频页',
+    appliesTo: ['视频页'],
     counted: false,
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,
