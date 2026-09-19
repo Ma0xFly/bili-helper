@@ -353,6 +353,19 @@ export async function chatCompletion(params: ChatCompletionParams): Promise<Chat
   } catch (cause) {
     throw mapJsonFailure(cause, text.slice(0, 400))
   }
+  // JSON 补全体先做一次统一检查：上游错误体与「只有思考过程」都能报出真实原因。
+  const inspected = inspectJsonBody(text, anthropic)
+  if (inspected !== null) {
+    // 只有「正文为空且确有思考过程」才在这里抛：缺字段与单纯空串保持原有契约（调用方决定）。
+    if (inspected.content.trim() === '' && inspected.reasoning) {
+      throw emptyAnswerError({ reasoning: true, rawText: text, streamed: false })
+    }
+    return {
+      content: inspected.content,
+      ...(inspected.usage === undefined ? {} : { usage: inspected.usage }),
+    }
+  }
+  // 非补全形状：保留原有精确报错（缺 choices/content / 缺 content 数组）。
   const content = anthropic
     ? parseAnthropicContent(data)
     : parseOpenAiContent(data)
@@ -385,11 +398,136 @@ function parseOpenAiContent(data: unknown): string {
   return content
 }
 
+/**
+ * 上游 JSON 错误体识别：国内网关常见 `{code, message}`（HTTP 200 但业务失败）、
+ * OpenAI 形 `{error: {message, code}}` 与 `{error: "文本"}`。返回可读文案，识别不出返回 null。
+ */
+export function extractJsonError(data: unknown): string | null {
+  if (!isRecord(data)) return null
+  const error = data.error
+  if (typeof error === 'string' && error.trim() !== '') return error.trim()
+  if (isRecord(error)) {
+    const message = typeof error.message === 'string' ? error.message : ''
+    const code = error.code ?? error.type
+    const codeText = typeof code === 'string' || typeof code === 'number' ? `（${String(code)}）` : ''
+    if (message !== '') return `${message}${codeText}`
+  }
+  const code = data.code
+  const message =
+    typeof data.message === 'string' ? data.message : typeof data.msg === 'string' ? data.msg : ''
+  const failureCode =
+    (typeof code === 'number' && code !== 0) ||
+    (typeof code === 'string' && code !== '' && code !== '0' && code !== 'success')
+  if (failureCode && message !== '') return `${message}（code ${String(code)}）`
+  return null
+}
+
+interface BodyInspection {
+  content: string
+  /** 正文为空但存在思考过程块/字段（推理模型）。 */
+  reasoning: boolean
+  usage?: TokenUsage
+}
+
+/**
+ * 把一段 JSON 响应体读成补全结果，顺带解决两件事：
+ *   ① 网关忽略 stream:true 直接回一次性补全 → 流式路径照样能收下正文；
+ *   ② HTTP 200 + JSON 错误体 → 抛带上游文案的 http 错误（比「空回复」可读得多）。
+ * 返回 null = 不是补全形状（交给空回复诊断/原有精确报错）。
+ */
+function inspectJsonBody(rawText: string, anthropic: boolean): BodyInspection | null {
+  const text = rawText.trim()
+  if (text === '' || !text.startsWith('{')) return null
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const upstream = extractJsonError(data)
+  if (upstream !== null) throw new AiError('http', upstream)
+  if (!isRecord(data)) return null
+  const usage = parseTokenUsage(data)
+  const withUsage = (body: Omit<BodyInspection, 'usage'>): BodyInspection =>
+    usage === undefined ? body : { ...body, usage }
+
+  if (anthropic) {
+    if (!Array.isArray(data.content)) return null
+    const blocks = data.content.filter(isRecord)
+    const hasText = blocks.some((block) => block.type === 'text')
+    const hasThinking = blocks.some((block) => block.type === 'thinking')
+    // 既无正文块也无思考块：不是我们认识的补全形状（保留原有的精确报错）。
+    if (!hasText && !hasThinking) return null
+    return withUsage({
+      content: blocks
+        .map((block) => (block.type === 'text' && typeof block.text === 'string' ? block.text : ''))
+        .join(''),
+      reasoning: hasThinking,
+    })
+  }
+  const choices = Array.isArray(data.choices) ? data.choices[0] : undefined
+  const message = isRecord(choices) && isRecord(choices.message) ? choices.message : null
+  if (message === null || typeof message.content !== 'string') return null
+  const reasoningText = message.reasoning_content ?? message.reasoning
+  return withUsage({
+    content: message.content,
+    reasoning: typeof reasoningText === 'string' && reasoningText !== '',
+  })
+}
+
+/**
+ * 正文为空的统一诊断：把三种完全不同的故障分开报，并附原始摘录（设置页诊断控制台直接可见）——
+ *   推理模型只回思考过程（或输出预算被思考过程吃光）→ 说清模型类型与出路；
+ *   端点回了空体 → 指向 Key / 配额 / 地址；
+ *   其余（错误页 / 未知网关行为）→ 空回复 + 原始响应摘录。
+ */
+function emptyAnswerError(input: {
+  reasoning: boolean
+  finishReason?: string
+  rawText: string
+  streamed: boolean
+}): AiError {
+  const excerpt = input.rawText.trim().slice(0, 300)
+  const raw = excerpt === '' ? {} : { rawResponse: excerpt }
+  if (input.reasoning) {
+    const budget =
+      input.finishReason === 'length' || input.finishReason === 'max_tokens'
+        ? '输出预算被思考过程吃光了'
+        : '只返回了思考过程（reasoning_content），没有正式回答'
+    return new AiError(
+      'parse',
+      `端点${budget}——这是推理模型的行为。请在设置里改用非推理模型，或在该端点上关闭思考模式`,
+      raw,
+    )
+  }
+  if (excerpt === '') {
+    return new AiError(
+      'parse',
+      '端点返回了空响应体（HTTP 200 但没有任何内容）——请检查 Key、配额与端点地址',
+    )
+  }
+  return new AiError(
+    'parse',
+    `端点返回了空回复（可能回了错误页或非流式内容），原始响应见设置页诊断控制台`,
+    raw,
+  )
+}
+
 const STREAM_DONE = Symbol('stream-done')
 
-type SseLineResult = string | typeof STREAM_DONE | null
+/**
+ * SSE 单行解析结果：正文增量 / 只有思考过程 / 结束原因 / 终止标记 / 忽略。
+ * 单把「思考过程」区分出来是必要的：推理模型会把输出全放在 reasoning_content 里、
+ * 正文恒为空——这种「空回复」必须报出真实原因，不能和「端点回了错误页」混为一谈。
+ */
+type SseLineResult =
+  | { kind: 'delta'; text: string }
+  | { kind: 'reasoning' }
+  | { kind: 'finish'; reason: string }
+  | typeof STREAM_DONE
+  | null
 
-// 解析一行 OpenAI SSE data：返回增量文本；非 data 行/脏 JSON/无增量时返回 null；[DONE] 返回终止标记；
+// 解析一行 OpenAI SSE data：返回增量为 delta；非 data 行/脏 JSON 返回 null；[DONE] 返回终止标记；
 // 事件携带 error 对象（OpenAI 流内错误约定）时抛 http，由上层以 end{error} 收束。
 function parseOpenAiSseLine(line: string): SseLineResult {
   const trimmed = line.trim()
@@ -411,9 +549,16 @@ function parseOpenAiSseLine(line: string): SseLineResult {
     throw new AiError('http', message)
   }
   const choices = Array.isArray(event.choices) ? event.choices[0] : undefined
-  const delta = isRecord(choices) ? choices.delta : undefined
-  const chunk = isRecord(delta) ? delta.content : undefined
-  return typeof chunk === 'string' && chunk !== '' ? chunk : null
+  const choice = isRecord(choices) ? choices : undefined
+  const delta = choice && isRecord(choice.delta) ? choice.delta : undefined
+  const chunk = delta ? delta.content : undefined
+  if (typeof chunk === 'string' && chunk !== '') return { kind: 'delta', text: chunk }
+  // 推理模型的思考过程：正文可以为空，但这里必须留痕，否则空回复无法归因。
+  const reasoning = delta ? (delta.reasoning_content ?? delta.reasoning) : undefined
+  if (typeof reasoning === 'string' && reasoning !== '') return { kind: 'reasoning' }
+  const finish = choice ? choice.finish_reason : undefined
+  if (typeof finish === 'string' && finish !== '') return { kind: 'finish', reason: finish }
+  return null
 }
 
 // Anthropic SSE：content_block_delta.delta.text 是增量；message_stop 是终止；
@@ -437,10 +582,16 @@ function parseAnthropicSseLine(line: string): SseLineResult {
     throw new AiError('http', message)
   }
   if (event.type === 'message_stop') return STREAM_DONE
-  if (event.type !== 'content_block_delta') return null
   const delta = isRecord(event.delta) ? event.delta : undefined
+  // message_delta 携带收尾原因（end_turn / max_tokens），供空回复归因。
+  if (event.type === 'message_delta') {
+    const stop = delta ? delta.stop_reason : undefined
+    return typeof stop === 'string' && stop !== '' ? { kind: 'finish', reason: stop } : null
+  }
+  if (event.type !== 'content_block_delta') return null
+  if (delta && delta.type === 'thinking_delta') return { kind: 'reasoning' }
   const chunk = isRecord(delta) && delta.type === 'text_delta' ? delta.text : undefined
-  return typeof chunk === 'string' && chunk !== '' ? chunk : null
+  return typeof chunk === 'string' && chunk !== '' ? { kind: 'delta', text: chunk } : null
 }
 
 function parseSseLine(line: string, anthropic: boolean): SseLineResult {
@@ -487,34 +638,61 @@ export async function chatCompletionStream(
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
   let content = ''
+  /** 原始响应全文（空回复归因/摘录用）：SSE 与非 SSE 都留，诊断控制台才看得到端点回了什么。 */
+  let rawText = ''
+  let sawReasoning = false
+  let finishReason = ''
+  let done = false
+  const consumeLine = (line: string): void => {
+    const parsed = parseSseLine(line, anthropic)
+    if (parsed === STREAM_DONE) {
+      done = true
+    } else if (parsed === null) {
+      // 注释行 / 空行 / 脏 JSON：忽略。
+    } else if (parsed.kind === 'reasoning') {
+      sawReasoning = true
+    } else if (parsed.kind === 'finish') {
+      finishReason = parsed.reason
+    } else {
+      content += parsed.text
+      params.onChunk(parsed.text)
+    }
+  }
   try {
-    while (true) {
-      const { done, value } = await readStreamChunk(reader, params.signal)
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+    while (!done) {
+      const { done: streamDone, value } = await readStreamChunk(reader, params.signal)
+      if (streamDone) break
+      const text = decoder.decode(value, { stream: true })
+      rawText += text
+      buffer += text
       // 按行切分（SSE data 事件单行），跨 TCP 分片由 buffer 组装；残行留到下一轮。
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
-        const delta = parseSseLine(line, anthropic)
-        if (delta === STREAM_DONE) return { content }
-        if (delta === null) continue
-        content += delta
-        params.onChunk(delta)
+        consumeLine(line)
+        if (done) break
       }
     }
     // 收尾兜底：部分实现省略 [DONE]/message_stop 直接关流（按正常收束）；末行无换行时补解析一次。
-    if (buffer.trim() !== '') {
-      const delta = parseSseLine(buffer, anthropic)
-      if (delta === STREAM_DONE) return { content }
-      if (delta !== null) {
-        content += delta
-        params.onChunk(delta)
-      }
-    }
+    if (!done && buffer.trim() !== '') consumeLine(buffer)
     // 某些实现对已中止的流以 done 代替 reject，此处补检信号，消费方不悬挂。
     if (params.signal?.aborted) throw new AiError('network', '请求已中止')
-    return { content }
+    if (content.trim() !== '') return { content }
+    // 正文为空：先看是不是「网关忽略 stream 直接回了一次性补全 JSON」——能救就救回来。
+    const inspected = inspectJsonBody(rawText, anthropic)
+    if (inspected !== null && inspected.content.trim() !== '') {
+      console.info('[bili-helper] 端点未按流式返回（回了一次性补全体），已直接采用该结果')
+      return {
+        content: inspected.content,
+        ...(inspected.usage === undefined ? {} : { usage: inspected.usage }),
+      }
+    }
+    throw emptyAnswerError({
+      reasoning: sawReasoning || inspected?.reasoning === true,
+      finishReason,
+      rawText,
+      streamed: true,
+    })
   } finally {
     reader.cancel().catch(() => {
       // 连接已断开或已读完时 cancel 会失败，忽略即可。

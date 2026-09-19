@@ -769,3 +769,108 @@ describe('parseTokenUsage（成本可观测）', () => {
     expect(result.usage).toBeUndefined()
   })
 })
+
+describe('非 SSE 响应体与推理模型空回复的归因', () => {
+  const jsonResponse = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+  const streamFetch = (lines: string[], status = 200) => vi.fn(async () => sseResponse(lines, status))
+
+  it('网关忽略 stream:true 回一次性补全体：直接采用正文（含用量），不报空回复', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          choices: [{ message: { role: 'assistant', content: '# 总结\n\n正文在此' } }],
+          usage: { prompt_tokens: 12, completion_tokens: 34 },
+        }),
+      ),
+    )
+    const { content, usage } = await chatCompletionStream({
+      endpoint: ENDPOINT,
+      messages: MESSAGES,
+      onChunk: () => {},
+    })
+    expect(content).toBe('# 总结\n\n正文在此')
+    expect(usage).toEqual({ input: 12, output: 34 })
+  })
+
+  it('HTTP 200 + 业务错误体（{code,message}）：报带上游文案的 http 错误', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ code: 401, message: 'invalid token', data: null })))
+    await expect(
+      chatCompletionStream({ endpoint: ENDPOINT, messages: MESSAGES, onChunk: () => {} }),
+    ).rejects.toMatchObject({ kind: 'http', message: 'invalid token（code 401）' })
+  })
+
+  it('OpenAI 形错误体 {error:{message,code}}：同样转为 http 错误', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: { message: 'insufficient quota', code: 'quota_exceeded' } })),
+    )
+    await expect(
+      chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES }),
+    ).rejects.toMatchObject({ kind: 'http', message: 'insufficient quota（quota_exceeded）' })
+  })
+
+  it('推理模型只回思考过程：报「推理模型」并附原始摘录（可据此换模型/关思考）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      streamFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"先想…"}}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"再想…"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+      ]),
+    )
+    const failure = await chatCompletionStream({
+      endpoint: ENDPOINT,
+      messages: MESSAGES,
+      onChunk: () => {},
+    }).then(
+      () => null,
+      (error: unknown) => error as { kind: string; message: string; rawResponse?: string },
+    )
+    expect(failure?.kind).toBe('parse')
+    expect(failure?.message).toContain('只返回了思考过程')
+    expect(failure?.message).toContain('非推理模型')
+    expect(failure?.rawResponse).toContain('reasoning_content')
+  })
+
+  it('思考过程吃光输出预算（finish_reason=length）：归因到预算而不是笼统空回复', async () => {
+    vi.stubGlobal(
+      'fetch',
+      streamFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"很长很长的思考"}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        'data: [DONE]',
+      ]),
+    )
+    await expect(
+      chatCompletionStream({ endpoint: ENDPOINT, messages: MESSAGES, onChunk: () => {} }),
+    ).rejects.toMatchObject({ kind: 'parse', message: expect.stringContaining('输出预算被思考过程吃光了') })
+  })
+
+  it('空响应体：指向 Key/配额/地址，不带空摘录', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))
+    await expect(
+      chatCompletionStream({ endpoint: ENDPOINT, messages: MESSAGES, onChunk: () => {} }),
+    ).rejects.toMatchObject({ message: expect.stringContaining('空响应体') })
+  })
+
+  it('非流式补全遇推理模型（message.reasoning_content）：同样报出推理模型原因', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ choices: [{ message: { reasoning_content: '想了很久', content: '' } }] })),
+    )
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      kind: 'parse',
+      message: expect.stringContaining('只返回了思考过程'),
+    })
+  })
+
+  it('非补全形状（缺 choices）：保留原有精确报错，不误报成空回复', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: { ok: true } })))
+    await expect(chatCompletion({ endpoint: ENDPOINT, messages: MESSAGES })).rejects.toMatchObject({
+      message: expect.stringContaining('缺少 choices[0].message.content'),
+    })
+  })
+})

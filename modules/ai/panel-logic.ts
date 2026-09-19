@@ -192,13 +192,18 @@ const ERROR_COPY: Record<AiErrorInfo['kind'], Omit<PanelErrorCopy, 'withSettings
 export function panelErrorCopy(info: AiErrorInfo): PanelErrorCopy {
   const base = ERROR_COPY[info.kind]
   if (info.kind === 'http') {
-    const status = info.status
-    const statusText = typeof status === 'number' ? String(status) : '错误'
+    // 有状态码报状态码；没有（HTTP 200 + 业务错误体，如国内网关的 {code,message}）用 base 文案。
+    if (typeof info.status !== 'number') return { ...base, withSettingsLink: true }
     return {
-      title: `端点返回了 ${statusText}，去设置里看看？`,
-      hint: typeof status === 'number' && status >= 500 ? '5xx 建议稍后重试' : base.hint,
+      title: `端点返回了 ${info.status}，去设置里看看？`,
+      hint: info.status >= 500 ? '5xx 建议稍后重试' : base.hint,
       withSettingsLink: true,
     }
+  }
+  if (info.kind === 'parse' && info.message.trim() !== '') {
+    // 解析失败的具体原因（推理模型只回思考过程 / 上游错误体…）就是最有用的那句：
+    // 直接放进面板提示，别让用户只能去翻诊断控制台。
+    return { ...base, hint: info.message, withSettingsLink: true }
   }
   return { ...base, withSettingsLink: true }
 }

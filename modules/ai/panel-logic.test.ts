@@ -201,3 +201,24 @@ describe('summaryAgoSeconds', () => {
     expect(summaryAgoSeconds(10_000, 9_000)).toBe(0)
   })
 })
+describe('错误文案：http 无状态码与 parse 具体原因', () => {
+  it('http 无状态码（HTTP 200 + 业务错误体）用通用文案，不再拼出「端点返回了 错误」', () => {
+    const copy = panelErrorCopy({ kind: 'http', message: 'invalid token（code 401）' })
+    expect(copy.title).toBe('端点返回了错误，去设置里看看？')
+    expect(copy.title).not.toContain(' 错误')
+  })
+
+  it('parse 失败把具体原因带进提示（如推理模型只回思考过程）', () => {
+    const copy = panelErrorCopy({
+      kind: 'parse',
+      message: '端点只返回了思考过程（reasoning_content），没有正式回答——这是推理模型的行为。',
+    })
+    expect(copy.hint).toContain('推理模型')
+    expect(copy.title).toContain('没看懂')
+  })
+
+  it('parse 失败无具体原因时保持通用提示不变', () => {
+    const copy = panelErrorCopy({ kind: 'parse', message: '' })
+    expect(copy.hint).toContain('诊断记录')
+  })
+})
