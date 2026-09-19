@@ -13,6 +13,12 @@ import type { SerializedFeatureConfigs } from '../modules/features/intercept/pro
 import { createAdVideoBlocker } from '../modules/features/blockers/ad-video'
 import { createPromotedVideoBlocker } from '../modules/features/blockers/promoted-video'
 import { createLabelVideoBlocker } from '../modules/features/blockers/label-video'
+import { createSplitScreenRuntime } from '../modules/features/layout/split-screen'
+import { createRightSideCommentRuntime } from '../modules/features/layout/right-comment'
+import {
+  createMinimalHomepageRuntime,
+  type MinimalHomepageConfig,
+} from '../modules/features/layout/minimal-homepage'
 
 /** FeatureConfigMap → 主世界线协议（纯 JSON；函数过不了 postMessage）。 */
 function toInterceptPayload(map: FeatureConfigMap): SerializedFeatureConfigs {
@@ -65,10 +71,15 @@ export default defineContentScript({
       },
     })
     // 功能运行时注册（Epic 2–4 逐个登记）：广告视频 / 推广视频（首页，DOM 移除 + 日统计）、
-    // 标签视频（首页，纯 CSS 隐藏）。
+    // 标签视频（首页，纯 CSS 隐藏）；布局组（视频页分屏/右侧评论、首页极简）。
     manager.register('adVideoBlocker', () => createAdVideoBlocker())
     manager.register('promotedVideoBlocker', () => createPromotedVideoBlocker())
     manager.register('labelVideoBlocker', () => createLabelVideoBlocker())
+    manager.register('leftRightSplitScreen', () => createSplitScreenRuntime())
+    manager.register('rightSideComment', () => createRightSideCommentRuntime())
+    manager.register('minimalHomepage', (entry) =>
+      createMinimalHomepageRuntime({ config: entry.config as unknown as MinimalHomepageConfig }),
+    )
 
     await manager.start()
     await broadcastConfigs()

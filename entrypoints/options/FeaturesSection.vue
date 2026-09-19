@@ -13,6 +13,7 @@ import {
 } from '../../modules/features/config'
 import type { FeatureEntry, FeatureGroupId, FeatureId } from '../../modules/features/config'
 import FilterRulesPanel from './FilterRulesPanel.vue'
+import BackgroundPanel from './BackgroundPanel.vue'
 
 const props = defineProps<{ groupId: FeatureGroupId }>()
 
@@ -100,6 +101,8 @@ async function onToggle(id: FeatureId, event: Event): Promise<void> {
     </label>
     <!-- 视频筛选开启后展开规则面板（关闭时收起，开关与规则一体）。 -->
     <FilterRulesPanel v-if="groupId === 'filter' && entries.videoFilter?.enabled" />
+    <!-- 极简首页开启后展开背景面板。 -->
+    <BackgroundPanel v-if="groupId === 'layout' && entries.minimalHomepage?.enabled" />
     <p v-if="hint" class="section-hint" :class="hint.kind" aria-live="polite">{{ hint.text }}</p>
   </section>
 </template>
