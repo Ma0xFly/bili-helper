@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 原生进度条标记注入测试：注入/重注入/dispose 零残留、渲染几何、回退标志、悬停提示。
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveNativeBar, NativeMarksInjector, NATIVE_MARK_COLORS } from './native-marks'
 import { ui } from './ui-state'
 import type { AdMarkState, ChapterMarkState } from './ui-state'
@@ -201,13 +201,23 @@ describe('NativeMarksInjector', () => {
     injector.dispose()
   })
 
-  it('找不到原生条 → 不注入、nativeMarksActive=false（Shadow 层回退接管）', () => {
+  it('找不到原生条 → 不注入、nativeMarksActive=false（Shadow 层回退接管），且只打一次回退日志', () => {
     ui.marks = [AD]
-    const { injector } = makeInjector()
-    injector.sync()
-    expect(document.querySelector('.bhx-marks')).toBeNull()
-    expect(ui.nativeMarksActive).toBe(false)
-    injector.dispose()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { injector } = makeInjector()
+      injector.sync()
+      injector.sync() // 心跳拍重复失败：日志只此一次。
+      expect(document.querySelector('.bhx-marks')).toBeNull()
+      expect(ui.nativeMarksActive).toBe(false)
+      const fallbackLogs = infoSpy.mock.calls
+        .map((args) => args.join(' '))
+        .filter((text) => text.includes('回退浮层标记形态'))
+      expect(fallbackLogs).toHaveLength(1)
+      injector.dispose()
+    } finally {
+      infoSpy.mockRestore()
+    }
   })
 
   it('dispose 后无任何注入残留', () => {

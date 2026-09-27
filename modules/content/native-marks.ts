@@ -108,6 +108,8 @@ export class NativeMarksInjector {
   private barElement: HTMLElement | null = null
   private lastHoverEmit = ''
   private hideTimer: number | null = null
+  /** 回退一次性日志哨兵：B 站改版注入失败只提醒一次，不刷屏。 */
+  private fallbackLogged = false
 
   private readonly onBarMouseMove: (event: MouseEvent) => void
   private readonly onBarMouseLeave: () => void
@@ -173,9 +175,14 @@ export class NativeMarksInjector {
     const bar = this.ensureInjected()
     if (!bar) {
       // 原生条不可用：回退形态（Shadow 层几何镜像接管），提示态一并清空。
+      if (!this.fallbackLogged) {
+        this.fallbackLogged = true
+        console.info('[bili-helper] 进度条标记：未找到原生进度条（B 站改版？），回退浮层标记形态')
+      }
       this.emitHover(null)
       return
     }
+    this.fallbackLogged = false
     this.render(marks, chapters, dark)
   }
 
