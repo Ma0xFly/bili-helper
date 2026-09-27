@@ -322,7 +322,8 @@
   box-shadow: 0 0 8px var(--bh-glow-pink);
   transform: translateY(-50%);
   pointer-events: auto;
-  cursor: pointer;
+  /* 底段纯展示（点击语义归原生进度条）：不再假装可点。 */
+  cursor: default;
 }
 
 .bh-mark.done {
@@ -390,6 +391,71 @@
 }
 
 .bh-mark-reject:focus-visible {
+  outline: 2px solid var(--bh-danger);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---------- 原生进度条悬停提示（native-marks 配套；标记本体已注入原生条） ---------- */
+/* 位置（left/bottom）由注入层按鼠标横位与原生预览高度算好；卡片本体只有在
+   广告提示时才接收指针（「不是广告」按钮可达），章节提示纯展示、指针穿透。 */
+.bh-bar-tip {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: var(--bh-surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--bh-glass-border);
+  border-radius: 12px;
+  padding: 6px 13px;
+  box-shadow: 0 8px 24px var(--bh-shadow-chip), inset 0 1px 0 var(--bh-inner-glow);
+  font-size: 11.5px;
+  color: var(--bh-text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.bh-bar-tip-title {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bh-bar-tip-meta {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--bh-text-secondary);
+  font-weight: 600;
+}
+
+.bh-bar-tip-reject {
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--bh-danger);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+  margin-top: 2px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bh-bar-tip:has(.bh-bar-tip-reject) {
+  pointer-events: auto;
+}
+
+.bh-bar-tip-reject:hover {
+  opacity: 0.8;
+}
+
+.bh-bar-tip-reject:focus-visible {
   outline: 2px solid var(--bh-danger);
   outline-offset: 2px;
   border-radius: 4px;

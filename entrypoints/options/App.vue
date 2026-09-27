@@ -105,6 +105,9 @@ interface FormModel {
   adSkipEnabled: boolean
   panelEnabled: boolean
   chapterMarksEnabled: boolean
+  themeMode: AiSettings['themeMode']
+  nightStart: string
+  nightEnd: string
 }
 
 const form = reactive<FormModel>({
@@ -125,6 +128,9 @@ const form = reactive<FormModel>({
   adSkipEnabled: false,
   panelEnabled: true,
   chapterMarksEnabled: true,
+  themeMode: 'bilibili',
+  nightStart: '19:00',
+  nightEnd: '07:00',
 })
 
 const loadError = ref('')
@@ -143,6 +149,9 @@ function applyStoredToForm(settings: AiSettings): void {
   form.detectModel = settings.detectModel
   form.detectApiFormat = settings.detectApiFormat
   form.mode = settings.mode
+  form.themeMode = settings.themeMode
+  form.nightStart = settings.nightStart
+  form.nightEnd = settings.nightEnd
   fallbackWanted.value = settings.mode === 'auto'
   form.serverBaseUrl = settings.serverBaseUrl
   form.serverToken = settings.serverToken
@@ -209,6 +218,53 @@ async function toggleSetting(
     settingHint.value = { kind: 'ok', text: '已生效' }
   } catch {
     form[key] = !value // 写失败回拨，不留"界面开着但没生效"的假象
+    settingHint.value = { kind: 'fail', text: '写入失败，请重试' }
+  }
+}
+
+// 外观卡：主题模式三选一（分段控件），切到「定时自动」展开夜间窗口两个时间输入。
+// 与总开关同一套即时写链——模式是状态不是表单，改完立即作用于已打开的视频页。
+const THEME_MODES: { value: AiSettings['themeMode']; label: string }[] = [
+  { value: 'bilibili', label: '跟随B站' },
+  { value: 'system', label: '跟随系统' },
+  { value: 'schedule', label: '定时自动' },
+]
+
+async function applyThemeMode(mode: AiSettings['themeMode']): Promise<void> {
+  if (form.themeMode === mode) return
+  const previous = form.themeMode
+  form.themeMode = mode
+  settingHint.value = null
+  try {
+    await writeAiSettings({ themeMode: mode })
+    settingHint.value = { kind: 'ok', text: '已生效' }
+  } catch {
+    form.themeMode = previous
+    settingHint.value = { kind: 'fail', text: '写入失败，请重试' }
+  }
+}
+
+/** 夜间窗口时间输入：空值/起止相同视为非法（不落库），输入框回滚并给出行内提示。 */
+async function applyNightTime(
+  key: 'nightStart' | 'nightEnd',
+  raw: string,
+  fallback: string,
+): Promise<void> {
+  const value = raw.trim()
+  const invalid = value === '' || value === form.nightStart || value === form.nightEnd
+  if (invalid) {
+    form[key] = fallback
+    settingHint.value = { kind: 'fail', text: '夜间窗口起止不能相同或为空' }
+    return
+  }
+  const previous = form[key]
+  form[key] = value
+  settingHint.value = null
+  try {
+    await writeAiSettings({ [key]: value } as Partial<AiSettings>)
+    settingHint.value = { kind: 'ok', text: '已生效' }
+  } catch {
+    form[key] = previous
     settingHint.value = { kind: 'fail', text: '写入失败，请重试' }
   }
 }
@@ -1093,7 +1149,7 @@ onMounted(loadFailures)
         <header class="content-head">
           <div class="head-main">
             <h1>总开关</h1>
-            <p class="content-sub">三个总开关控制所有页面；改完立即生效，无需保存。</p>
+            <p class="content-sub">总开关与浮层主题控制所有页面；改完立即生效，无需保存。</p>
           </div>
           <ul class="status-chips" aria-label="当前配置状态">
             <li class="status-chip" :class="endpointReady ? 'ok' : 'warn'">
@@ -1171,6 +1227,50 @@ onMounted(loadFailures)
                 <span class="switch-knob" aria-hidden="true" />
               </span>
             </label>
+          </section>
+          <section class="card" aria-labelledby="appearance-title">
+            <h2 id="appearance-title" class="card-title">外观</h2>
+            <div class="field-hint appearance-hint" role="group" aria-label="浮层主题模式">
+              <span class="switch-name">浮层主题</span>
+              <div class="theme-mode-row">
+                <button
+                  v-for="mode in THEME_MODES"
+                  :key="mode.value"
+                  type="button"
+                  class="theme-mode-option"
+                  :class="{ active: form.themeMode === mode.value }"
+                  :aria-pressed="form.themeMode === mode.value"
+                  @click="applyThemeMode(mode.value)"
+                >
+                  {{ mode.label }}
+                </button>
+              </div>
+              <span class="field-hint">
+                页内浮层（AI 面板 / 提示条 / 进度条标记）的亮暗来源：跟随 B 站夜间模式（默认）、跟随系统亮暗，或按下方夜间窗口定时切换。改完立即生效。
+              </span>
+              <div v-if="form.themeMode === 'schedule'" class="night-window-row">
+                <label class="night-window-field">
+                  <span>夜间开始</span>
+                  <input
+                    type="time"
+                    :value="form.nightStart"
+                    aria-label="夜间窗口开始时间"
+                    @change="applyNightTime('nightStart', ($event.target as HTMLInputElement).value, form.nightStart)"
+                  />
+                </label>
+                <span class="night-window-sep" aria-hidden="true">→</span>
+                <label class="night-window-field">
+                  <span>夜间结束</span>
+                  <input
+                    type="time"
+                    :value="form.nightEnd"
+                    aria-label="夜间窗口结束时间"
+                    @change="applyNightTime('nightEnd', ($event.target as HTMLInputElement).value, form.nightEnd)"
+                  />
+                </label>
+                <span class="field-hint">窗口内用暗色（支持跨午夜，如 19:00 → 07:00）。</span>
+              </div>
+            </div>
           </section>
           <div v-if="settingHint" class="feedback" :class="settingHint.kind" aria-live="polite">
             <span class="badge" aria-hidden="true">{{ settingHint.kind === 'ok' ? '✓' : '✕' }}</span>
@@ -2087,7 +2187,7 @@ select:focus {
   font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--bh-text-strong);
+  color: var(--bh-text-primary);
   resize: vertical;
 }
 
@@ -2137,6 +2237,72 @@ button {
 .ghost:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* 外观卡：主题模式分段控件（选中态同主按钮深端渐变）+ 夜间窗口两个 time 输入。 */
+.appearance-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.theme-mode-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.theme-mode-option {
+  border: 1px solid var(--bh-border-hairline);
+  background: var(--bh-surface-ghost);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-size: 12.5px;
+  color: var(--bh-text-primary);
+  cursor: pointer;
+}
+
+.theme-mode-option:hover {
+  background: var(--bh-purple-soft);
+}
+
+.theme-mode-option.active {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--bh-primary-deep), var(--bh-primary-bright));
+  color: var(--bh-text-on-accent);
+  cursor: default;
+  font-weight: 600;
+}
+
+.night-window-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.night-window-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--bh-text-primary);
+}
+
+.night-window-field input {
+  border: 1px solid var(--bh-border-hairline);
+  background: var(--bh-surface-subtle);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  color: var(--bh-text-primary);
+}
+
+.night-window-sep {
+  color: var(--bh-text-muted);
+  font-size: 12.5px;
 }
 
 /* 总开关：track 36×20 胶囊 + 16px 白圆 knob，开态渐变（与 popup 快开关同源视觉）。 */

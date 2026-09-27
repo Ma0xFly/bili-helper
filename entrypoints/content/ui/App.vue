@@ -8,6 +8,7 @@ import SavedChip from './SavedChip.vue'
 import VectorHint from './VectorHint.vue'
 import ProgressMarks from './ProgressMarks.vue'
 import ChapterMarks from './ChapterMarks.vue'
+import BarHoverTip from './BarHoverTip.vue'
 import MarkingChip from './MarkingChip.vue'
 import { ui } from '../../../modules/content/ui-state'
 
@@ -26,6 +27,7 @@ const overlayStyle = computed(() => {
 <template>
   <div class="bh-root bh-overlay-root" :data-dark="ui.dark ? '' : undefined">
     <div class="bh-overlay" :style="overlayStyle">
+      <BarHoverTip />
       <ChapterMarks />
       <ProgressMarks />
       <SkipBanner />

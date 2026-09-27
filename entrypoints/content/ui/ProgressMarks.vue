@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// 进度条广告标记（progressBarAdMark）：detectAds 结果区间在播放器进度条位的粉色标记，
-// 悬停可见商品名与区间。标记盒子直接锚在 B 站进度条本体的实时几何上（控制器高频同步），
-// 控制层淡出/收起时整层跟随隐藏——绝不悬在进度条已不在的位置。渲染仍在做标层（Shadow DOM）。
+// 进度条广告标记——回退形态（B 站改版导致原生注入不可用时才渲染，ui.nativeMarksActive=false）。
+// 常规形态下广告底段长在原生进度条里（native-marks.ts），悬停提示走 BarHoverTip。
+// 本组件沿用旧「标记盒几何镜像」渲染：盒子锚在进度条本体的实时几何上（控制器高频同步），
+// 控制层淡出/收起时整层跟随隐藏。纯展示——点击语义已统一归原生进度条，标记不再截停指针。
 import { ui } from '../../../modules/content/ui-state'
 
 function boxStyle(): Record<string, string> {
@@ -15,7 +16,11 @@ function boxStyle(): Record<string, string> {
 </script>
 
 <template>
-  <div v-if="ui.marks.length > 0 && ui.marksBox.visible" class="bh-marks" :style="boxStyle()">
+  <div
+    v-if="ui.marks.length > 0 && ui.marksBox.visible && !ui.nativeMarksActive"
+    class="bh-marks"
+    :style="boxStyle()"
+  >
     <div
       v-for="mark in ui.marks"
       :key="mark.key"
@@ -25,8 +30,6 @@ function boxStyle(): Record<string, string> {
         left: `${mark.leftPct}%`,
         width: `${mark.widthPct}%`,
       }"
-      role="button"
-      tabindex="0"
       :aria-label="`广告标记：${mark.productName || '恰饭段'} ${mark.range}`"
     >
       <div class="bh-mark-tip">

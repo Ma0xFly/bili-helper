@@ -73,6 +73,9 @@ describe('导出', () => {
       adSkipEnabled: false,
       panelEnabled: true,
       chapterMarksEnabled: true,
+      themeMode: 'bilibili',
+      nightStart: '19:00',
+      nightEnd: '07:00',
     })
     expect(masked.apiKey).toBe('')
     expect(masked.embedKey).toBe('')

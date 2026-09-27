@@ -10,8 +10,10 @@ import { ui } from '../../modules/content/ui-state'
 import { AdSkipController } from '../../modules/content/ad-skip-controller'
 import type { PlayerAdapter, TimerApi } from '../../modules/content/ad-skip-controller'
 import { MarksBoxTracker } from '../../modules/content/marks-box'
+import { NativeMarksInjector } from '../../modules/content/native-marks'
 import { formatCompactTime } from '../../modules/content/logic'
 import { readAdFeedback, writeAdFeedback } from '../../modules/content/ad-feedback'
+import { resolveThemeDark, type ThemePreference } from '../../modules/content/theme-mode'
 import {
   mergeChapterSources,
   parseViewPoints,
@@ -221,13 +223,39 @@ export default defineContentScript({
       return ui.dark
     }
 
+    // ---------- 主题模式（页内浮层亮暗来源） ----------
+    // 默认跟随 B 站（现行检测）；跟随系统/定时自动两种来源在 resolveDark 收敛，
+    // ui.dark 仍是浮层唯一开关。偏好经 settings 读回与 storage.onChanged 双路同步。
+    let themePreference: ThemePreference = {
+      themeMode: 'bilibili',
+      nightStart: '19:00',
+      nightEnd: '07:00',
+    }
+    let systemDarkQuery: MediaQueryList | null = null
+    try {
+      systemDarkQuery = window.matchMedia('(prefers-color-scheme: dark)')
+      systemDarkQuery.addEventListener('change', () => controller.applyDark())
+    } catch {
+      // matchMedia 不可用：跟随系统退化为跟随 B 站（applyDark 周期拍兜底）。
+    }
+    function resolveDark(): boolean {
+      return resolveThemeDark(themePreference, {
+        bilibiliDark: isDarkMode,
+        systemDark: () => systemDarkQuery?.matches ?? isDarkMode(),
+        nowMinutes: () => {
+          const now = new Date()
+          return now.getHours() * 60 + now.getMinutes()
+        },
+      })
+    }
+
     // ---------- 控制器 ----------
     const controller = new AdSkipController({
       timers,
       now: () => Date.now(),
       player: playerAdapter,
       pageHref: () => window.location.href,
-      isDark: isDarkMode,
+      isDark: resolveDark,
       collectVideoMeta,
       collectSubtitles,
       collectDanmaku,
@@ -249,6 +277,27 @@ export default defineContentScript({
       getVideo: findVideo,
       isRelevant: () => ui.chapterMarks.length > 0,
     })
+
+    // ---------- 标记原生一体化：注入 B 站进度条本体 ----------
+    // 广告底段与章节刻度长在原生条里（pointer-events:none，点击/拖拽/悬停预览全归原生），
+    // 悬停提示仍由 Shadow 浮层渲染、注入层驱动。注入失败（B 站改版）自动回退旧几何镜像形态。
+    const nativeMarks = new NativeMarksInjector({
+      timers,
+      player: playerAdapter,
+      getVideo: findVideo,
+      getMarks: () => ui.marks,
+      getChapters: () => ui.chapterMarks,
+      getDark: () => ui.dark,
+    })
+    // 数据/亮暗变化即时重渲染（deep：mark.done 原位翻转也要跟上）；心跳兜底重注入。
+    watch(
+      () => [ui.marks, ui.chapterMarks, ui.dark],
+      () => nativeMarks.sync(),
+      { deep: true },
+    )
+    // 提示卡跨过原生预览区时的保活（指针离开进度条、进入提示卡的间隙防闪没）。
+    ui.actions.keepBarHover = () => nativeMarks.keepHover()
+    ui.actions.endBarHover = () => nativeMarks.endHover()
     let chaptersEnabled = true
     let chapterBvid: string | null = null
     let chapterCid: number | undefined
@@ -595,9 +644,13 @@ export default defineContentScript({
     // 周期检查驱动就绪三重门与失位重插（原版为 500ms 重试链 + 观察器，这里以 1.5s 周期承担）。
     ensurePanelPlacement()
 
-    // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
+    // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）；
+    // 主题模式顺带重估（后台期间跨过夜间窗口边界，回前台立即翻色）。
     window.document.addEventListener('visibilitychange', () => {
-      if (window.document.visibilityState === 'visible') void syncPanelSession()
+      if (window.document.visibilityState === 'visible') {
+        controller.applyDark()
+        void syncPanelSession()
+      }
     })
 
     function getPanelPageState(): PanelPageState {
@@ -633,6 +686,22 @@ export default defineContentScript({
       if (next && typeof next.adSkipEnabled === 'boolean') {
         controller.syncMasterEnabled(next.adSkipEnabled)
       }
+      if (
+        next &&
+        (typeof next.themeMode === 'string' ||
+          typeof next.nightStart === 'string' ||
+          typeof next.nightEnd === 'string')
+      ) {
+        // 主题偏好变化：经读取侧归一后即时重估（写侧坏值在这里被收敛，不信原文）。
+        void readAiSettings()
+          .then((settings) => {
+            themePreference = settings
+            controller.applyDark()
+          })
+          .catch(() => {
+            // 读取失败沿用当前偏好，下轮周期拍再同步。
+          })
+      }
       if (next && typeof next.panelEnabled === 'boolean') {
         panel.masterEnabled = next.panelEnabled
         if (panel.masterEnabled) void syncPanelSession()
@@ -656,6 +725,7 @@ export default defineContentScript({
     window.setInterval(() => {
       controller.retryIfNeeded()
       controller.checkNavigation()
+      controller.applyDark() // schedule 模式的分钟级重估搭这班车（bilibili 模式下幂等）。
       void syncPanelSession()
       void syncChapters()
       ensurePanelPlacement()
@@ -692,8 +762,12 @@ export default defineContentScript({
       }
       controller.requestRemesh()
       chapterMarksBox.requestRemesh()
+      nativeMarks.recheck()
     }
     window.document.addEventListener('fullscreenchange', onFullscreenChange)
+
+    // 扩展重载/失效：摘掉注入进原生条的节点与样式（Shadow 浮层随宿主自生自灭）。
+    ctx.onInvalidated(() => nativeMarks.dispose())
 
     // 播放进度轮询：AI 面板「当前播放段高亮」数据源（面板隐藏时停表省电）。
     window.setInterval(() => {
@@ -707,6 +781,8 @@ export default defineContentScript({
       const initialSettings = await readAiSettings()
       panel.masterEnabled = initialSettings.panelEnabled
       chaptersEnabled = initialSettings.chapterMarksEnabled
+      themePreference = initialSettings
+      controller.applyDark()
     } catch {
       // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
     }
@@ -715,5 +791,6 @@ export default defineContentScript({
     void syncChapters()
 
     void controller.start()
+    nativeMarks.start()
   },
 })

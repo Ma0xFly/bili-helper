@@ -112,6 +112,9 @@ describe('options AI 助手表单', () => {
       adSkipEnabled: false,
       panelEnabled: true,
       chapterMarksEnabled: true,
+      themeMode: 'bilibili',
+      nightStart: '19:00',
+      nightEnd: '07:00',
     })
   })
 
@@ -580,6 +583,49 @@ describe('options AI 助手表单', () => {
     await saveSettingsButton(wrapper).trigger('click')
     await flushPromises()
     expect((await storedSettings()).chapterMarksEnabled).toBe(true)
+  })
+
+  it('外观卡：主题模式三选一即时写入，选「定时自动」展开夜间窗口', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+
+    // 三枚分段按钮都在「总开关」页的外观卡上。
+    const switchesPage = wrapper.find('.page[aria-label="总开关"]')
+    const modeButtons = switchesPage.findAll('button.theme-mode-option')
+    expect(modeButtons.map((button) => button.text())).toEqual(['跟随B站', '跟随系统', '定时自动'])
+    expect(modeButtons[0]!.classes()).toContain('active') // 默认跟随B站
+
+    // 切到「定时自动」：立即落库（无需保存条），夜间窗口时间输入随之展开。
+    await modeButtons[2]!.trigger('click')
+    await flushPromises()
+    expect((await storedSettings()).themeMode).toBe('schedule')
+    expect(switchesPage.findAll('input[type="time"]')).toHaveLength(2)
+
+    // 夜间窗口：合法值即时写入；起止相同被拒绝（回滚 + 红灯）。
+    const timeInputs = switchesPage.findAll('input[type="time"]')
+    const startInput = timeInputs[0]!
+    const endInput = timeInputs[1]!
+    await startInput.setValue('22:30')
+    await startInput.trigger('change')
+    await flushPromises()
+    expect((await storedSettings()).nightStart).toBe('22:30')
+    await endInput.setValue('22:30')
+    await endInput.trigger('change')
+    await flushPromises()
+    const rejected = await storedSettings()
+    expect(rejected.nightEnd).not.toBe('22:30')
+    expect(switchesPage.find('.feedback.fail').exists()).toBe(true)
+  })
+
+  it('外观卡：主题模式回填存储值', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { themeMode: 'system' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    const switchesPage = wrapper.find('.page[aria-label="总开关"]')
+    const active = switchesPage.find('button.theme-mode-option.active')
+    expect(active.text()).toBe('跟随系统')
   })
 
   it('导出成功路径：写入剪贴板并报绿灯', async () => {

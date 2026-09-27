@@ -55,6 +55,18 @@ export interface MarkingState {
   startText: string
 }
 
+/** 原生进度条悬停提示态：注入层由原生条 mousemove 驱动，Shadow 层只渲染。 */
+export interface BarHoverState {
+  active: boolean
+  /** 提示锚点（相对播放器容器 px）：x 为悬停横位，bottom 为提示底边距容器底。 */
+  left: number
+  bottom: number
+  /** 命中的章节（悬停点落在章节刻度附近）；与 ad 互斥，可同时为空（纯进度悬停不提示）。 */
+  chapter: ChapterMarkState | null
+  /** 命中的广告段（悬停点落在广告底段内）。 */
+  ad: AdMarkState | null
+}
+
 /**
  * 标记层盒子：直接跟随 B 站进度条本体的几何（相对播放器容器的 px），
  * 并镜像控制层显隐——B 站控制层淡出/收起时标记必须一起消失，不能悬在原地。
@@ -87,6 +99,9 @@ export interface UiActions {
   onStartMarkAd: () => void
   onFinishMarkAd: () => void
   onCancelMarkAd: () => void
+  /** 原生条悬停提示的保活/收尾（指针从进度条移进提示卡时防闪没）。 */
+  keepBarHover: () => void
+  endBarHover: () => void
 }
 
 export const ui = reactive({
@@ -100,6 +115,13 @@ export const ui = reactive({
   /** 章节标记（官方看点 + AI 时间线合并后），接线层维护。 */
   chapterMarks: [] as ChapterMarkState[],
   marksBox: { visible: false, left: 0, top: 0, width: 0 } as MarksBoxState,
+  /**
+   * 标记是否已注入 B 站原生进度条（原生一体化形态）。true 时 Shadow 层不再渲染
+   * 标记本体（进度条内自持），只渲染悬停提示；false 走旧「几何镜像」回退形态。
+   */
+  nativeMarksActive: false,
+  /** 原生进度条悬停提示（注入层驱动；active=false 不渲染）。 */
+  barHover: { active: false, left: 0, bottom: 0, chapter: null, ad: null } as BarHoverState,
   /**
    * 去广告检测结果镜像（控制器维护）：AI 面板分段时间线与广告区间合并打标用。
    * adSkipEnabled 关/无广告时为空数组 → 面板纯分段。
@@ -123,5 +145,7 @@ export const ui = reactive({
     onStartMarkAd: () => {},
     onFinishMarkAd: () => {},
     onCancelMarkAd: () => {},
+    keepBarHover: () => {},
+    endBarHover: () => {},
   } as UiActions,
 })

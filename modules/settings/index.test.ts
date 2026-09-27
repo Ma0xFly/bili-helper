@@ -66,6 +66,22 @@ describe('readAiSettings', () => {
     await writeAiSettings({ chapterMarksEnabled: false })
     expect((await readAiSettings()).chapterMarksEnabled).toBe(false)
   })
+
+  it('themeMode 默认跟随B站；非法值收敛；夜间窗口坏值收敛到默认', async () => {
+    expect((await readAiSettings()).themeMode).toBe('bilibili')
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { themeMode: 'bogus', nightStart: '25:00', nightEnd: 'nonsense' },
+    })
+    const normalized = await readAiSettings()
+    expect(normalized.themeMode).toBe('bilibili')
+    expect(normalized.nightStart).toBe('19:00')
+    expect(normalized.nightEnd).toBe('07:00')
+    await writeAiSettings({ themeMode: 'schedule', nightStart: '22:30', nightEnd: '06:30' })
+    const settings = await readAiSettings()
+    expect(settings.themeMode).toBe('schedule')
+    expect(settings.nightStart).toBe('22:30')
+    expect(settings.nightEnd).toBe('06:30')
+  })
 })
 
 describe('writeAiSettings', () => {
