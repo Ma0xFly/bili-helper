@@ -223,8 +223,11 @@ onBeforeUnmount(() => {
               @click="seekSegment(segment)"
             >
               <span class="bh-seg-time">{{ formatPanelTimestamp(segment.start) }}</span>
-              <span class="bh-seg-label">
-                {{ segment.isAd ? adSegmentLabel(segment.label, segment.end) : segment.label }}
+              <span class="bh-seg-body">
+                <span class="bh-seg-label">
+                  {{ segment.isAd ? adSegmentLabel(segment.label, segment.end) : segment.label }}
+                </span>
+                <span v-if="segment.digest" class="bh-seg-digest">{{ segment.digest }}</span>
               </span>
               <span v-if="segment.isAd" class="bh-seg-ad">广告</span>
             </button>

@@ -50,6 +50,7 @@ export interface FeatureConfigShapes {
   labelVideoBlocker: Record<string, never>
   steplessVideoRate: SteplessRateConfig
   commentIpLocation: Record<string, never>
+  pageDarkFollow: Record<string, never>
 }
 
 export type FeatureId = keyof FeatureConfigShapes
@@ -218,6 +219,17 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     title: '评论 IP 归属',
     description: '在视频评论区的用户名右侧显示用户 IP 归属地。',
     appliesTo: ['视频页'],
+    counted: false,
+    defaults: {},
+    normalize: EMPTY_CONFIG_NORMALIZER,
+  },
+  pageDarkFollow: {
+    id: 'pageDarkFollow',
+    group: 'enhance',
+    title: '页面深色跟随浏览器',
+    description:
+      '浏览器处于深色主题时，给 B 站页面套上深色配色；浏览器切回浅色立即还原。浮层与进度条标记跟着一起变暗。',
+    appliesTo: ['首页', '视频页', '热门', '搜索'],
     counted: false,
     defaults: {},
     normalize: EMPTY_CONFIG_NORMALIZER,

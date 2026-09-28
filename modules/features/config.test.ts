@@ -18,8 +18,8 @@ beforeEach(async () => {
 })
 
 describe('功能注册表', () => {
-  it('6 个功能、两个分组齐全（布局优化与换一换历史已按产品裁决移除）；全部默认关闭', () => {
-    expect(FEATURE_IDS).toHaveLength(6)
+  it('7 个功能、两个分组齐全（布局优化与换一换历史已按产品裁决移除）；全部默认关闭', () => {
+    expect(FEATURE_IDS).toHaveLength(7)
     const groups = new Set(FEATURE_IDS.map((id) => FEATURE_REGISTRY[id].group))
     expect([...groups].sort()).toEqual(['enhance', 'filter'])
     for (const id of FEATURE_IDS) {

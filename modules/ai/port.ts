@@ -75,6 +75,8 @@ export interface SummarySegment {
   start: number
   end: number
   label: string
+  /** 本段小结（1–2 句，只依据该段时间范围内的资料）；旧缓存/旧输出可能没有。 */
+  digest?: string
 }
 
 export interface SummarizeResult {

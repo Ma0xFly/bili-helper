@@ -15,6 +15,7 @@ import { createAdVideoBlocker } from '../modules/features/blockers/ad-video'
 import { createPromotedVideoBlocker } from '../modules/features/blockers/promoted-video'
 import { createLabelVideoBlocker } from '../modules/features/blockers/label-video'
 import { createSteplessRateRuntime } from '../modules/features/enhance/stepless-rate'
+import { createPageDarkRuntime } from '../modules/features/enhance/page-dark'
 
 /** FeatureConfigMap → 主世界线协议（纯 JSON；函数过不了 postMessage）。 */
 function toInterceptPayload(map: FeatureConfigMap): SerializedFeatureConfigs {
@@ -74,6 +75,7 @@ export default defineContentScript({
     manager.register('promotedVideoBlocker', () => createPromotedVideoBlocker())
     manager.register('labelVideoBlocker', () => createLabelVideoBlocker())
     manager.register('steplessVideoRate', () => createSteplessRateRuntime())
+    manager.register('pageDarkFollow', () => createPageDarkRuntime())
 
     // 主世界拦截明细回传（videoFilter 命中）→ 隔离侧落库（主世界没有 chrome.storage）。
     onFilterLogEvent(window, (entry) => appendFilterLogEntries([entry]))

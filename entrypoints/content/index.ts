@@ -206,6 +206,9 @@ export default defineContentScript({
     // 透明（alpha=0）背景视为不可判定，沿用当前状态，不做暗色误判。
     function isDarkMode(): boolean {
       const root = window.document.documentElement
+      // 页面深色跟随浏览器（功能组 pageDarkFollow）开启时：整页已深色，浮层直接用暗色
+      // token（浮层宿主自身做逆还原，呈现的是原本的暗色设计而不是反色）。
+      if (root?.hasAttribute('data-bh-page-dark')) return true
       const className = typeof root?.className === 'string' ? root.className : ''
       if (/(dark|night|__night|theme-dark)/i.test(className)) return true
       try {

@@ -394,12 +394,31 @@
   padding: 2px 8px;
 }
 
-.bh-seg-label {
+.bh-seg-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bh-seg-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 每段小结（digest）：一行省略，悬停展开——跳之前先看一眼这段讲了什么。 */
+.bh-seg-digest {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--bh-text-secondary);
+  font-weight: 400;
 }
 
 .bh-seg-ad {

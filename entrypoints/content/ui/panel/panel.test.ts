@@ -270,6 +270,24 @@ describe('SummaryTab（总结交互）', () => {
     expect(panelActions.seek).toHaveBeenCalledWith(20)
   })
 
+  it('每段小结（digest）：有则渲染在标题下方，无则不渲染（旧输出兼容）', async () => {
+    panel.session = makeSession()
+    panelActions.summarize = vi.fn(async () => ({
+      summary: 's',
+      segments: [
+        { start: 0, end: 20, label: '开场', digest: '介绍背景与评测方法。' },
+        { start: 20, end: 100, label: '后半程' },
+      ],
+    }))
+    const wrapper = mount(SummaryTab)
+    await wrapper.find('.bh-btn-primary').trigger('click')
+    await flushPromises()
+
+    const digests = wrapper.findAll('.bh-seg-digest')
+    expect(digests).toHaveLength(1)
+    expect(digests[0]!.text()).toBe('介绍背景与评测方法。')
+  })
+
   it('AI 输出带危险 HTML：marked 渲染后经 dompurify 清洗', async () => {
     panel.session = makeSession()
     panelActions.summarize = vi.fn(async () => ({

@@ -8,11 +8,12 @@ import type { AiErrorInfo } from '../shared/error'
 
 // ---------- 分段时间线 × 广告区间合并 ----------
 
-/** 分段时间线条目：按 start 排序；isAd 由与广告区间的重叠判定。 */
+/** 分段时间线条目：按 start 排序；isAd 由与广告区间的重叠判定；digest 为每段小结（可选）。 */
 export interface PanelSegment {
   start: number
   end: number
   label: string
+  digest?: string
   isAd: boolean
 }
 

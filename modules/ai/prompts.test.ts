@@ -155,6 +155,34 @@ describe('parseSummarizeResponse（先解析后退化）', () => {
   it('空输出退化为空 summary 空 segments，不抛错', () => {
     expect(parseSummarizeResponse('')).toEqual({ summary: '', segments: [] })
   })
+
+  it('每段 digest：字符串取 trim，非字符串/空串不给字段，超长截到 200', () => {
+    const result = parseSummarizeResponse(
+      JSON.stringify({
+        summary: 's',
+        segments: [
+          { start: 0, end: 10, label: '开场', digest: '  介绍测评背景与机型。 ' },
+          { start: 10, end: 20, label: '无小结', digest: '   ' },
+          { start: 20, end: 30, label: '坏类型', digest: 123 },
+          { start: 30, end: 40, label: '超长', digest: '长'.repeat(260) },
+        ],
+      }),
+    )
+    expect(result.segments[0]).toEqual({ start: 0, end: 10, label: '开场', digest: '介绍测评背景与机型。' })
+    expect(result.segments[1]).toEqual({ start: 10, end: 20, label: '无小结' })
+    expect(result.segments[2]).toEqual({ start: 20, end: 30, label: '坏类型' })
+    expect(result.segments[3]?.digest).toHaveLength(200)
+  })
+
+  it('分段规则进提示词：按知识点分段、段长指引、覆盖衔接、digest 要求', () => {
+    const messages = buildSummaryMessages({ ...CONTEXT })
+    const system = messages[0]?.content ?? ''
+    expect(system).toContain('知识点/话题')
+    expect(system).toContain('1–8 分钟')
+    expect(system).toContain('60 秒')
+    expect(system).toContain('digest')
+    expect(system).toContain('20–80 字')
+  })
 })
 
 describe('parseDetectAdResponse（先 JSON 后宽松后保留召回窗口）', () => {

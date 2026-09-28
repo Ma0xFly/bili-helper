@@ -29,6 +29,7 @@ const features = computed(() =>
  *   增强组：单卡（播放器与评论）
  */
 const BLOCKER_FEATURE_IDS: FeatureId[] = ['adVideoBlocker', 'promotedVideoBlocker', 'labelVideoBlocker']
+const PAGE_FEATURE_IDS: FeatureId[] = ['steplessVideoRate', 'commentIpLocation']
 
 interface CardSection {
   key: string
@@ -44,7 +45,13 @@ const sections = computed<CardSection[]>(() => {
         key: 'enhance',
         title: '播放器与评论',
         note: '只作用于视频页；关掉后播放器与评论区恢复 B 站原样。',
-        features: features.value,
+        features: features.value.filter((feature) => PAGE_FEATURE_IDS.includes(feature.id)),
+      },
+      {
+        key: 'pageDark',
+        title: '页面外观',
+        note: '作用于首页 / 热门 / 搜索 / 视频页；关掉后页面立即恢复 B 站原样。',
+        features: features.value.filter((feature) => !PAGE_FEATURE_IDS.includes(feature.id)),
       },
     ]
   }

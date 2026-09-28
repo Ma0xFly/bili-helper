@@ -18,10 +18,10 @@ export function formatTimecode(seconds: number): string {
 }
 
 // 输出协议在提示词里给模型展示一遍、解析时再校验一遍，两处共用同一条字符串避免漂移。
-const SUMMARY_SCHEMA_TEXT = '{"summary": "Markdown 文本：先一句话总结，再列核心要点（- 列表）", "segments": [{"start": 0, "end": 0, "label": "分章标题"}]}'
+const SUMMARY_SCHEMA_TEXT = '{"summary": "Markdown 文本：先一句话总结，再列核心要点（- 列表）", "segments": [{"start": 0, "end": 0, "label": "分章标题", "digest": "本段小结，1-2 句"}]}'
 
 const SUMMARY_SYSTEM_PROMPT = [
-  '你是 B 站视频 AI 总结助手。你的任务是根据给定的视频资料（字幕、弹幕）产出一份精炼的中文总结。',
+  '你是 B 站视频 AI 总结助手，擅长把学习向视频整理成可跳转、可复习的笔记。你的任务是根据给定的视频资料（字幕、弹幕）产出一份精炼的中文总结。',
   '',
   '铁律：',
   '1. 只依据给定资料总结，严禁编造资料中不存在的内容；资料不足以支撑总结时，直接说明「资料不足」，并只总结已有内容。',
@@ -29,9 +29,17 @@ const SUMMARY_SYSTEM_PROMPT = [
   '3. 字幕中若出现明显的商业推广（恰饭、带货、口播广告），在对应分段的 label 前标注「广告」二字。',
   '4. 不评价视频质量，不复述无关内容。',
   '',
+  '分段规则（segments 是用户跳转复习的导航，精度优先）：',
+  '1. 按知识点/话题的切换分段，不按等时长机械切；跟随讲解脉络（如：引入 → 概念 → 推导/步骤 → 示例 → 常见坑 → 总结）。',
+  '2. 每段通常覆盖 1–8 分钟的内容；短于 30 秒的段并入相邻段，超过 15 分钟的长讲解要拆开。',
+  '3. 段按时间顺序衔接、覆盖视频主体内容；纯片头/片尾过场可跳过，但相邻段之间不留超过约 60 秒的未覆盖空隙。',
+  '4. start 取该话题实际开始的时间戳，end 取该话题结束处（下一段 start 与本段 end 相邻或相同即可）。',
+  '5. label：不超过 12 字的主题短语，具体可检索（如「二叉树的层序遍历」而不是「第二部分」）。',
+  '6. digest：本段小结，1–2 句（共 20–80 字），只依据该段时间范围内的字幕；讲清本段讲了什么，关键概念、步骤、数字、结论要带上，让用户不点开就能决定要不要跳过去看。',
+  '',
   '输出协议：只输出一个 JSON 对象（不要 Markdown 代码块，不要任何其他文字），字段如下：',
   SUMMARY_SCHEMA_TEXT,
-  '- summary 用中文 Markdown；segments 按视频内容自然分章，start/end 对齐字幕时间戳（秒），无法可靠分段时返回空数组 []。',
+  '- summary 用中文 Markdown；segments 按上述分段规则组织，start/end 对齐字幕时间戳（秒），无法可靠分段时返回空数组 []。',
 ].join('\n')
 
 const CHAT_SYSTEM_PROMPT = [
@@ -136,6 +144,13 @@ export function extractJson(text: string): unknown {
   return null
 }
 
+/** 每段小结：字符串 trim 后截到 200 字；缺/非字符串不给字段（旧输出兼容）。 */
+function parseDigest(value: unknown): { digest?: string } {
+  if (typeof value !== 'string') return {}
+  const digest = value.trim().slice(0, 200)
+  return digest === '' ? {} : { digest }
+}
+
 /** 总结输出「先解析后退化」：JSON 形状完整取其结构，否则原文整体作为 summary。 */
 export function parseSummarizeResponse(raw: string): SummarizeResult {
   const parsed = extractJson(raw)
@@ -157,7 +172,7 @@ export function parseSummarizeResponse(raw: string): SummarizeResult {
     const end = typeof segment.end === 'number' ? segment.end : NaN
     if (!Number.isFinite(start) || !Number.isFinite(end)) continue
     if (typeof segment.label !== 'string' || segment.label.trim() === '') continue
-    segments.push({ start, end, label: segment.label })
+    segments.push({ start, end, label: segment.label.trim(), ...parseDigest(segment.digest) })
   }
   return { summary, segments }
 }

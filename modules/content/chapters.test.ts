@@ -116,6 +116,29 @@ describe('AI 时间线缓存', () => {
     expect(await readChapterCache('BV1bb', 2)).toBeNull()
   })
 
+  it('每段小结（digest）随缓存读写保留；无 digest 的旧条目照常读回', async () => {
+    await writeChapterCache('BV1dd', 5, [
+      { start: 0, end: 60, label: '开场', digest: '介绍背景。' },
+      { start: 60, end: 300, label: '正片' },
+    ])
+    const entry = await readChapterCache('BV1dd', 5)
+    expect(entry?.segments[0]).toEqual({ start: 0, end: 60, label: '开场', digest: '介绍背景。' })
+    expect(entry?.segments[1]).toEqual({ start: 60, end: 300, label: '正片' })
+    // 脏 digest（非字符串）被剥掉，条目本身保留。
+    await chrome.storage.local.set({
+      [CHAPTER_CACHE_STORAGE_KEY]: {
+        'BV1dd:6': {
+          bvid: 'BV1dd',
+          cid: 6,
+          savedAt: 6,
+          segments: [{ start: 0, end: 10, label: '坏类型', digest: 123 }],
+        },
+      },
+    })
+    const dirty = await readChapterCache('BV1dd', 6)
+    expect(dirty?.segments).toEqual([{ start: 0, end: 10, label: '坏类型' }])
+  })
+
   it('超上限按 savedAt 淘汰最旧（LRU）', async () => {
     for (let index = 0; index < CHAPTER_CACHE_LIMIT + 3; index += 1) {
       const raw = (await chrome.storage.local.get(CHAPTER_CACHE_STORAGE_KEY)) as Record<

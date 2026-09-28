@@ -124,7 +124,8 @@ function normalizeCacheEntry(raw: unknown): ChapterCacheEntry | null {
       const end = asFiniteNumber(segment.end)
       const label = typeof segment.label === 'string' ? segment.label.trim() : ''
       if (start === null || end === null || label === '') continue
-      segments.push({ start, end, label })
+      const digest = typeof segment.digest === 'string' ? segment.digest.trim().slice(0, 200) : ''
+      segments.push({ start, end, label, ...(digest === '' ? {} : { digest }) })
     }
   }
   if (segments.length === 0) return null
