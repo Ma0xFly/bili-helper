@@ -13,7 +13,6 @@ import { MarksBoxTracker } from '../../modules/content/marks-box'
 import { NativeMarksInjector } from '../../modules/content/native-marks'
 import { formatCompactTime } from '../../modules/content/logic'
 import { readAdFeedback, writeAdFeedback } from '../../modules/content/ad-feedback'
-import { resolveThemeDark, type ThemePreference } from '../../modules/content/theme-mode'
 import {
   mergeChapterSources,
   parseViewPoints,
@@ -206,9 +205,6 @@ export default defineContentScript({
     // 透明（alpha=0）背景视为不可判定，沿用当前状态，不做暗色误判。
     function isDarkMode(): boolean {
       const root = window.document.documentElement
-      // 页面深色跟随浏览器（功能组 pageDarkFollow）开启时：整页已深色，浮层直接用暗色
-      // token（浮层宿主自身做逆还原，呈现的是原本的暗色设计而不是反色）。
-      if (root?.hasAttribute('data-bh-page-dark')) return true
       const className = typeof root?.className === 'string' ? root.className : ''
       if (/(dark|night|__night|theme-dark)/i.test(className)) return true
       try {
@@ -226,39 +222,13 @@ export default defineContentScript({
       return ui.dark
     }
 
-    // ---------- 主题模式（页内浮层亮暗来源） ----------
-    // 默认跟随 B 站（现行检测）；跟随系统/定时自动两种来源在 resolveDark 收敛，
-    // ui.dark 仍是浮层唯一开关。偏好经 settings 读回与 storage.onChanged 双路同步。
-    let themePreference: ThemePreference = {
-      themeMode: 'bilibili',
-      nightStart: '19:00',
-      nightEnd: '07:00',
-    }
-    let systemDarkQuery: MediaQueryList | null = null
-    try {
-      systemDarkQuery = window.matchMedia('(prefers-color-scheme: dark)')
-      systemDarkQuery.addEventListener('change', () => controller.applyDark())
-    } catch {
-      // matchMedia 不可用：跟随系统退化为跟随 B 站（applyDark 周期拍兜底）。
-    }
-    function resolveDark(): boolean {
-      return resolveThemeDark(themePreference, {
-        bilibiliDark: isDarkMode,
-        systemDark: () => systemDarkQuery?.matches ?? isDarkMode(),
-        nowMinutes: () => {
-          const now = new Date()
-          return now.getHours() * 60 + now.getMinutes()
-        },
-      })
-    }
-
     // ---------- 控制器 ----------
     const controller = new AdSkipController({
       timers,
       now: () => Date.now(),
       player: playerAdapter,
       pageHref: () => window.location.href,
-      isDark: resolveDark,
+      isDark: isDarkMode,
       collectVideoMeta,
       collectSubtitles,
       collectDanmaku,
@@ -647,13 +617,9 @@ export default defineContentScript({
     // 周期检查驱动就绪三重门与失位重插（原版为 500ms 重试链 + 观察器，这里以 1.5s 周期承担）。
     ensurePanelPlacement()
 
-    // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）；
-    // 主题模式顺带重估（后台期间跨过夜间窗口边界，回前台立即翻色）。
+    // 标签页从后台回到前台：立即补采（后台期间被 document.hidden 门拦住）。
     window.document.addEventListener('visibilitychange', () => {
-      if (window.document.visibilityState === 'visible') {
-        controller.applyDark()
-        void syncPanelSession()
-      }
+      if (window.document.visibilityState === 'visible') void syncPanelSession()
     })
 
     function getPanelPageState(): PanelPageState {
@@ -689,22 +655,6 @@ export default defineContentScript({
       if (next && typeof next.adSkipEnabled === 'boolean') {
         controller.syncMasterEnabled(next.adSkipEnabled)
       }
-      if (
-        next &&
-        (typeof next.themeMode === 'string' ||
-          typeof next.nightStart === 'string' ||
-          typeof next.nightEnd === 'string')
-      ) {
-        // 主题偏好变化：经读取侧归一后即时重估（写侧坏值在这里被收敛，不信原文）。
-        void readAiSettings()
-          .then((settings) => {
-            themePreference = settings
-            controller.applyDark()
-          })
-          .catch(() => {
-            // 读取失败沿用当前偏好，下轮周期拍再同步。
-          })
-      }
       if (next && typeof next.panelEnabled === 'boolean') {
         panel.masterEnabled = next.panelEnabled
         if (panel.masterEnabled) void syncPanelSession()
@@ -728,7 +678,6 @@ export default defineContentScript({
     window.setInterval(() => {
       controller.retryIfNeeded()
       controller.checkNavigation()
-      controller.applyDark() // schedule 模式的分钟级重估搭这班车（bilibili 模式下幂等）。
       void syncPanelSession()
       void syncChapters()
       ensurePanelPlacement()
@@ -784,8 +733,6 @@ export default defineContentScript({
       const initialSettings = await readAiSettings()
       panel.masterEnabled = initialSettings.panelEnabled
       chaptersEnabled = initialSettings.chapterMarksEnabled
-      themePreference = initialSettings
-      controller.applyDark()
     } catch {
       // 读取失败保留默认 true（被动 UI 无惊扰），用户可在设置页切换。
     }

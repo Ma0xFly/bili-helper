@@ -10,12 +10,8 @@
 //   - 浏览器主题在页面开着的时候翻转：写完 cookie 后整页刷新一次让官方主题生效
 //     （SSR/首屏按 cookie 出样式，外部写 cookie 不会触发现有页面的活重绘）。
 //     刷新只在页面可见、且距上次刷新 ≥60s 时执行，后台标签交给下次导航。
-//   - html[data-bh-page-dark] 是 AI 浮层的亮暗桥（entrypoints/content 的 isDarkMode 读它）：
-//     浏览器深色期间浮层用暗色 token，与页面主题一致。
-//   - stop()：清除桥接属性；cookie 保持现状（用户可见的站级状态，插件关掉不该偷偷改回）。
+//   - stop()：停听停写；cookie 保持现状（用户可见的站级状态，插件关掉不该偷偷改回）。
 
-/** 浮层亮暗桥属性；cookie 名与官方一致。 */
-export const PAGE_DARK_ATTR = 'data-bh-page-dark'
 export const OFFICIAL_THEME_COOKIE = 'theme_style'
 /** 「深色 cookie 是我们写的」标记（chrome.storage.session，会话级）。 */
 export const OWN_COOKIE_MARKER_KEY = 'biliHelperPageDarkOwnCookie'
@@ -62,15 +58,9 @@ export function createPageDarkRuntime(options: PageDarkRuntimeOptions = {}): {
   let unsubscribe: (() => void) | null = null
   let lastReloadAt = 0
 
-  const setAttr = (value: boolean): void => {
-    if (value) doc.documentElement.setAttribute(PAGE_DARK_ATTR, 'true')
-    else doc.documentElement.removeAttribute(PAGE_DARK_ATTR)
-  }
-
   /** 与官方开关位对齐；只有 cookie 实际翻转时才值得刷新（start 传 false 永不刷）。 */
   const syncOfficial = async (allowReload: boolean): Promise<void> => {
     const wantDark = media.matches()
-    setAttr(wantDark)
     const current = readOfficial()
     if (wantDark) {
       if (current !== 'dark') {
@@ -106,7 +96,6 @@ export function createPageDarkRuntime(options: PageDarkRuntimeOptions = {}): {
         unsubscribe()
         unsubscribe = null
       }
-      setAttr(false)
     },
   }
 }

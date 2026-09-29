@@ -1,11 +1,10 @@
 // @vitest-environment happy-dom
 // 页面深色跟随浏览器（官方主题写入器）：写 theme_style=dark / 只擦自己写的、
-// 用户手动开的官方深色不代擦、运行中翻转的可见页刷新与节流、桥接属性、stop 清理。
+// 用户手动开的官方深色不代擦、运行中翻转的可见页刷新与节流、stop 清理。
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createPageDarkRuntime,
   OWN_COOKIE_MARKER_KEY,
-  PAGE_DARK_ATTR,
   RELOAD_MIN_INTERVAL_MS,
 } from './page-dark'
 
@@ -66,18 +65,11 @@ function makeControllableHarness({
     get reloadCount() {
       return reloadCount
     },
-    get attrOn() {
-      return document.documentElement.hasAttribute(PAGE_DARK_ATTR)
-    },
     tick(ms: number) {
       clock += ms
     },
   }
 }
-
-beforeEach(() => {
-  document.documentElement.removeAttribute(PAGE_DARK_ATTR)
-})
 
 describe('createPageDarkRuntime（官方主题写入器）', () => {
   it('start 时浏览器深色 → 写 theme_style=dark 并标记自己写的；浅色 → 不动官方 cookie', async () => {
@@ -85,7 +77,6 @@ describe('createPageDarkRuntime（官方主题写入器）', () => {
     await h.start()
     expect(h.cookie).toBe('dark')
     expect(h.own).toBe(true)
-    expect(h.attrOn).toBe(true)
     expect(h.reloadCount).toBe(0) // start 永不刷新
     await h.stop()
 
@@ -93,7 +84,6 @@ describe('createPageDarkRuntime（官方主题写入器）', () => {
     await h2.start()
     expect(h2.cookie).toBe('light')
     expect(h2.own).toBe(false)
-    expect(h2.attrOn).toBe(false)
     await h2.stop()
   })
 
@@ -130,18 +120,16 @@ describe('createPageDarkRuntime（官方主题写入器）', () => {
     const h = makeControllableHarness({ initialCookie: 'dark', initialOwn: false, dark: false })
     await h.start()
     expect(h.cookie).toBe('dark') // 保持用户的选择
-    expect(h.attrOn).toBe(false) // 浏览器浅色，浮层桥不开
     await h.setDark(true)
     expect(h.own).toBe(false) // 我们没写就不标记
     expect(h.reloadCount).toBe(0) // cookie 已是 dark，无翻转可刷
     await h.stop()
   })
 
-  it('stop 摘除桥接属性；stop 后翻转不再写 cookie', async () => {
+  it('stop 后翻转不再写 cookie（cookie 是用户可见的站级状态，stop 不动它）', async () => {
     const h = makeControllableHarness({ dark: true })
     await h.start()
     await h.stop()
-    expect(h.attrOn).toBe(false)
     const before = h.cookie
     await h.setDark(false)
     expect(h.cookie).toBe(before)

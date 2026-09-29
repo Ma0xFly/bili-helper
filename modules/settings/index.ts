@@ -48,14 +48,7 @@ export interface AiSettings {
    * 官方看点零 token；AI 时间线只在用户手动点总结后才可能出现。
    */
   chapterMarksEnabled: boolean
-  /** 页内浮层亮暗来源：bilibili 跟随 B 站夜间模式（默认）/ system 跟随系统 / schedule 定时自动。 */
-  themeMode: ThemeMode
-  /** schedule 模式的夜间窗口（跨午夜合法，HH:MM）；非法值读取侧收敛到默认。 */
-  nightStart: string
-  nightEnd: string
 }
-
-export type ThemeMode = 'bilibili' | 'system' | 'schedule'
 
 export interface EmbeddingEndpoint {
   baseUrl: string
@@ -92,23 +85,10 @@ export const DEFAULT_SETTINGS: AiSettings = {
   adSkipEnabled: false,
   panelEnabled: true,
   chapterMarksEnabled: true,
-  themeMode: 'bilibili',
-  nightStart: '19:00',
-  nightEnd: '07:00',
 }
 
 function isAiMode(value: unknown): value is AiMode {
   return value === 'local' || value === 'server' || value === 'auto'
-}
-
-function isThemeMode(value: unknown): value is ThemeMode {
-  return value === 'bilibili' || value === 'system' || value === 'schedule'
-}
-
-/** HH:MM 严格校验（小时 0–23、分钟 0–59）；合法原样返回，非法回默认。 */
-function normalizeTimeOfDay(value: unknown, fallback: string): string {
-  if (typeof value !== 'string') return fallback
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fallback
 }
 
 function asString(value: unknown, fallback: string): string {
@@ -146,9 +126,6 @@ function normalizeSettings(raw: unknown): AiSettings {
       typeof source.chapterMarksEnabled === 'boolean'
         ? source.chapterMarksEnabled
         : DEFAULT_SETTINGS.chapterMarksEnabled,
-    themeMode: isThemeMode(source.themeMode) ? source.themeMode : DEFAULT_SETTINGS.themeMode,
-    nightStart: normalizeTimeOfDay(source.nightStart, DEFAULT_SETTINGS.nightStart),
-    nightEnd: normalizeTimeOfDay(source.nightEnd, DEFAULT_SETTINGS.nightEnd),
   }
 }
 
