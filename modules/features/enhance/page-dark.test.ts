@@ -1,112 +1,153 @@
 // @vitest-environment happy-dom
-// 页面深色跟随浏览器：官方 cookie 优先（原生深色，不叠反色）、浏览器 scheme 兜底（自绘反色）、
-// live 翻转、stop 零残留、桥接属性。
+// 页面深色跟随浏览器（官方主题写入器）：写 theme_style=dark / 只擦自己写的、
+// 用户手动开的官方深色不代擦、运行中翻转的可见页刷新与节流、桥接属性、stop 清理。
 import { beforeEach, describe, expect, it } from 'vitest'
-import { createPageDarkRuntime, PAGE_DARK_CSS, PAGE_DARK_STYLE_ID } from './page-dark'
+import {
+  createPageDarkRuntime,
+  OWN_COOKIE_MARKER_KEY,
+  PAGE_DARK_ATTR,
+  RELOAD_MIN_INTERVAL_MS,
+} from './page-dark'
 
-/** 可手动翻转的 matchMedia 替身。 */
-function fakeMedia(initialDark: boolean) {
-  let dark = initialDark
-  const listeners = new Set<() => void>()
-  return {
-    matches: () => dark,
-    subscribe: (listener: () => void) => {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
+/** 订阅可达的封装：记录 subscribe 的回调，setDark 时触发。 */
+function makeControllableHarness({
+  initialCookie = 'light' as 'dark' | 'light',
+  initialOwn = false,
+  dark = false,
+} = {}) {
+  let cookie = initialCookie
+  let own = initialOwn
+  let darkNow = dark
+  let reloadCount = 0
+  let clock = 1_000_000
+  let listener: (() => void | Promise<void>) | null = null
+  const runtime = createPageDarkRuntime({
+    doc: document,
+    media: {
+      matches: () => darkNow,
+      subscribe: (cb) => {
+        listener = cb
+        return () => {
+          listener = null
+        }
+      },
     },
-    setDark(value: boolean) {
-      dark = value
-      for (const listener of [...listeners]) listener()
+    readOfficial: () => (cookie === 'dark' ? 'dark' : 'light'),
+    writeOfficial: (value) => {
+      cookie = value ? 'dark' : 'light'
+    },
+    readOwnMarker: async () => own,
+    writeOwnMarker: async (value) => {
+      own = value
+    },
+    reload: () => {
+      reloadCount += 1
+    },
+    now: () => clock,
+  })
+  return {
+    runtime,
+    async start() {
+      await runtime.start()
+    },
+    async stop() {
+      runtime.stop()
+    },
+    async setDark(value: boolean) {
+      darkNow = value
+      await listener?.()
+    },
+    get cookie() {
+      return cookie
+    },
+    get own() {
+      return own
+    },
+    get reloadCount() {
+      return reloadCount
+    },
+    get attrOn() {
+      return document.documentElement.hasAttribute(PAGE_DARK_ATTR)
+    },
+    tick(ms: number) {
+      clock += ms
     },
   }
 }
 
 beforeEach(() => {
-  document.head.innerHTML = ''
-  document.documentElement.removeAttribute('data-bh-page-dark')
+  document.documentElement.removeAttribute(PAGE_DARK_ATTR)
 })
 
-describe('createPageDarkRuntime', () => {
-  it('浏览器深色（官方未开）→ 注入反色样式与桥接属性', () => {
-    const media = fakeMedia(true)
-    const runtime = createPageDarkRuntime({ media, officialDark: () => false })
-    runtime.start()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).not.toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(true)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)?.textContent).toContain('invert(1)')
-    runtime.stop()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(false)
+describe('createPageDarkRuntime（官方主题写入器）', () => {
+  it('start 时浏览器深色 → 写 theme_style=dark 并标记自己写的；浅色 → 不动官方 cookie', async () => {
+    const h = makeControllableHarness({ dark: true })
+    await h.start()
+    expect(h.cookie).toBe('dark')
+    expect(h.own).toBe(true)
+    expect(h.attrOn).toBe(true)
+    expect(h.reloadCount).toBe(0) // start 永不刷新
+    await h.stop()
+
+    const h2 = makeControllableHarness({ dark: false })
+    await h2.start()
+    expect(h2.cookie).toBe('light')
+    expect(h2.own).toBe(false)
+    expect(h2.attrOn).toBe(false)
+    await h2.stop()
   })
 
-  it('官方深色开着（theme_style=dark）→ 只设桥接属性、绝不叠反色（B 站自己上色）', () => {
-    const media = fakeMedia(false) // 浏览器是浅色也要跟着官方深色走
-    const runtime = createPageDarkRuntime({ media, officialDark: () => true })
-    runtime.start()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(true)
-    // 官方开着时即便浏览器也深色，反色样式同样不出现（否则双重变暗）。
-    media.setDark(true)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    runtime.stop()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(false)
+  it('运行中 浏览器浅→深：写 cookie + 可见页刷新一次；深→浅：只擦自己写的并刷新', async () => {
+    const h = makeControllableHarness({ dark: false })
+    await h.start()
+    await h.setDark(true)
+    expect(h.cookie).toBe('dark')
+    expect(h.own).toBe(true)
+    expect(h.reloadCount).toBe(1) // 可见页翻转 → 刷新生效官方主题
+
+    h.tick(RELOAD_MIN_INTERVAL_MS + 1)
+    await h.setDark(false)
+    expect(h.cookie).toBe('light')
+    expect(h.own).toBe(false)
+    expect(h.reloadCount).toBe(2)
+    await h.stop()
   })
 
-  it('轮询捕捉官方开关变化：cookie 开 → 反色让位原生；cookie 关 → 浏览器深色接回反色', () => {
-    let official = false
-    const media = fakeMedia(true)
-    const holder: { poll?: () => void } = {}
-    const runtime = createPageDarkRuntime({
-      media,
-      officialDark: () => official,
-      pollMs: 5,
-      setInterval: (handler) => {
-        holder.poll = handler
-        return 1
-      },
-      clearInterval: () => {},
-    })
-    runtime.start()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).not.toBeNull()
-    official = true
-    holder.poll?.()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(true)
-    official = false
-    holder.poll?.()
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).not.toBeNull()
-    runtime.stop()
+  it('刷新节流：RELOAD_MIN_INTERVAL_MS 内的连续翻转只刷一次', async () => {
+    const h = makeControllableHarness({ dark: false })
+    await h.start()
+    await h.setDark(true)
+    expect(h.reloadCount).toBe(1)
+    await h.setDark(false)
+    expect(h.reloadCount).toBe(1) // 60s 内不二刷
+    h.tick(RELOAD_MIN_INTERVAL_MS + 1)
+    await h.setDark(true)
+    expect(h.reloadCount).toBe(2)
+    await h.stop()
   })
 
-  it('live 翻转：深→浅立即还原，浅→深立即套上', () => {
-    const media = fakeMedia(true)
-    const runtime = createPageDarkRuntime({ media, officialDark: () => false })
-    runtime.start()
-    media.setDark(false)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(false)
-    media.setDark(true)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).not.toBeNull()
-    runtime.stop()
+  it('用户手动开的官方深色（无标记）不被代擦', async () => {
+    const h = makeControllableHarness({ initialCookie: 'dark', initialOwn: false, dark: false })
+    await h.start()
+    expect(h.cookie).toBe('dark') // 保持用户的选择
+    expect(h.attrOn).toBe(false) // 浏览器浅色，浮层桥不开
+    await h.setDark(true)
+    expect(h.own).toBe(false) // 我们没写就不标记
+    expect(h.reloadCount).toBe(0) // cookie 已是 dark，无翻转可刷
+    await h.stop()
   })
 
-  it('stop 后再次 start 可复用（FeatureManager 重启路径）；stop 解除监听', () => {
-    const media = fakeMedia(false)
-    const runtime = createPageDarkRuntime({ media, officialDark: () => false })
-    runtime.start()
-    runtime.stop()
-    runtime.start()
-    media.setDark(true)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).not.toBeNull()
-    runtime.stop()
-    media.setDark(false)
-    expect(document.getElementById(PAGE_DARK_STYLE_ID)).toBeNull()
-    expect(document.documentElement.hasAttribute('data-bh-page-dark')).toBe(false)
+  it('stop 摘除桥接属性；stop 后翻转不再写 cookie', async () => {
+    const h = makeControllableHarness({ dark: true })
+    await h.start()
+    await h.stop()
+    expect(h.attrOn).toBe(false)
+    const before = h.cookie
+    await h.setDark(false)
+    expect(h.cookie).toBe(before)
   })
 
-  it('配方含精确逆变换与播放器还原（pixel-exact 反色的关键）', () => {
-    expect(PAGE_DARK_CSS).toContain('hue-rotate(-180deg) invert(1)')
-    expect(PAGE_DARK_CSS).toContain('.bpx-player-container')
-    expect(PAGE_DARK_CSS).toContain('filter: none')
+  it('标记键名稳定（session 存储跨标签页共享）', () => {
+    expect(OWN_COOKIE_MARKER_KEY).toBe('biliHelperPageDarkOwnCookie')
   })
 })

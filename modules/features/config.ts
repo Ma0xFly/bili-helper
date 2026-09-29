@@ -228,7 +228,7 @@ export const FEATURE_REGISTRY: { [K in FeatureId]: FeatureDefinition<K> } = {
     group: 'enhance',
     title: '页面深色跟随浏览器',
     description:
-      '浏览器切深色时给 B 站页面套上深色配色，切回浅色立即还原；若 B 站官方深色（灰测）已开启则跟随官方、不做二次处理。浮层与进度条标记跟着一起变暗。',
+      '浏览器切深色时打开 B 站官方深色主题（官方开关位 theme_style cookie），切回浅色还原自己开的部分；页面开着时翻转会自动刷新一次以生效。浮层与进度条标记跟着变暗。',
     appliesTo: ['首页', '视频页', '热门', '搜索'],
     counted: false,
     defaults: {},

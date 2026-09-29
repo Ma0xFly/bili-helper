@@ -12,6 +12,14 @@ import type { RelayPort } from '../modules/ai/llm/net-relay'
 //    fetch 拿着 host_permissions 不受限。流式转发持续产生端口消息（外加客户端
 //    20 秒一拍的保活心跳），MV3 闲置计时不会中途熄火掐断长流。
 export default defineBackground(() => {
+  // storage.session 默认只对扩展页开放；「页面深色跟随浏览器」在内容脚本里记
+  // 「官方深色 cookie 是不是我们写的」（会话级、不落用户站内存储），需要放开到内容脚本。
+  try {
+    void browser.storage.session?.setAccessLevel?.({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' })
+  } catch {
+    // 放开失败（旧内核）：标记读写会静默失败，代价是浏览器由暗转亮时不清我们写的深色 cookie。
+  }
+
   const deps: RelayDeps = {
     queryActiveTab: async () => {
       const [tab] = await browser.tabs

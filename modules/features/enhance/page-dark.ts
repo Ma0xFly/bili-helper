@@ -1,134 +1,146 @@
-// 页面深色跟随浏览器：浏览器 prefers-color-scheme 变深时给整页套深色配色，变浅立即还原。
+// 页面深色跟随浏览器：浏览器 prefers-color-scheme 变化时切换 **B 站官方深色主题**。
+// 官方开关位就是 cookie `theme_style`（dark = 深；Bilibili-Evolved integrated dark mode
+// 同口径）。扩展只做这个官方接口的写入器——不自绘任何配色；能否原生渲染深色由 B 站
+// 侧决定（灰测/登录账号），匿名账号写了也不出效果，属官方能力边界。
 //
-// 主题信号有两级（与 Bilibili-Evolved integrated dark mode 同一口径）：
-//   ① 官方优先：cookie `theme_style=dark` 是 B 站官方深色模式的开关位（灰测用户顶栏切换时写入）。
-//      官方开着 → 整页由 B 站自己上色（灰测账号），我们只设桥接属性让浮层/标记跟随，绝不叠加反色
-//      （否则双重变暗）。cookie 只读不写——写用户站级状态越权，功能关闭也无法恢复。
-//   ② 浏览器兜底：官方没开时跟随 prefers-color-scheme，由扩展自绘深色：html 级反色滤镜 +
-//      媒体/播放器精确还原。配方关键点（真机实测与像素级推演）：
-//      - filter 落在 html 根元素上——Chrome 对根元素滤镜特判，position:fixed 仍锚定视口
-//        （落在 body 子层则 fixed 头部会随页面滚走，实测否决）；
-//      - 反转的精确逆是 hue-rotate(-180deg) invert(1)（先逆色相再反转灰度，与正变换严格互逆，
-//        逐像素还原），不是把同款滤镜再叠一遍——后者对饱和色有色相漂移；
-//      - 播放器容器本来就是深色设计，整容器还原、容器内媒体不再叠加还原。
-// html[data-bh-page-dark] 同时是 AI 浮层的亮暗桥（entrypoints/content 的 isDarkMode 读它）：
-// 页面深色 → 浮层用暗色 token，但浮层宿主自身做逆还原，呈现的是原本的暗色设计而非反色。
+// 行为细则：
+//   - 浏览器深色 → 写 theme_style=dark（一年期）；浏览器浅色 → 只在我们写过的情况下清除
+//     （用户自己在 B 站开的官方深色是ta的明确选择，不代擦）。「是不是我们写的」用
+//     chrome.storage.session 的标记位记忆（会话级、跨标签页、不落用户站内存储）。
+//   - 浏览器主题在页面开着的时候翻转：写完 cookie 后整页刷新一次让官方主题生效
+//     （SSR/首屏按 cookie 出样式，外部写 cookie 不会触发现有页面的活重绘）。
+//     刷新只在页面可见、且距上次刷新 ≥60s 时执行，后台标签交给下次导航。
+//   - html[data-bh-page-dark] 是 AI 浮层的亮暗桥（entrypoints/content 的 isDarkMode 读它）：
+//     浏览器深色期间浮层用暗色 token，与页面主题一致。
+//   - stop()：清除桥接属性；cookie 保持现状（用户可见的站级状态，插件关掉不该偷偷改回）。
 
-/** 深色配方的完整样式（id 固定，stop 时整块摘除，零残留）。 */
-export const PAGE_DARK_STYLE_ID = 'bili-helper-page-dark-style'
-
-export const PAGE_DARK_CSS = `
-html[data-bh-page-dark] {
-  filter: invert(1) hue-rotate(180deg);
-}
-html[data-bh-page-dark] img,
-html[data-bh-page-dark] picture,
-html[data-bh-page-dark] svg,
-html[data-bh-page-dark] canvas,
-html[data-bh-page-dark] iframe,
-html[data-bh-page-dark] video {
-  filter: hue-rotate(-180deg) invert(1);
-}
-html[data-bh-page-dark] .bpx-player-container {
-  filter: hue-rotate(-180deg) invert(1);
-}
-html[data-bh-page-dark] .bpx-player-container img,
-html[data-bh-page-dark] .bpx-player-container video,
-html[data-bh-page-dark] .bpx-player-container canvas,
-html[data-bh-page-dark] .bpx-player-container svg,
-html[data-bh-page-dark] .bpx-player-container iframe {
-  filter: none;
-}
-`
+/** 浮层亮暗桥属性；cookie 名与官方一致。 */
+export const PAGE_DARK_ATTR = 'data-bh-page-dark'
+export const OFFICIAL_THEME_COOKIE = 'theme_style'
+/** 「深色 cookie 是我们写的」标记（chrome.storage.session，会话级）。 */
+export const OWN_COOKIE_MARKER_KEY = 'biliHelperPageDarkOwnCookie'
+/** 运行中主题翻转触发的整页刷新，两次之间最小间隔。 */
+export const RELOAD_MIN_INTERVAL_MS = 60_000
 
 export interface PageDarkMedia {
   /** 浏览器亮暗探针；生产传 window.matchMedia('(prefers-color-scheme: dark)') 的返回。 */
   matches: () => boolean
-  /** 亮暗变化监听；返回退订函数。 */
-  subscribe: (listener: () => void) => () => void
+  /** 亮暗变化监听；返回退订函数。监听器可返回 Promise（调用方自行决定是否等待）。 */
+  subscribe: (listener: () => void | Promise<void>) => () => void
 }
 
 export interface PageDarkRuntimeOptions {
   doc?: Document
   media?: PageDarkMedia
-  /** 官方深色开关探针（cookie `theme_style=dark`）；默认读 document.cookie。 */
-  officialDark?: () => boolean
-  /** 重估节拍（cookie 变化无事件，轮询兜底）；默认 2000ms，测试可注入 0 关闭。 */
-  pollMs?: number
-  setInterval?: (handler: () => void, ms: number) => number
-  clearInterval?: (id: number) => void
+  /** 官方开关位读取；默认读 document.cookie 的 theme_style。 */
+  readOfficial?: () => 'dark' | 'light'
+  /** 官方开关位写入；默认写/删 document.cookie 的 theme_style（.bilibili.com 一年期）。 */
+  writeOfficial?: (dark: boolean) => void
+  /** 「cookie 是我们写的」标记读取/写入/清除；默认走 chrome.storage.session。 */
+  readOwnMarker?: () => Promise<boolean>
+  writeOwnMarker?: (value: boolean) => Promise<void>
+  /** 整页刷新（默认 location.reload）；测试注入观察。 */
+  reload?: () => void
+  /** 刷新节流参考时钟（默认 Date.now）。 */
+  now?: () => number
 }
 
 export function createPageDarkRuntime(options: PageDarkRuntimeOptions = {}): {
-  start(): void
+  start(): Promise<void>
   stop(): void
 } {
   const doc = options.doc ?? (typeof document !== 'undefined' ? document : null)
   const media = options.media ?? defaultMedia()
-  if (doc === null || media === null) return { start(): void {}, stop(): void {} }
-  const officialDark =
-    options.officialDark ??
-    (() => /(?:^|;\s*)theme_style=dark(?:;|$)/.test(doc.cookie ?? ''))
-  const pollMs = options.pollMs ?? 2_000
-  const setIntervalFn =
-    options.setInterval ?? ((handler: () => void, ms: number) => window.setInterval(handler, ms))
-  const clearIntervalFn =
-    options.clearInterval ?? ((id: number) => window.clearInterval(id))
+  if (doc === null || media === null) return { start: async () => {}, stop: () => {} }
+  const readOfficial = options.readOfficial ?? defaultReadCookie(doc)
+  const writeOfficial = options.writeOfficial ?? defaultWriteCookie(doc)
+  const readOwnMarker = options.readOwnMarker ?? defaultReadMarker
+  const writeOwnMarker = options.writeOwnMarker ?? defaultWriteMarker
+  const reload = options.reload ?? (() => window.location.reload())
+  const now = options.now ?? (() => Date.now())
 
-  let style: HTMLStyleElement | null = null
   let unsubscribe: (() => void) | null = null
-  let pollTimer: number | null = null
+  let lastReloadAt = 0
 
   const setAttr = (value: boolean): void => {
-    if (value) doc.documentElement.setAttribute('data-bh-page-dark', 'true')
-    else doc.documentElement.removeAttribute('data-bh-page-dark')
+    if (value) doc.documentElement.setAttribute(PAGE_DARK_ATTR, 'true')
+    else doc.documentElement.removeAttribute(PAGE_DARK_ATTR)
   }
 
-  const apply = (): void => {
-    if (officialDark()) {
-      // 官方深色开着：B 站自己上色，我们只桥接浮层，绝不叠加反色（双重变暗）。
-      setAttr(true)
-      style?.remove()
-      style = null
-      return
-    }
-    if (media.matches()) {
-      setAttr(true)
-      if (style === null || !style.isConnected) {
-        style = doc.createElement('style')
-        style.id = PAGE_DARK_STYLE_ID
-        style.textContent = PAGE_DARK_CSS
-        ;(doc.head ?? doc.documentElement).appendChild(style)
+  /** 与官方开关位对齐；只有 cookie 实际翻转时才值得刷新（start 传 false 永不刷）。 */
+  const syncOfficial = async (allowReload: boolean): Promise<void> => {
+    const wantDark = media.matches()
+    setAttr(wantDark)
+    const current = readOfficial()
+    if (wantDark) {
+      if (current !== 'dark') {
+        writeOfficial(true)
+        await writeOwnMarker(true)
+        if (allowReload) maybeReload()
       }
       return
     }
-    setAttr(false)
-    style?.remove()
-    style = null
+    // 浅色：只擦我们自己写的深色；用户手动开的官方深色不动。
+    if (current === 'dark' && (await readOwnMarker())) {
+      writeOfficial(false)
+      await writeOwnMarker(false)
+      if (allowReload) maybeReload()
+    }
+  }
+
+  const maybeReload = (): void => {
+    if (doc.visibilityState !== 'visible') return
+    const timestamp = now()
+    if (timestamp - lastReloadAt < RELOAD_MIN_INTERVAL_MS) return
+    lastReloadAt = timestamp
+    reload()
   }
 
   return {
-    start() {
-      apply()
-      if (unsubscribe === null) unsubscribe = media.subscribe(apply)
-      if (pollTimer === null && pollMs > 0) {
-        pollTimer = setIntervalFn(apply, pollMs)
-      }
+    async start() {
+      await syncOfficial(false)
+      if (unsubscribe === null) unsubscribe = media.subscribe(() => void syncOfficial(true))
     },
     stop() {
       if (unsubscribe !== null) {
         unsubscribe()
         unsubscribe = null
       }
-      if (pollTimer !== null) {
-        clearIntervalFn(pollTimer)
-        pollTimer = null
-      }
       setAttr(false)
-      style?.remove()
-      style = null
     },
   }
+}
+
+function defaultReadCookie(doc: Document): () => 'dark' | 'light' {
+  return () => {
+    const match = new RegExp(
+      `(?:^|;\\s*)${OFFICIAL_THEME_COOKIE}=([^;]*)`,
+    ).exec(doc.cookie ?? '')
+    return match?.[1]?.trim() === 'dark' ? 'dark' : 'light'
+  }
+}
+
+function defaultWriteCookie(doc: Document): (dark: boolean) => void {
+  return (dark) => {
+    if (dark) {
+      doc.cookie = `${OFFICIAL_THEME_COOKIE}=dark; domain=.bilibili.com; path=/; max-age=31536000; SameSite=Lax`
+    } else {
+      doc.cookie = `${OFFICIAL_THEME_COOKIE}=; domain=.bilibili.com; path=/; max-age=0; SameSite=Lax`
+    }
+  }
+}
+
+function defaultReadMarker(): Promise<boolean> {
+  return chrome.storage.session
+    .get(OWN_COOKIE_MARKER_KEY)
+    .then((result) => (result as Record<string, unknown>)[OWN_COOKIE_MARKER_KEY] === true)
+    .catch(() => false)
+}
+
+function defaultWriteMarker(value: boolean): Promise<void> {
+  return chrome.storage.session
+    .set(value ? { [OWN_COOKIE_MARKER_KEY]: true } : { [OWN_COOKIE_MARKER_KEY]: false })
+    .catch(() => undefined)
 }
 
 function defaultMedia(): PageDarkMedia | null {
