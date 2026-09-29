@@ -151,7 +151,7 @@ describe('PanelApp（面板壳）', () => {
   it('副标题：默认标题行 / 生成中 / 总结完成相对时间 / 提问流式中', async () => {
     panel.session = makeSession()
     const wrapper = mount(PanelApp)
-    expect(wrapper.find('.bh-panel-subtitle').text()).toBe('bili-helper · 测试视频')
+    expect(wrapper.find('.bh-panel-subtitle').text()).toBe('B站智能助手 · 测试视频')
 
     panelActivity.summaryStatus = 'generating'
     await nextTick()
@@ -182,7 +182,7 @@ it('SPA 换视频：session.bvid 变化 → 子 tab 键控重建回空态', asyn
     await nextTick()
     expect(wrapper.find('.bh-markdown').exists()).toBe(false)
     expect(wrapper.find('.bh-panel-empty-title').text()).toBe('让 AI 给你总结一下？')
-    expect(wrapper.find('.bh-panel-subtitle').text()).toBe('bili-helper · 测试视频')
+    expect(wrapper.find('.bh-panel-subtitle').text()).toBe('B站智能助手 · 测试视频')
     expect(panelActivity.summaryStatus).toBe('idle')
   })
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 面板壳（面 A 骨架）：AI 助手标题行 + 总结/提问两 tab 等宽胶囊 + 折叠钮 + 显隐四 gate
 // （设置读回 + 总开关 panelEnabled + popup 页内快开关 + 全屏）由接线层 drive；主标题行为态副标题
-// （正在阅读视频字幕… / 正在回答… / 总结完成于 X 秒前 / bili-helper · ⟨标题⟩）。
+// （正在阅读视频字幕… / 正在回答… / 总结完成于 X 秒前 / B站智能助手 · ⟨标题⟩）。
 // SPA 换视频按 session.bvid 键控子 tab 自复位（Vue 重建，状态回空态）。
 // 折叠与隐藏都走 v-show：不卸载 tab 子树，跨折叠/隐藏保留各 tab 已生成内容与生成态。
 // 视觉 token 全部来自 overlay.css 变量（零裸 hex），亮暗随 [data-dark]。
@@ -67,7 +67,7 @@ const subtitle = computed(() => {
     return `总结完成于 ${summaryAgoSeconds(panelActivity.summaryDoneAt, nowMs.value)} 秒前`
   }
   const title = panel.session?.title.trim()
-  return title ? `bili-helper · ${title}` : 'bili-helper'
+  return title ? `B站智能助手 · ${title}` : 'B站智能助手'
 })
 
 const tabButtons: Array<HTMLButtonElement | null> = []

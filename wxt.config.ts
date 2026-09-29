@@ -5,7 +5,7 @@ import UnoCSS from 'unocss/vite'
 export default defineConfig({
   modules: ['@wxt-dev/module-vue'],
   manifest: {
-    name: 'B站增强助手',
+    name: 'B站智能助手',
     permissions: ['storage'],
     host_permissions: ['http://*/*', 'https://*/*'],
   },
