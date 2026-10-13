@@ -1,21 +1,22 @@
 // RAG 主体：召回（词表 BM25 + 向量语义 + 弹幕信号，RRF 融合去重）→ 小转大（命中窗口回取父级 ±40 秒上下文）→
-// LLM 精确定界（只喂候选窗口、JSON 先解析后宽松、最终保留召回窗口）→ 片段合并/置信度归一。
+// LLM 精确定界（只喂候选窗口、JSON 先解析后宽松）→ 片段合并/置信度归一。
 //
 // 省 token 的三条设计（去广告是高频功能，必须便宜）：
-//   ① 上下文预算：候选窗口与评论有上限，窗口内弹幕经「信号优先 + 无偏采样」精选到常数级（MAX_SPAN_DANMAKU）；
+//   ① 上下文预算：候选窗口有上限且按视频时长伸缩；窗口内弹幕经「信号优先 + 无偏采样」精选到常数级；
 //   ② 免 LLM 通道：词表命中 + 多条**不同**弹幕指认的窗口视为双源强一致，直接给高置信度成段、零对话调用；
-//   ③ 不给白跑：召回零命中且弹幕/评论都没有广告线索时不做全文兜底（最贵的那条路），直接空结果收尾。
+//   ③ 不给白跑：召回零命中且弹幕没有任何广告线索时不做全文兜底（最贵的那条路），直接空结果收尾。
 // 调用方（内容脚本）另有结果缓存与观看进度门槛，检测结果与 token 用量经 meta 回传做成本可观测。
 //
-// 对话端点是可选依赖：未配置（只配了向量端点）或调用失败时，走「极速匹配」——
-// 命中窗口直接成段（窗口±边界、命中语料词作商品名、检索分映射保守置信度），零对话调用。
+// 两条硬前提（缺一直接空结果，宁空不糊）：
+//   - 字幕：无字幕（无 AI 字幕轨/未上传）不做任何检测——弹幕自建窗口误报高；将来接 ASR 走同一字幕入口。
+//   - 对话端点：它是「精确定界」的唯一执行者——未配置或调用失败时既不显示未经定界的检索窗口
+//     （误报拖垮体验），也不做纯检索成段；直接空结果 + 诊断留档。
 //
 // 降级链（顺序）：①混合检索 RAG → ②/embeddings 不可用：纯词表召回续跑 + 向量故障一次性提示 →
-// ③对话端点不可用（未配置/调用失败）：极速匹配（纯检索定界）+ 一次性提示 →
-// ④纯词表召回无命中且字幕可用且对话可用且有弱信号：LLM 全文兜底 → ⑤无字幕/全部不可用：{ads:[], source:"none"}。
+// ③纯词表召回无命中且有弱信号：LLM 全文兜底 → ④无字幕/对话端点未配置/定界失败：{ads:[], source:"none"}。
 // 检索层对外永不抛错：唯一外抛是端点全未配置的 AiError(config)，内容脚本据此静默不弹 UI。
 
-import { AiError } from '../../shared/error'
+import { AiError, errorInfoFrom } from '../../shared/error'
 import type { AiSettings } from '../../settings'
 import { resolveDetectEndpoint, resolveEmbeddingEndpoint } from '../../settings'
 import { chatCompletion, isAbortError } from '../llm/client'
@@ -37,20 +38,28 @@ import { chunkSubtitleWindows } from './vector'
 import type { SubtitleWindow } from './vector'
 import { rankWindowsByVector } from './vector'
 import { effectiveCorpusDetailed, recordUserCorpusHits } from './user-corpus'
-import { chunkDanmakuWindows, DANMAKU_AD_TERMS, danmakuDistinctHitCounts, rankWindowsByDanmaku } from './danmaku-signal'
+import { DANMAKU_AD_TERMS, danmakuDistinctHitCounts, rankWindowsByDanmaku } from './danmaku-signal'
 import { rrfFuse } from './rrf'
+import { recordAiFailure } from '../diagnostics-log'
 
 export interface DetectHooks {
   /** 向量端点（/embeddings）不可用、退纯词表检索时回调；同一次检测最多触发一次。 */
   onVectorFallback?: () => void
-  /** 对话端点不可用（未配置视为有意为之不提示；调用失败才触发），本次以极速匹配收尾。 */
-  onRetrievalOnly?: () => void
 }
 
 /** 小转大：命中窗口两边回取的父级上下文秒数。 */
 export const CONTEXT_PADDING_SECONDS = 40
-/** 单次定界最多喂给模型的候选窗口数（合并后），控制上下文规模。 */
-export const MAX_CANDIDATE_SPANS = 10
+/**
+ * 单次定界的候选窗口上限，按视频时长伸缩：固定 10 个对十几分钟的视频等于把小半条
+ * 视频都喂给模型（每个窗口带回 ±40 秒父级上下文），token 白花且稀释注意力。
+ * 短片广告段落有限给 3 个足够；长片给 6 个兜住「多段广告分散在全片」的场景。
+ */
+export function candidateSpanLimit(durationSeconds: number): number {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 4
+  if (durationSeconds <= 600) return 3
+  if (durationSeconds <= 1800) return 4
+  return 6
+}
 /** 片段合并的间隙容忍（秒）：间隙小于该值视为同一段广告。 */
 export const MERGE_GAP_SECONDS = 2
 /** 低于该时长的片段视为噪声丢弃。 */
@@ -125,35 +134,37 @@ export function curateSpanDanmaku(
 }
 
 /**
- * 弱信号判定（全文兜底的闸门）：整片范围内有广告词/语料词的弹幕，或顶部评论提到广告。
+ * 弱信号判定（全文兜底的闸门）：整片范围内有广告词/语料词的弹幕达到下限才放行。
  * 没有任何线索的视频不该花全文定界的 token——召回零命中且无弱信号时直接空结果收尾。
- * 元词表（观众黑话「广告/恰饭」）与语料词都算：观众喊「广告」本身就是最直接的线索。
+ * 只认弹幕：弹幕带时间戳、同一窗口多人指认才构成线索；评论无时间戳且常有玩梗/否定
+ * 用法（「不恰饭」「视频无广告」），词面命中不等于指认，放行最贵路径纯属浪费。
  */
 export function hasWeakSignal(
   danmaku: readonly { time: number; text: string }[],
-  comments: readonly { top?: { text?: string } }[],
   corpus: readonly CorpusSignal[],
   minDanmaku: number = WEAK_SIGNAL_MIN_DANMAKU,
 ): boolean {
-  const termHit = (text: string): boolean => {
-    for (const term of DANMAKU_AD_TERMS) {
-      if (text.includes(term)) return true
-    }
-    for (const signal of corpus) {
-      if (signal.text.length >= 2 && text.includes(signal.text)) return true
-    }
-    return false
-  }
   let hits = 0
   for (const item of danmaku) {
-    if (termHit(item.text)) {
+    let hit = false
+    for (const term of DANMAKU_AD_TERMS) {
+      if (item.text.includes(term)) {
+        hit = true
+        break
+      }
+    }
+    if (!hit) {
+      for (const signal of corpus) {
+        if (signal.text.length >= 2 && item.text.includes(signal.text)) {
+          hit = true
+          break
+        }
+      }
+    }
+    if (hit) {
       hits += 1
       if (hits >= minDanmaku) return true
     }
-  }
-  for (const comment of comments) {
-    const text = comment.top?.text
-    if (typeof text === 'string' && termHit(text)) return true
   }
   return false
 }
@@ -253,7 +264,7 @@ function buildCandidateSpans(
   duration: number,
   corpus: readonly CorpusSignal[] = AD_SIGNAL_CORPUS,
 ): DetectCandidateSpan[] {
-  const selected = ranked.slice(0, MAX_CANDIDATE_SPANS)
+  const selected = ranked.slice(0, candidateSpanLimit(duration))
   const spans: DetectCandidateSpan[] = []
   for (const { index } of selected) {
     const window = windows[index]
@@ -275,43 +286,46 @@ function buildCandidateSpans(
   return spans
 }
 
-/** 顶部评论文本（限长）：threads 未结构化前一律不送 LLM，只送 top 文本。 */
-function collectCommentTexts(input: DetectAdsInput, limit = 20): string[] {
-  const texts: string[] = []
-  for (const comment of input.comments) {
-    const text = comment.top?.text?.trim()
-    if (text) texts.push(text)
-    if (texts.length >= limit) break
-  }
-  return texts
-}
-
-/** LLM 定界：只喂候选窗口；调用失败/输出不可解析都保留召回窗口兜底（极速匹配收尾 + 一次性提示）。 */
+/**
+ * LLM 定界：只喂候选窗口。调用失败 → 本次空结果 + 诊断留档（不再退回未经定界的检索窗口：
+ * 那些窗口误报多，宁可不显示）；输出解析失败 → 空结果 + 里程碑日志。
+ */
 async function delimitWithLlm(
   input: DetectAdsInput,
   endpoint: ChatEndpoint,
   spans: DetectCandidateSpan[],
-  fallbacks: AdSegment[],
-  hooks: DetectHooks = {},
+  _hooks: DetectHooks = {},
 ): Promise<{ ads: AdSegment[]; llmCalls: number; degraded?: boolean; usage?: TokenUsage }> {
   let raw: string
   let usage: TokenUsage | undefined
   try {
     const result = await chatCompletion({
       endpoint,
-      messages: buildDetectBoundsMessages(input.video, spans, collectCommentTexts(input)),
+      messages: buildDetectBoundsMessages(input.video, spans),
       signal: input.signal,
     })
     raw = result.content
     usage = result.usage
   } catch (error) {
     if (isAbortError(error) || input.signal?.aborted) throw error
-    hooks.onRetrievalOnly?.()
-    return { ads: fallbacks, llmCalls: 1, degraded: true }
+    const info = errorInfoFrom(error)
+    console.error(`[bili-helper] 去广告定界调用失败，本次跳过: ${info.kind}: ${info.message}`)
+    void recordAiFailure({
+      time: Date.now(),
+      feature: '去广告',
+      kind: info.kind,
+      message: info.message,
+      ...(error instanceof AiError && error.rawResponse !== undefined
+        ? { rawExcerpt: error.rawResponse }
+        : {}),
+      ...(endpoint.baseUrl !== '' ? { endpoint: endpoint.baseUrl } : {}),
+      ...(endpoint.model !== '' ? { model: endpoint.model } : {}),
+    })
+    return { ads: [], llmCalls: 1, degraded: true }
   }
-  const ads = parseDetectAdResponse(raw, fallbacks, input.video.duration, () =>
-    hooks.onRetrievalOnly?.(),
-  )
+  const ads = parseDetectAdResponse(raw, input.video.duration, (excerpt) => {
+    console.info(`[bili-helper] 去广告：模型输出无法解析成片段，本次无结果（摘录：${excerpt}）`)
+  })
   return { ads, llmCalls: 1, ...(usage === undefined ? {} : { usage }) }
 }
 
@@ -326,7 +340,7 @@ async function detectByFulltext(
       messages: buildDetectFulltextMessages(input.video, input.subtitles),
       signal: input.signal,
     })
-    const ads = parseDetectAdResponse(result.content, [], input.video.duration)
+    const ads = parseDetectAdResponse(result.content, input.video.duration)
     return {
       ads: mergeAdSegments(ads, input.video.duration),
       source: ads.length > 0 ? 'llm' : 'none',
@@ -354,7 +368,7 @@ export async function runRagDetect(
   hooks: DetectHooks = {},
 ): Promise<DetectAdsResult> {
   // 去广告专用端点（默认继承对话端点）：定界是约束很强的结构化任务，可以交给更便宜的模型；
-  // 总结/提问仍走对话端点。对话端点可选（极速匹配只需向量/词表检索）；两端点全未配置才是配置错误。
+  // 总结/提问仍走对话端点。对话端点是去广告的硬前提（定界唯一执行者）。
   const detect = resolveDetectEndpoint(settings)
   const chatReady = detect.baseUrl.trim() !== '' && detect.model.trim() !== ''
   const resolvedEmbed = resolveEmbeddingEndpoint(settings)
@@ -363,14 +377,22 @@ export async function runRagDetect(
   if (!chatReady && !embedReady) {
     throw new AiError('config', '还没配置端点，先去设置页填一下（对话端点或向量端点至少配一个）')
   }
-  const endpoint: ChatEndpoint | null = chatReady
-    ? {
-        baseUrl: detect.baseUrl,
-        model: detect.model,
-        apiKey: detect.apiKey,
-        format: detect.format,
-      }
-    : null
+  if (!chatReady) {
+    // 对话端点未配置：不做任何召回（连 /embeddings 都不调——结果无处定界，白花钱），
+    // 也不显示未经定界的检索窗口（误报拖垮体验）。空结果 + 可自查的日志。
+    console.info('[bili-helper] 去广告：对话端点未配置，跳过检测（设置页「连接」里配置后生效）')
+    return {
+      ads: [],
+      source: 'none',
+      meta: { path: 'none', llmCalls: 0, note: '对话端点未配置，跳过检测' },
+    }
+  }
+  const endpoint: ChatEndpoint = {
+    baseUrl: detect.baseUrl,
+    model: detect.model,
+    apiKey: detect.apiKey,
+    format: detect.format,
+  }
   const embedEndpoint: ChatEndpoint = {
     baseUrl: resolvedEmbed.baseUrl,
     model: resolvedEmbed.model,
@@ -379,9 +401,14 @@ export async function runRagDetect(
 
   const { video, subtitles } = input
   const duration = video.duration
-  // 字幕窗口优先；字幕缺失（无 ASR/未上传）时用弹幕自建窗口兜底——检测退而不亡。
-  const subtitleWindows = chunkSubtitleWindows(subtitles)
-  const windows = subtitleWindows.length > 0 ? subtitleWindows : chunkDanmakuWindows(input.danmaku ?? [])
+  // 字幕是检测的硬前提：无字幕（无 AI 字幕轨/未上传）直接空结果收尾——弹幕自建窗口
+  // 的检索底料误报率高，不值得跑。将来接入 ASR 时字幕经同一 subtitles 字段进入，
+  // 本链路零改动（ASR → 字幕 → 检测）。
+  if (subtitles.length === 0) {
+    console.info('[bili-helper] 去广告：无字幕，跳过检测（弹幕拼窗口做底料误报高，不做；将来接语音识别走同一字幕入口）')
+    return { ads: [], source: 'none', meta: { path: 'none', llmCalls: 0, note: '无字幕，跳过检测' } }
+  }
+  const windows = chunkSubtitleWindows(subtitles)
   // 生效语料 = 内置词库 + 用户补录（一次读取，各路召回共用同一份，避免口径不一致）；
   // userTexts 标记用户来源，供命中统计区分（内置词条不计入）。
   const { signals: corpus, userTexts } = await effectiveCorpusDetailed()
@@ -421,12 +448,13 @@ export async function runRagDetect(
     danmakuRankedIndexes = []
   }
 
-  // 三路 RRF 融合出候选窗口。
+  // 三路 RRF 融合出候选窗口；按时长截断在前——consensus 的 every 判定与定界 spans
+  // 吃同一份候选（否则免 LLM 通道要求「全部 10 个窗口强一致」几乎不可达，白严）。
   const fused = rrfFuse([
     lexicalRanked.map((item) => item.index),
     vectorRankedIndexes,
     danmakuRankedIndexes,
-  ])
+  ]).slice(0, candidateSpanLimit(duration))
 
   // 用户补录词条命中统计（设置页展示「命中 N 次」）：只看融合命中窗口的文本，
   // 异步落库、失败静默——统计绝不能拖垮检测主链路。
@@ -445,7 +473,7 @@ export async function runRagDetect(
   // 双源强一致（免 LLM 通道）：每个候选窗口都被词表命中、且有多条**不同文本**的弹幕指认时，
   // 证据已足够强——直接给 0.75 置信度成段（高于 0.7 自动跳过门槛），零对话调用。
   // 同句刷屏不算多人指认（去重计数），单窗口孤证不算（必须逐窗强一致）。
-  if (chatReady && fused.length > 0) {
+  if (fused.length > 0) {
     const lexicalIndexes = new Set(lexicalRanked.map((item) => item.index))
     let distinctDanmakuHits: number[] = []
     try {
@@ -487,8 +515,7 @@ export async function runRagDetect(
     // ③无命中：先过弱信号闸门——弹幕/评论都没有任何广告线索的视频，不值得花全文定界的 token。
     const noneMeta: DetectMeta = { path: 'none', llmCalls: 0 }
     if (!chatReady) return { ads: [], source: 'none', meta: noneMeta }
-    if (subtitles.length === 0) return { ads: [], source: 'none', meta: noneMeta }
-    if (!hasWeakSignal(input.danmaku ?? [], input.comments, corpus)) {
+    if (!hasWeakSignal(input.danmaku ?? [], corpus)) {
       console.info('[bili-helper] 去广告：召回零命中且弹幕/评论均无广告线索，跳过全文兜底（0 token）')
       return {
         ads: [],
@@ -500,29 +527,17 @@ export async function runRagDetect(
   }
 
   const spans = buildCandidateSpans(windows, fused, input, duration, corpus)
-  // 兜底段先合并再限长：极速匹配与 LLM 失败降级共用这一份，巨段噪声在源头掐掉。
-  const fallbacks = capFallbackAds(
-    mergeAdSegments(windowsAsFallbackAds(windows, fused, duration, corpus), duration),
-  )
-  // 极速匹配：对话端点未配置（只配向量）→ 命中窗口直接成段，零对话调用。
-  if (!chatReady) {
-    return {
-      ads: mergeAdSegments(fallbacks, duration),
-      source: 'rag',
-      meta: { path: 'retrieval', llmCalls: 0, spans: spans.length },
-    }
-  }
-  const delimited = await delimitWithLlm(input, endpoint as ChatEndpoint, spans, fallbacks, hooks)
+  const delimited = await delimitWithLlm(input, endpoint, spans, hooks)
   return {
     ads: mergeAdSegments(delimited.ads, duration),
-    source: 'rag',
+    source: delimited.ads.length > 0 ? 'rag' : 'none',
     meta: {
-      // 对话调用失败降级成极速匹配时如实标注——成本与路径对得上账。
-      path: delimited.degraded ? 'retrieval' : 'llm',
+      // 定界失败如实标注（本次无结果）——成本与路径对得上账。
+      path: delimited.degraded ? 'failed' : 'llm',
       llmCalls: delimited.llmCalls,
       spans: spans.length,
       ...(delimited.usage === undefined ? {} : { usage: delimited.usage }),
-      ...(delimited.degraded ? { note: '对话调用失败，极速匹配收尾' } : {}),
+      ...(delimited.degraded ? { note: '对话调用失败，本次跳过（诊断控制台有记录）' } : {}),
     },
   }
 }

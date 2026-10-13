@@ -83,7 +83,7 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
         // 面板暂不消费增量（onChunk 留空），只在收尾解析全文。
         const deadline = AbortSignal.timeout(SUMMARIZE_STREAM_TIMEOUT_MS)
         const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline
-        const { content } = await chatCompletionStream({
+        const { content, usage } = await chatCompletionStream({
           endpoint,
           messages: buildSummaryMessages(input),
           signal,
@@ -93,6 +93,9 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
         if (content.trim() === '') {
           throw new AiError('parse', '端点返回了空回复（可能回了错误页或非流式内容）')
         }
+        console.info(
+          `[bili-helper] 总结完成 token=${usage ? `入${usage.input}/出${usage.output}` : '端点未回传'} model=${endpoint.model}`,
+        )
         return parseSummarizeResponse(content)
       } catch (error) {
         logFailure('总结', error)
@@ -104,12 +107,15 @@ export function createLocalBackend(settings: AiSettings, hooks: DetectHooks = {}
       try {
         // start 也在 try 内：handler 抛错同样落入终止性收束，而不是拒绝后悬挂。
         handlers.onEvent({ type: 'start' })
-        await chatCompletionStream({
+        const { usage } = await chatCompletionStream({
           endpoint,
           messages: buildChatMessages(input),
           signal: input.signal,
           onChunk: (chunk) => handlers.onEvent({ type: 'message', chunk }),
         })
+        console.info(
+          `[bili-helper] 提问回答完成 token=${usage ? `入${usage.input}/出${usage.output}` : '端点未回传'} model=${endpoint.model}`,
+        )
         handlers.onEvent({ type: 'end' })
       } catch (error) {
         // 终止性约定：流一旦开始，失败与中止（含 handler 自身抛错）都经 end{error} 收束。

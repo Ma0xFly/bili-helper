@@ -232,7 +232,6 @@ export default defineContentScript({
       collectVideoMeta,
       collectSubtitles,
       collectDanmaku,
-      collectComments,
       readSettings: readAiSettings,
       createBackend: (settings, hooks) => resolveBackend(settings, hooks),
       recordSkipped,

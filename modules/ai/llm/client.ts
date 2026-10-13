@@ -524,23 +524,26 @@ type SseLineResult =
   | { kind: 'delta'; text: string }
   | { kind: 'reasoning' }
   | { kind: 'finish'; reason: string }
+  /** token 用量快照（OpenAI 的 usage chunk / Anthropic 的 message_start+message_delta）；
+   *  字段是**累计值**，消费方覆盖式记录。 */
+  | { kind: 'usage'; input?: number; output?: number }
   | typeof STREAM_DONE
-  | null
 
-// 解析一行 OpenAI SSE data：返回增量为 delta；非 data 行/脏 JSON 返回 null；[DONE] 返回终止标记；
+// 解析一行 OpenAI SSE data：返回事件列表（一个 chunk 可同时携带用量与增量）；
+// 非 data 行/脏 JSON 返回空数组；[DONE] 返回终止标记；
 // 事件携带 error 对象（OpenAI 流内错误约定）时抛 http，由上层以 end{error} 收束。
-function parseOpenAiSseLine(line: string): SseLineResult {
+function parseOpenAiSseLine(line: string): SseLineResult[] {
   const trimmed = line.trim()
-  if (!trimmed.startsWith('data:')) return null
+  if (!trimmed.startsWith('data:')) return []
   const payload = trimmed.slice('data:'.length).trim()
-  if (payload === '[DONE]') return STREAM_DONE
+  if (payload === '[DONE]') return [STREAM_DONE]
   let event: unknown
   try {
     event = JSON.parse(payload)
   } catch {
-    return null
+    return []
   }
-  if (!isRecord(event)) return null
+  if (!isRecord(event)) return []
   if (event.error) {
     const message =
       isRecord(event.error) && typeof event.error.message === 'string'
@@ -548,32 +551,44 @@ function parseOpenAiSseLine(line: string): SseLineResult {
         : '流式响应返回错误'
     throw new AiError('http', message)
   }
+  const results: SseLineResult[] = []
+  // 用量 chunk（stream_options.include_usage 时最后一个 chunk 携带，choices 为空数组）。
+  const usage = parseTokenUsage(event)
+  if (usage !== undefined) results.push({ kind: 'usage', input: usage.input, output: usage.output })
   const choices = Array.isArray(event.choices) ? event.choices[0] : undefined
   const choice = isRecord(choices) ? choices : undefined
   const delta = choice && isRecord(choice.delta) ? choice.delta : undefined
   const chunk = delta ? delta.content : undefined
-  if (typeof chunk === 'string' && chunk !== '') return { kind: 'delta', text: chunk }
+  if (typeof chunk === 'string' && chunk !== '') {
+    results.push({ kind: 'delta', text: chunk })
+    return results
+  }
   // 推理模型的思考过程：正文可以为空，但这里必须留痕，否则空回复无法归因。
   const reasoning = delta ? (delta.reasoning_content ?? delta.reasoning) : undefined
-  if (typeof reasoning === 'string' && reasoning !== '') return { kind: 'reasoning' }
+  if (typeof reasoning === 'string' && reasoning !== '') {
+    results.push({ kind: 'reasoning' })
+    return results
+  }
   const finish = choice ? choice.finish_reason : undefined
-  if (typeof finish === 'string' && finish !== '') return { kind: 'finish', reason: finish }
-  return null
+  if (typeof finish === 'string' && finish !== '') {
+    results.push({ kind: 'finish', reason: finish })
+  }
+  return results
 }
 
 // Anthropic SSE：content_block_delta.delta.text 是增量；message_stop 是终止；
-// error 事件抛 http。event: 行（事件名）与 ping 等杂项忽略。
-function parseAnthropicSseLine(line: string): SseLineResult {
+// message_start 带输入用量、message_delta 带累计输出用量与收尾原因；error 事件抛 http。
+function parseAnthropicSseLine(line: string): SseLineResult[] {
   const trimmed = line.trim()
-  if (!trimmed.startsWith('data:')) return null
+  if (!trimmed.startsWith('data:')) return []
   const payload = trimmed.slice('data:'.length).trim()
   let event: unknown
   try {
     event = JSON.parse(payload)
   } catch {
-    return null
+    return []
   }
-  if (!isRecord(event)) return null
+  if (!isRecord(event)) return []
   if (event.type === 'error') {
     const message =
       isRecord(event.error) && typeof event.error.message === 'string'
@@ -581,20 +596,35 @@ function parseAnthropicSseLine(line: string): SseLineResult {
         : '流式响应返回错误'
     throw new AiError('http', message)
   }
-  if (event.type === 'message_stop') return STREAM_DONE
-  const delta = isRecord(event.delta) ? event.delta : undefined
-  // message_delta 携带收尾原因（end_turn / max_tokens），供空回复归因。
-  if (event.type === 'message_delta') {
-    const stop = delta ? delta.stop_reason : undefined
-    return typeof stop === 'string' && stop !== '' ? { kind: 'finish', reason: stop } : null
+  if (event.type === 'message_stop') return [STREAM_DONE]
+  if (event.type === 'message_start') {
+    // 输入用量在 message.usage（output_tokens 此时只是一两 token 的起步值，随后续增量覆盖）。
+    const message = isRecord(event.message) ? event.message : undefined
+    const usage = message ? parseTokenUsage(message) : undefined
+    return usage === undefined ? [] : [{ kind: 'usage', input: usage.input, output: usage.output }]
   }
-  if (event.type !== 'content_block_delta') return null
-  if (delta && delta.type === 'thinking_delta') return { kind: 'reasoning' }
+  const delta = isRecord(event.delta) ? event.delta : undefined
+  if (event.type === 'message_delta') {
+    const results: SseLineResult[] = []
+    // message_delta 只带累计 output_tokens（没有 input）——parseTokenUsage 要求两字段
+    // 齐全（非流式用），这里单独取输出值；覆盖式记录，收尾即最终值。
+    const usage = isRecord(event.usage) ? event.usage : undefined
+    const output = usage ? usage.output_tokens : undefined
+    if (typeof output === 'number' && Number.isFinite(output)) {
+      results.push({ kind: 'usage', output: Math.max(0, Math.round(output)) })
+    }
+    // 收尾原因（end_turn / max_tokens），供空回复归因。
+    const stop = delta ? delta.stop_reason : undefined
+    if (typeof stop === 'string' && stop !== '') results.push({ kind: 'finish', reason: stop })
+    return results
+  }
+  if (event.type !== 'content_block_delta') return []
+  if (delta && delta.type === 'thinking_delta') return [{ kind: 'reasoning' }]
   const chunk = isRecord(delta) && delta.type === 'text_delta' ? delta.text : undefined
-  return typeof chunk === 'string' && chunk !== '' ? { kind: 'delta', text: chunk } : null
+  return typeof chunk === 'string' && chunk !== '' ? [{ kind: 'delta', text: chunk }] : []
 }
 
-function parseSseLine(line: string, anthropic: boolean): SseLineResult {
+function parseSseLine(line: string, anthropic: boolean): SseLineResult[] {
   return anthropic ? parseAnthropicSseLine(line) : parseOpenAiSseLine(line)
 }
 
@@ -616,18 +646,34 @@ export async function chatCompletionStream(
   requireBaseUrl(params.endpoint.baseUrl)
   requireModel(params.endpoint.model)
   const anthropic = isAnthropic(params.endpoint)
-  // 流式不加死线：由消费方 abort；路径回退与一次性请求同规则。
-  const response = await postChat(
-    params.endpoint,
+  const buildBody = (withUsage: boolean): string =>
     JSON.stringify(
       anthropic
         ? anthropicBody(params.endpoint, params.messages, true)
-        : { model: params.endpoint.model, messages: params.messages, stream: true },
-    ),
-    undefined,
-    params.signal,
-  )
-  if (!response.ok) throw statusError(response.status, extractUpstreamMessage(await response.text()))
+        : {
+            model: params.endpoint.model,
+            messages: params.messages,
+            stream: true,
+            // include_usage 让端点回传 token 用量（成本可观测）；不认这个字段的
+            // 网关（严格校验的旧版实现）会 400——上层去掉字段重试一次，功能不受影响。
+            ...(withUsage ? { stream_options: { include_usage: true } } : {}),
+          },
+    )
+  // 流式不加死线：由消费方 abort；路径回退与一次性请求同规则。
+  let response = await postChat(params.endpoint, buildBody(true), undefined, params.signal)
+  if (!response.ok) {
+    let failureText = await response.text()
+    if (
+      !anthropic &&
+      response.status === 400 &&
+      /stream_options|include_usage/i.test(failureText)
+    ) {
+      response = await postChat(params.endpoint, buildBody(false), undefined, params.signal)
+      if (response.ok) failureText = ''
+      else failureText = await response.text()
+    }
+    if (!response.ok) throw statusError(response.status, extractUpstreamMessage(failureText))
+  }
   // 200 也可能是代理/网关的 HTML 错误页：按解析失败处理，而不是把空流当成功。
   if (response.contentType.toLowerCase().includes('text/html')) {
     throw new AiError('parse', '端点返回了 HTML 页面而不是流式响应，请确认端点地址是否正确')
@@ -643,19 +689,24 @@ export async function chatCompletionStream(
   let sawReasoning = false
   let finishReason = ''
   let done = false
+  let usageInput: number | undefined
+  let usageOutput: number | undefined
   const consumeLine = (line: string): void => {
-    const parsed = parseSseLine(line, anthropic)
-    if (parsed === STREAM_DONE) {
-      done = true
-    } else if (parsed === null) {
-      // 注释行 / 空行 / 脏 JSON：忽略。
-    } else if (parsed.kind === 'reasoning') {
-      sawReasoning = true
-    } else if (parsed.kind === 'finish') {
-      finishReason = parsed.reason
-    } else {
-      content += parsed.text
-      params.onChunk(parsed.text)
+    for (const parsed of parseSseLine(line, anthropic)) {
+      if (parsed === STREAM_DONE) {
+        done = true
+      } else if (parsed.kind === 'reasoning') {
+        sawReasoning = true
+      } else if (parsed.kind === 'finish') {
+        finishReason = parsed.reason
+      } else if (parsed.kind === 'usage') {
+        // 累计快照覆盖记录（两家协议的 usage 都是收尾累计值）。
+        if (parsed.input !== undefined) usageInput = parsed.input
+        if (parsed.output !== undefined) usageOutput = parsed.output
+      } else {
+        content += parsed.text
+        params.onChunk(parsed.text)
+      }
     }
   }
   try {
@@ -677,7 +728,13 @@ export async function chatCompletionStream(
     if (!done && buffer.trim() !== '') consumeLine(buffer)
     // 某些实现对已中止的流以 done 代替 reject，此处补检信号，消费方不悬挂。
     if (params.signal?.aborted) throw new AiError('network', '请求已中止')
-    if (content.trim() !== '') return { content }
+    if (content.trim() !== '') {
+      const usage =
+        usageInput === undefined && usageOutput === undefined
+          ? undefined
+          : { input: usageInput ?? 0, output: usageOutput ?? 0 }
+      return usage === undefined ? { content } : { content, usage }
+    }
     // 正文为空：先看是不是「网关忽略 stream 直接回了一次性补全 JSON」——能救就救回来。
     const inspected = inspectJsonBody(rawText, anthropic)
     if (inspected !== null && inspected.content.trim() !== '') {

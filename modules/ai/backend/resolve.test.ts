@@ -130,11 +130,16 @@ describe('resolveBackend（mode 分派唯一入口）', () => {
     const fetchMock = routedFetch(true)
     vi.stubGlobal('fetch', fetchMock)
     const caps = resolveBackend(await settingsOf('auto'))
-    // local 的 embeddings 收到补全形状响应 → 向量路解析失败 → 纯词表无命中；评论带弱信号
+    // local 的 embeddings 收到补全形状响应 → 向量路解析失败 → 纯词表无命中；弹幕带弱信号
+    // （3 条含词弹幕分散在不同 30 秒窗口：整片计数的闸门放行，但没有任何单窗达召回门槛）
     // → 走全文兜底：兜底 chat 返回的 "本地总结" JSON 不是 ads 形状 → 定界无片段 → {ads:[], source:"none"}。
     const result = await caps.detectAds({
       ...CONTEXT,
-      comments: [{ top: { text: '听说这视频有广告' } }],
+      danmaku: [
+        { time: 5, text: '广告' },
+        { time: 105, text: '恰饭' },
+        { time: 205, text: '带货' },
+      ],
       strategy: 'smart',
     })
     expect(result).toMatchObject({ ads: [], source: 'none' })

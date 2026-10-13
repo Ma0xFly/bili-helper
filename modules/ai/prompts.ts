@@ -193,7 +193,7 @@ const DETECT_BOUNDS_SYSTEM_PROMPT = [
   '3. 只有明显在推广/带货/介绍特定产品、含感谢赞助/优惠/购买引导等信号的内容才算广告；普通提及品牌（客观对比、评测语境）不要标。',
   '4. product_name 填推广的产品/品牌名，取不到就写空字符串；ad_content 用一句话概括（不超过 40 字）。',
   '5. confidence 是 0 到 1 的把握度，只在内容确实像广告时才大于 0.5。',
-  '6. 弹幕与评论只作旁证，时间定位一律以字幕时间码为准。',
+  '6. 弹幕只作旁证，时间定位一律以字幕时间码为准。',
   '',
   '输出协议：只输出一个 JSON 对象（不要 Markdown 代码块，不要任何其他文字），字段如下：',
   DETECT_SCHEMA_TEXT,
@@ -229,11 +229,10 @@ function renderDetectHeading(video: AiContext['video']): string {
   return title ? `视频「${title}」（BV 号 ${video.bvid}）` : `视频 BV 号 ${video.bvid}`
 }
 
-/** Stage 2 定界消息：标题 + 候选窗口（字幕行 + 窗口内弹幕旁证）+ 顶部评论旁证。 */
+/** Stage 2 定界消息：标题 + 候选窗口（字幕行 + 窗口内弹幕旁证）。 */
 export function buildDetectBoundsMessages(
   video: AiContext['video'],
   spans: DetectCandidateSpan[],
-  commentTexts: string[] = [],
 ): OpenAiChatMessage[] {
   const windowBlocks = spans.map((span, index) => {
     const lines = span.lines
@@ -244,10 +243,7 @@ export function buildDetectBoundsMessages(
       : ''
     return `候选窗口 ${index + 1}（${formatTimecode(span.start)}–${formatTimecode(span.end)}）：\n${lines}${danmaku}`
   })
-  const comments = commentTexts.length > 0
-    ? `\n\n顶部评论（旁证）：\n${commentTexts.map((text) => `- ${text}`).join('\n')}`
-    : ''
-  const user = `${renderDetectHeading(video)}\n\n候选窗口如下，请只在这些窗口内做广告定界：\n\n${windowBlocks.join('\n\n')}${comments}`
+  const user = `${renderDetectHeading(video)}\n\n候选窗口如下，请只在这些窗口内做广告定界：\n\n${windowBlocks.join('\n\n')}`
   return [
     { role: 'system', content: DETECT_BOUNDS_SYSTEM_PROMPT },
     { role: 'user', content: user },
@@ -327,14 +323,13 @@ function finiteNumber(value: unknown): number {
 }
 
 /**
- * 定界输出「先 JSON 后宽松后保留召回窗口」：JSON 形状完整取其结构（字段先数字强转），
- * 否则宽松文本解析时间对；再不行退回召回窗口（降级链保证永远拿到可渲染结果）。
+ * 定界输出「先 JSON 后宽松」：JSON 形状完整取其结构（字段先数字强转），否则宽松文本解析时间对；
+ * 都失败返回空（不再退回召回窗口——未经定界的窗口误报多，宁可不显示），回调只用于留日志。
  */
 export function parseDetectAdResponse(
   raw: string,
-  fallbacks: AdSegment[],
   maxEnd: number,
-  onTotalFallback?: () => void,
+  onUnparsed?: (excerpt: string) => void,
 ): AdSegment[] {
   const parsed = extractJson(raw)
   const root = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null
@@ -362,7 +357,7 @@ export function parseDetectAdResponse(
   }
   const loose = looseParseAdBounds(raw, maxEnd)
   if (loose.length > 0) return loose
-  // 严格+宽松都解析失败：退回召回窗口兜底（极速匹配收尾），回调供上层提示。
-  onTotalFallback?.()
-  return fallbacks.map((ad) => ({ ...ad }))
+  // 严格+宽松都解析失败：本次无结果（回调供上层留里程碑日志）。
+  onUnparsed?.(raw.trim().slice(0, 120))
+  return []
 }

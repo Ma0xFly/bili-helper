@@ -98,7 +98,6 @@ async function makeHarness(overrides: {
     }),
     collectSubtitles: async () => [],
     collectDanmaku: async () => [{ time: 500, text: '恰饭' }],
-    collectComments: async () => [{ top: { text: '广告明显' } }],
     readSettings: async () => settings,
     createBackend: (_s, _hooks) => ({ detectAds }),
     recordSkipped,
@@ -474,7 +473,6 @@ describe('误判纠错闭环', () => {
       collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
       collectSubtitles: async () => [],
       collectDanmaku: async () => [],
-      collectComments: async () => [],
       readSettings: async () => ({
         ...DEFAULT_SETTINGS,
         apiUrl: 'https://llm.example/v1',
@@ -541,7 +539,6 @@ describe('误判纠错闭环', () => {
       collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
       collectSubtitles: async () => [],
       collectDanmaku: async () => [],
-      collectComments: async () => [],
       readSettings: async () => ({
         ...DEFAULT_SETTINGS,
         apiUrl: 'https://llm.example/v1',
@@ -599,7 +596,6 @@ describe('误判纠错闭环', () => {
       collectVideoMeta: async () => ({ bvid: 'BV1xx411c7mD', cid: 1, title: '横评', duration: 600 }),
       collectSubtitles: async () => [],
       collectDanmaku: async () => [],
-      collectComments: async () => [],
       readSettings: async () => ({
         ...DEFAULT_SETTINGS,
         apiUrl: 'https://llm.example/v1',

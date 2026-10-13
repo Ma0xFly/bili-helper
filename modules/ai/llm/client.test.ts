@@ -280,6 +280,60 @@ describe('chatCompletionStream（SSE 流式）', () => {
     expect(content).toBe('你好')
   })
 
+  it('OpenAI usage chunk（stream_options.include_usage）→ 返回 token 用量；请求体带 include_usage', async () => {
+    const fetchMock = streamFetch([
+      'data: {"choices":[{"delta":{"content":"你好"}}]}',
+      'data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":36}}',
+      'data: [DONE]',
+    ])
+    vi.stubGlobal('fetch', fetchMock)
+    const { content, usage } = await chatCompletionStream({ endpoint: ENDPOINT, messages: MESSAGES, onChunk: () => {} })
+    expect(content).toBe('你好')
+    expect(usage).toEqual({ input: 120, output: 36 })
+    const call = fetchMock.mock.calls[0] as unknown as [unknown, { body?: string }] | undefined
+    const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+    expect(body.stream_options).toEqual({ include_usage: true })
+  })
+
+  it('网关不认 stream_options（400 且指名该字段）→ 去掉重试一次，功能不受影响', async () => {
+    let first = true
+    const fetchMock = vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      const body = String(init?.body ?? '')
+      if (body.includes('stream_options')) {
+        first = false
+        return new Response('{"error":{"message":"Unknown parameter: stream_options"}}', { status: 400 })
+      }
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"重试成功"}}]}',
+        'data: [DONE]',
+      ])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { content, usage } = await chatCompletionStream({ endpoint: ENDPOINT, messages: MESSAGES, onChunk: () => {} })
+    expect(first).toBe(false)
+    expect(content).toBe('重试成功')
+    expect(usage).toBeUndefined() // 去掉扩展字段的端点不回 usage：如实缺省。
+  })
+
+  it('Anthropic 流式：message_start 带输入用量、message_delta 带累计输出 → 返回用量', async () => {
+    vi.stubGlobal(
+      'fetch',
+      streamFetch([
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":200,"output_tokens":1}}}',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"答"}}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":48}}',
+        'data: {"type":"message_stop"}',
+      ]),
+    )
+    const { content, usage } = await chatCompletionStream({
+      endpoint: { ...ENDPOINT, format: 'anthropic' },
+      messages: MESSAGES,
+      onChunk: () => {},
+    })
+    expect(content).toBe('答')
+    expect(usage).toEqual({ input: 200, output: 48 })
+  })
+
   it('解析脏行跳过：注释行/空行/坏 JSON/无 content 的 delta 不触发 message', async () => {
     vi.stubGlobal(
       'fetch',

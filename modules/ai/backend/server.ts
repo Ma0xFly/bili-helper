@@ -221,7 +221,6 @@ export function createServerBackend(settings: AiSettings): AiCapabilities {
           video: input.video,
           subtitles: input.subtitles,
           danmaku: input.danmaku,
-          comments: input.comments,
           strategy: input.strategy,
         },
         input.signal,

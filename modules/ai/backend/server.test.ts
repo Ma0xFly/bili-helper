@@ -59,7 +59,6 @@ describe('server detectAds / summarize（转发契约）', () => {
       video: CONTEXT.video,
       subtitles: CONTEXT.subtitles,
       danmaku: CONTEXT.danmaku,
-      comments: CONTEXT.comments,
       strategy: 'smart',
     })
   })

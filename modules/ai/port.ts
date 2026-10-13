@@ -16,7 +16,14 @@ export interface AiContext {
 /** 去广告识别策略，与后端选择正交（后端分派由 settings.mode 决定）。 */
 export type AdStrategy = 'free' | 'smart' | 'always'
 
-export interface DetectAdsInput extends AiContext {
+/**
+ * 去广告输入：不含评论——评论无时间戳、词面命中多为玩梗/否定（「不恰饭」），
+ * 对定界与信号闸门只会引入误报；评论仍保留在提问上下文（AiContext）里。
+ */
+export interface DetectAdsInput {
+  video: VideoMeta
+  subtitles: Subtitle[]
+  danmaku: Danmaku[]
   strategy: AdStrategy
   signal?: AbortSignal
 }
@@ -36,9 +43,9 @@ export type AdSource = 'rag' | 'llm' | 'none'
 /**
  * 检测走了哪条路（成本可观测的锚点）：
  * cache=命中结果缓存（0 token）｜consensus=词表+弹幕双源强一致（免 LLM）｜llm=LLM 定界（常规路径）
- * ｜fulltext=召回零命中后的全文兜底｜retrieval=极速匹配（对话端点未配置/不可用）｜none=无命中收尾。
+ * ｜fulltext=召回零命中后的全文兜底｜failed=定界调用失败（本次无结果）｜none=无命中/未执行收尾。
  */
-export type DetectPath = 'cache' | 'consensus' | 'llm' | 'fulltext' | 'retrieval' | 'none'
+export type DetectPath = 'cache' | 'consensus' | 'llm' | 'fulltext' | 'failed' | 'none'
 
 /** token 用量（端点未回 usage 时缺省）。 */
 export interface TokenUsage {

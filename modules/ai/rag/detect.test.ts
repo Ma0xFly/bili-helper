@@ -6,6 +6,7 @@ import type { Subtitle } from '../../video/types'
 import type { DetectAdsInput } from '../port'
 import { tokenize } from './bm25'
 import {
+  candidateSpanLimit,
   CONSENSUS_CONFIDENCE,
   curateSpanDanmaku,
   FALLBACK_MAX_SEGMENT_SECONDS,
@@ -62,13 +63,11 @@ function makeSettings(overrides: Partial<AiSettings> = {}): AiSettings {
 function makeInput(
   subtitles: Subtitle[],
   danmaku: { time: number; text: string }[] = [],
-  comments: { top?: { text: string } }[] = [],
 ): DetectAdsInput {
   return {
     video: { bvid: 'BV1xx411c7mD', cid: 1, title: '设备横评', duration: 600 },
     subtitles,
     danmaku,
-    comments,
     strategy: 'smart',
   }
 }
@@ -122,18 +121,17 @@ afterEach(() => {
 })
 
 describe('runRagDetect（全链路）', () => {
-  it('①混合检索：召回 → 小转大（±40 秒上下文，含弹幕/评论旁证）→ LLM 定界 → source:rag', async () => {
+  it('①混合检索：召回 → 小转大（±40 秒上下文，含弹幕旁证）→ LLM 定界 → source:rag', async () => {
     const fetchMock = pipeFetch({
       embeddings: (inputs) => tokenEmbeddingResponse(inputs),
       chat: () => completionResponse(HAPPY_CHAT_BODY),
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const input = makeInput(
-      AD_SUBTITLES,
-      [{ time: 520, text: '恰饭啦' }, { time: 5, text: '无关弹幕' }],
-      [{ top: { text: '这波广告太明显了' } }],
-    )
+    const input = makeInput(AD_SUBTITLES, [
+      { time: 520, text: '恰饭啦' },
+      { time: 5, text: '无关弹幕' },
+    ])
     const result = await runRagDetect(input, makeSettings(), {})
     expect(result.source).toBe('rag')
     expect(result.ads).toEqual([
@@ -141,20 +139,20 @@ describe('runRagDetect（全链路）', () => {
     ])
 
     // 定界只喂候选窗口：prompt 里带父级上下文字幕行（[08:12] 恰饭…），而不是全文；
-    // 命中窗口 ±40s 内的弹幕与顶部评论文本作为旁证并入，无时间信息的评论整段附后。
+    // 命中窗口 ±40s 内的弹幕作为旁证并入（评论已从去广告链路移除，不再进 prompt）。
     const chatBody = JSON.parse(String(fetchMock.mock.calls.find((c) => String(c[0]).includes('/chat/completions'))?.[1]?.body)) as {
       messages: { role: string; content: string }[]
     }
     const systemContent = chatBody.messages.find((m) => m.role === 'system')?.content ?? ''
     const userContent = chatBody.messages.find((m) => m.role === 'user')?.content ?? ''
     expect(systemContent).toContain('候选窗口')
-    expect(systemContent).toContain('弹幕与评论只作旁证')
+    expect(systemContent).toContain('弹幕只作旁证')
     expect(userContent).toContain('候选窗口 1')
     expect(userContent).toContain('[08:12] 恰饭时间到了')
     expect(userContent).not.toContain('[00:00] 大家好')
     expect(userContent).toContain('[520s] 恰饭啦')
     expect(userContent).not.toContain('无关弹幕')
-    expect(userContent).toContain('这波广告太明显了')
+    expect(userContent).not.toContain('顶部评论')
 
     // 向量请求共两批（语料 + 窗口），同键第二次运行命中缓存不再请求。
     const embeddingCalls = () =>
@@ -189,9 +187,13 @@ describe('runRagDetect（全链路）', () => {
     vi.stubGlobal('fetch', fetchMock)
     const onVectorFallback = vi.fn()
 
-    // 弱信号 = 顶部评论提到广告：值得花全文定界的 token。
+    // 弱信号 = 广告词弹幕达阈值：值得花全文定界的 token。
     const result = await runRagDetect(
-      makeInput(NO_SIGNAL_SUBTITLES, [], [{ top: { text: '评论区都在说这视频有广告' } }]),
+      makeInput(NO_SIGNAL_SUBTITLES, [
+        { time: 10, text: '广告' },
+        { time: 20, text: '恰饭' },
+        { time: 30, text: '带货' },
+      ]),
       makeSettings(),
       { onVectorFallback },
     )
@@ -221,7 +223,11 @@ describe('runRagDetect（全链路）', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     const result = await runRagDetect(
-      makeInput(NO_SIGNAL_SUBTITLES, [], [{ top: { text: '有广告吗' } }]),
+      makeInput(NO_SIGNAL_SUBTITLES, [
+        { time: 10, text: '广告' },
+        { time: 20, text: '恰饭' },
+        { time: 30, text: '带货' },
+      ]),
       makeSettings(),
       {},
     )
@@ -251,80 +257,33 @@ describe('runRagDetect（全链路）', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('极速匹配：只配向量端点（对话未配置）→ 命中窗口成段、product_name 取命中语料词、零对话调用', async () => {
-    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
+  it('对话端点未配置：空结果、不发任何请求（连 /embeddings 都不调——结果无处定界，白花钱）', async () => {
+    const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const result = await runRagDetect(
       makeInput(AD_SUBTITLES),
       makeSettings({ apiUrl: '', model: '' }),
       {},
     )
-    expect(result.source).toBe('rag')
-    expect(result.ads.length).toBeGreaterThan(0)
-    // 置信度保守封顶（极速模式明确低于 LLM 定界的可信度）。
-    for (const ad of result.ads) expect(ad.confidence).toBeLessThanOrEqual(0.6)
-    // product_name 来自窗口内精确命中的语料短语。
-    const names = result.ads.flatMap((ad) => ad.product_name.split('、')).filter(Boolean)
-    expect(names.some((name) => name.includes('恰饭') || name.includes('赞助'))).toBe(true)
-    // 零对话调用：请求只有 /embeddings。
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
-    for (const call of fetchMock.mock.calls) {
-      expect(String(call[0])).toContain('/embeddings')
-    }
-  })
-
-  it('极速模式无命中：{ads:[], source:"none"}，不触发 LLM 全文兜底', async () => {
-    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
-    vi.stubGlobal('fetch', fetchMock)
-    const result = await runRagDetect(
-      makeInput(NO_SIGNAL_SUBTITLES),
-      makeSettings({ apiUrl: '', model: '' }),
-      {},
-    )
     expect(result).toMatchObject({ ads: [], source: 'none' })
     expect(result.meta?.path).toBe('none')
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
-    for (const call of fetchMock.mock.calls) {
-      expect(String(call[0])).toContain('/embeddings')
-    }
+    expect(result.meta?.note).toContain('对话端点未配置')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('对话端点调用失败：onRetrievalOnly 触发一次，退回召回窗口（极速匹配收尾）', async () => {
+  it('定界调用失败：空结果（不再退回检索窗口）+ path=failed + 诊断留档', async () => {
     const fetchMock = pipeFetch({
       embeddings: tokenEmbeddingResponse,
       chat: () => new Response('{}', { status: 500 }),
     })
     vi.stubGlobal('fetch', fetchMock)
-    const onRetrievalOnly = vi.fn()
-    const result = await runRagDetect(makeInput(AD_SUBTITLES), makeSettings(), { onRetrievalOnly })
-    expect(result.source).toBe('rag')
-    expect(result.ads.length).toBeGreaterThan(0)
-    expect(onRetrievalOnly).toHaveBeenCalledTimes(1)
-  })
-
-  it('兜底段限长：刷屏词合并出的巨段（>120s）整段丢弃，孤立正常段保留', async () => {
-    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
-    vi.stubGlobal('fetch', fetchMock)
-    const result = await runRagDetect(
-      makeInput(SPAM_THEN_AD_SUBTITLES),
-      makeSettings({ apiUrl: '', model: '' }),
-      {},
-    )
-    expect(result.source).toBe('rag')
-    for (const ad of result.ads) {
-      expect(ad.end - ad.start).toBeLessThanOrEqual(FALLBACK_MAX_SEGMENT_SECONDS)
-    }
-    // 492–580 的恰饭段没被巨段连坐。
-    expect(result.ads.some((ad) => ad.start >= 450 && ad.end <= 600)).toBe(true)
-  })
-
-  it('兜底段限长：全片刷屏时不产出任何巨段标记', async () => {
-    const fetchMock = pipeFetch({ embeddings: tokenEmbeddingResponse })
-    vi.stubGlobal('fetch', fetchMock)
-    const spamOnly = SPAM_THEN_AD_SUBTITLES.filter((line) => line.start <= 300)
-    const result = await runRagDetect(makeInput(spamOnly), makeSettings({ apiUrl: '', model: '' }), {})
-    expect(result).toMatchObject({ ads: [], source: 'rag' })
-    expect(result.meta?.path).toBe('retrieval')
+    const result = await runRagDetect(makeInput(AD_SUBTITLES), makeSettings(), {})
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('failed')
+    expect(result.meta?.llmCalls).toBe(1)
+    const stored = (await chrome.storage.local.get('aiFailureLog')) as Record<string, unknown>
+    const log = stored.aiFailureLog as { feature: string; kind: string }[]
+    expect(log.some((entry) => entry.feature === '去广告')).toBe(true)
   })
 
   it('双源强一致：词表命中 + 多条不同弹幕指认 → 免 LLM 直接高置信成段（0 对话调用）', async () => {
@@ -396,7 +355,7 @@ describe('runRagDetect（全链路）', () => {
     expect(String(embedCall?.[0])).toContain('emb.example')
   })
 
-  it('LLM 定界输出不可解析：宽松解析失败后退回召回窗口（留窗口不悬挂）', async () => {
+  it('LLM 定界输出不可解析：本次空结果（不再退回召回窗口——误报宁可不显示）', async () => {
     const fetchMock = pipeFetch({
       embeddings: (inputs) => tokenEmbeddingResponse(inputs),
       chat: () => completionResponse('抱歉，我无法判断哪些是广告。'),
@@ -404,10 +363,9 @@ describe('runRagDetect（全链路）', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await runRagDetect(makeInput(AD_SUBTITLES), makeSettings(), {})
-    expect(result.source).toBe('rag')
-    expect(result.ads.length).toBeGreaterThan(0)
-    expect(result.ads[0]).toMatchObject({ start: 492, end: 580 })
-    expect(result.ads[0]?.confidence).toBeGreaterThan(0)
+    expect(result).toMatchObject({ ads: [], source: 'none' })
+    expect(result.meta?.path).toBe('llm')
+    expect(result.meta?.llmCalls).toBe(1)
   })
 
   it('LLM 排 JSON 但 gap≤2s 的相邻段合并为一段', async () => {
@@ -472,9 +430,13 @@ describe('用户补录词条进入全链路（detect 用的是合并后的生效
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    // 基线：用户层为空 → 两路都召回不到，但评论有弱信号 → 降级到 LLM 全文兜底。
+    // 基线：用户层为空 → 两路都召回不到，但弹幕有弱信号 → 降级到 LLM 全文兜底。
     const baseline = await runRagDetect(
-      makeInput(USER_WORD_SUBTITLES, [], [{ top: { text: '评论区都说这有广告' } }]),
+      makeInput(USER_WORD_SUBTITLES, [
+        { time: 10, text: '广告' },
+        { time: 20, text: '恰饭' },
+        { time: 30, text: '带货' },
+      ]),
       makeSettings(),
       {},
     )
@@ -486,7 +448,11 @@ describe('用户补录词条进入全链路（detect 用的是合并后的生效
       biliHelperUserCorpus: [{ text: '某新品牌', category: 'brands-digital' }],
     })
     const after = await runRagDetect(
-      makeInput(USER_WORD_SUBTITLES, [], [{ top: { text: '评论区都说这有广告' } }]),
+      makeInput(USER_WORD_SUBTITLES, [
+        { time: 10, text: '广告' },
+        { time: 20, text: '恰饭' },
+        { time: 30, text: '带货' },
+      ]),
       makeSettings(),
       {},
     )
@@ -536,9 +502,8 @@ describe('curateSpanDanmaku（弹幕精选 = token 预算闸门）', () => {
   })
 })
 
-describe('hasWeakSignal（全文兜底闸门）', () => {
+describe('hasWeakSignal（全文兜底闸门，只看弹幕）', () => {
   const corpus = [{ text: '恰饭', kind: 'script' as const, weight: 3, category: 'scripts' }]
-  const comments = [{ top: { text: '这视频纯聊天' } }]
 
   it('弹幕广告词达阈值即弱信号', () => {
     expect(
@@ -548,20 +513,46 @@ describe('hasWeakSignal（全文兜底闸门）', () => {
           { time: 2, text: '中间恰饭' },
           { time: 3, text: '结尾恰饭' },
         ],
-        comments,
         corpus,
       ),
     ).toBe(true)
   })
 
-  it('弹幕无广告词但顶部评论提到 → 仍是弱信号', () => {
+  it('弹幕不到阈值 → 非弱信号（不花全文兜底的 token）', () => {
     expect(
-      hasWeakSignal([{ time: 1, text: '哈哈哈哈' }], [{ top: { text: '后面有恰饭别走' } }], corpus),
-    ).toBe(true)
+      hasWeakSignal([{ time: 1, text: '哈哈哈' }, { time: 2, text: '哈哈哈' }], corpus),
+    ).toBe(false)
   })
 
-  it('弹幕与评论都没有线索 → 非弱信号（不花全文兜底的 token）', () => {
-    expect(hasWeakSignal([{ time: 1, text: '哈哈哈' }, { time: 2, text: '哈哈哈' }], comments, corpus)).toBe(false)
+  it('语料词命中同样计入（品牌词弹幕）', () => {
+    expect(
+      hasWeakSignal(
+        [
+          { time: 1, text: '某品牌真好用' },
+          { time: 2, text: '恰饭' },
+          { time: 3, text: '恰饭' },
+        ],
+        [{ text: '某品牌', kind: 'brand' as const, weight: 2, category: 'brands-x' }, ...corpus],
+      ),
+    ).toBe(true)
+  })
+})
+
+describe('candidateSpanLimit（候选窗口按视频时长伸缩）', () => {
+  it('分档：短片 3 / 中场 4 / 长片 6；非法时长回 4', () => {
+    expect(candidateSpanLimit(300)).toBe(3)
+    expect(candidateSpanLimit(600)).toBe(3)
+    expect(candidateSpanLimit(1280)).toBe(4)
+    expect(candidateSpanLimit(1800)).toBe(4)
+    expect(candidateSpanLimit(3600)).toBe(6)
+    expect(candidateSpanLimit(NaN)).toBe(4)
+    expect(candidateSpanLimit(0)).toBe(4)
+  })
+
+  it('固定 10 已被取代：任意档位上限都 ≤6（十几分钟视频不再喂小半条视频）', () => {
+    for (const duration of [60, 600, 1200, 3600, 10800]) {
+      expect(candidateSpanLimit(duration)).toBeLessThanOrEqual(6)
+    }
   })
 })
 

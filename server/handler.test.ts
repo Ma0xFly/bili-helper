@@ -221,7 +221,6 @@ describe('三条契约路径', () => {
     expect(input?.video).toEqual(CONTEXT.video)
     expect(input?.subtitles).toEqual(CONTEXT.subtitles)
     expect(input?.danmaku).toEqual(CONTEXT.danmaku)
-    expect(input?.comments).toEqual(CONTEXT.comments)
     expect(input?.strategy).toBe('smart')
     expect(input?.signal).toBeInstanceOf(AbortSignal)
   })

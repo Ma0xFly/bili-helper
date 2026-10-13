@@ -2,7 +2,7 @@
 // 抗 ASR 噪声的信号——字幕把「国补」写成「国博」时，弹幕仍然会刷「广告」。
 // 纯词表计算零成本：窗口内命中信号弹幕 ≥2 条才进入排名（单条零散弹幕防误伤），
 // 排名并入 RRF 融合；词表/向量两路全空时它还能独撑召回。
-// 附带无字幕兜底：字幕缺失的视频（无 ASR/未上传）用弹幕自建窗口，检测退而不亡。
+// 只做召回与指认计数，不建窗——无字幕视频直接跳过检测（见 detect.ts）。
 
 import type { CorpusSignal } from './corpus'
 import { MAX_WINDOW_CHARS, WINDOW_SECONDS, type SubtitleWindow } from './vector'
@@ -122,38 +122,3 @@ export function rankWindowsByDanmaku(
   return ranked
 }
 
-/**
- * 无字幕兜底建窗：把弹幕按时间装进 30 秒窗口（与字幕窗口同形状），
- * 文本 = 窗口内弹幕拼接（截到 MAX_WINDOW_CHARS）——词表/向量/LLM 定界都能直接消费。
- */
-export function chunkDanmakuWindows(
-  danmaku: readonly Danmaku[],
-  windowSeconds: number = WINDOW_SECONDS,
-  maxChars: number = MAX_WINDOW_CHARS,
-): SubtitleWindow[] {
-  if (danmaku.length === 0) return []
-  const sorted = [...danmaku].sort((a, b) => a.time - b.time)
-  const windows: SubtitleWindow[] = []
-  let start = Math.max(0, Math.floor((sorted[0] as Danmaku).time))
-  let parts: string[] = []
-  let chars = 0
-  const seal = (end: number): void => {
-    if (parts.length > 0) {
-      windows.push({ index: windows.length, start, end, text: parts.join(' ').slice(0, maxChars) })
-    }
-    parts = []
-    chars = 0
-    start = end
-  }
-  for (const item of sorted) {
-    if (item.time >= start + windowSeconds) seal(Math.floor(item.time))
-    if (item.time < start) continue
-    if (chars < maxChars) {
-      parts.push(item.text)
-      chars += item.text.length
-    }
-  }
-  const last = sorted[sorted.length - 1] as Danmaku
-  seal(Math.max(start + 1, Math.ceil(last.time)))
-  return windows
-}

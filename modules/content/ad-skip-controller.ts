@@ -82,7 +82,7 @@ export interface AdSkipControllerDeps {
   collectVideoMeta: () => Promise<VideoMeta | null>
   collectSubtitles: (video: VideoMeta) => Promise<Subtitle[]>
   collectDanmaku: (video: VideoMeta) => Promise<Danmaku[]>
-  collectComments: (video: VideoMeta) => Promise<Comment[]>
+
   readSettings: () => Promise<AiSettings>
   createBackend: (settings: AiSettings, hooks: DetectHooks) => Pick<AiCapabilities, 'detectAds'>
   recordSkipped: (segmentKey: string, savedSeconds: number) => Promise<number | null>
@@ -334,20 +334,16 @@ export class AdSkipController {
         }
         console.info(`[bili-helper] 去广告检测缓存命中 bvid=${meta.bvid} 广告段=${cached.ads.length}（0 token）`)
       } else {
-        const [subtitles, danmaku, comments] = await Promise.all([
+        const [subtitles, danmaku] = await Promise.all([
           this.deps.collectSubtitles(meta),
           this.deps.collectDanmaku(meta),
-          this.deps.collectComments(meta),
         ])
         console.info(
-          `[bili-helper] 去广告检测开始 bvid=${meta.bvid} 时长=${meta.duration}s 字幕=${subtitles.length}行 弹幕=${danmaku.length}条 评论=${comments.length}条`,
+          `[bili-helper] 去广告检测开始 bvid=${meta.bvid} 时长=${meta.duration}s 字幕=${subtitles.length}行 弹幕=${danmaku.length}条`,
         )
         const backend = this.deps.createBackend(settings, {
           onVectorFallback: () => {
             this.showHint('向量端点（Embedding）的 API 有问题，暂时只用词表匹配')
-          },
-          onRetrievalOnly: () => {
-            this.showHint('对话端点这次没响应，先用极速匹配（仅检索）跳广告')
           },
         })
         try {
@@ -355,7 +351,6 @@ export class AdSkipController {
             video: meta,
             subtitles,
             danmaku,
-            comments,
             strategy: 'smart',
           })
         } catch (error) {

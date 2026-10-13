@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import {
   DANMAKU_AD_TERMS,
   MIN_DANMAKU_HITS,
-  chunkDanmakuWindows,
   rankWindowsByDanmaku,
 } from './danmaku-signal'
 import type { SubtitleWindow } from './vector'
@@ -70,26 +69,3 @@ describe('rankWindowsByDanmaku（弹幕信号召回）', () => {
   })
 })
 
-describe('chunkDanmakuWindows（无字幕兜底建窗）', () => {
-  it('按 30 秒装窗，文本为弹幕拼接；窗口 index 递增', () => {
-    const danmaku: Danmaku[] = [
-      { time: 5, text: '开场' },
-      { time: 29, text: '还在第一段' },
-      { time: 31, text: '广告' },
-      { time: 95, text: '结尾' },
-    ]
-    const windows = chunkDanmakuWindows(danmaku)
-    expect(windows.length).toBeGreaterThanOrEqual(2)
-    expect(windows[0]).toMatchObject({ index: 0, start: 5 })
-    expect(windows[0]!.text).toContain('开场')
-    expect(windows.every((w) => w.text !== '')).toBe(true)
-    expect(windows.map((w) => w.index)).toEqual(windows.map((_, i) => i))
-  })
-
-  it('空弹幕回空数组；超长文本截到上限', () => {
-    expect(chunkDanmakuWindows([])).toEqual([])
-    const many: Danmaku[] = Array.from({ length: 200 }, (_, i) => ({ time: i * 0.1, text: '哈哈哈哈哈哈' }))
-    const windows = chunkDanmakuWindows(many)
-    expect(windows.every((w) => w.text.length <= 400)).toBe(true)
-  })
-})
