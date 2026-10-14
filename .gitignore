@@ -12,19 +12,6 @@ _bmad-output/
 .omo/
 .opencode/
 
-# 旧打包产物（重建前的压缩产物，作为本地逆向参考，不进源码仓库）
-/background.js
-/network-intercept-page.js
-/popup-runtime.js
-/manifest.json
-/options.html
-/popup.html
-/assets/
-/chunks/
-/content-scripts/
-/icon/
-/_locales/
-
 # WXT 构建产物与生成类型目录（不进源码仓库）
 .output/
 .wxt/
