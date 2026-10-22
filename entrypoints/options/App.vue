@@ -39,11 +39,10 @@ import type { AiFailureEntry, DetectCostEntry } from '../../modules/ai/diagnosti
 import {
   applyProfile,
   deleteProfile,
-  profileSettingsOf,
   readAiProfiles,
   saveProfileFromCurrent,
 } from '../../modules/settings/profiles'
-import type { AiProfile } from '../../modules/settings/profiles'
+import type { AiProfile, AiProfileSettings } from '../../modules/settings/profiles'
 import {
   applyBackup,
   exportBackupText,
@@ -53,6 +52,7 @@ import { FEATURE_GROUPS } from '../../modules/features/config'
 import type { FeatureGroupId } from '../../modules/features/config'
 import FeaturesSection from './FeaturesSection.vue'
 import ModelCombo from './ModelCombo.vue'
+import ProfileEditorForm from './ProfileEditorForm.vue'
 
 // 侧栏分组：AI 助手 + 三个功能组（过滤视频/布局优化/功能增强）。
 // 「净化」按 PRD 砍掉不再出现；旧占位组（服务器等）一并移除——服务器配置在 AI 助手内。
@@ -554,24 +554,25 @@ async function save(): Promise<void> {
 }
 
 // ---------- 配置方案（多套连接快照，一键换家）----------
+// 新建方案走独立的新表（ProfileEditorForm），不碰主工作表单：建方案不必先改脏正在用的配置。
 const profiles = ref<AiProfile[]>([])
 const selectedProfileId = ref('')
-const profileName = ref('')
 const profileHint = ref<Feedback | null>(null)
+/** 新表组件的句柄：保存成功后清空那张表（下次建方案仍从零填）。 */
+const profileEditor = ref<InstanceType<typeof ProfileEditorForm> | null>(null)
 
 async function loadProfiles(): Promise<void> {
   profiles.value = await readAiProfiles()
 }
 
-async function onSaveProfile(): Promise<void> {
-  const name = profileName.value.trim()
+async function onCreateProfile(payload: { name: string; draft: AiProfileSettings }): Promise<void> {
   try {
-    // 快照取表单当前值（不是存储里的旧值）：改完端点直接「存为方案」存的就是此刻的配置。
-    profiles.value = await saveProfileFromCurrent(name, profileSettingsOf(form))
-    const saved = profiles.value.find((profile) => profile.name === name)
+    // 快照取新表里填的值：与主表单彻底隔离，存的就是这张表此刻的配置。
+    profiles.value = await saveProfileFromCurrent(payload.name, payload.draft)
+    const saved = profiles.value.find((profile) => profile.name === payload.name)
     if (saved) selectedProfileId.value = saved.id
-    profileHint.value = { kind: 'ok', text: `方案「${name}」已保存（当前连接设置）` }
-    profileName.value = ''
+    profileHint.value = { kind: 'ok', text: `方案「${payload.name}」已保存` }
+    profileEditor.value?.reset()
   } catch (error) {
     profileHint.value = {
       kind: 'fail',
@@ -885,7 +886,7 @@ onMounted(loadFailures)
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
-          <section class="card" aria-labelledby="chat-endpoint-title">
+          <section class="card chat-endpoint-card" aria-labelledby="chat-endpoint-title">
             <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
             <p class="card-note">
               总结 / 提问必须有对话端点；只配向量端点时去广告自动走「极速匹配」（纯检索定界，精度略低、零对话开销）。
@@ -970,6 +971,11 @@ onMounted(loadFailures)
                 <span>{{ chatTest.result.text }}</span>
               </div>
             </div>
+            <ProfileEditorForm
+              ref="profileEditor"
+              :existing-names="profiles.map((profile) => profile.name)"
+              @submit="onCreateProfile"
+            />
           </section>
           <section class="card" aria-labelledby="server-title">
             <h2 id="server-title" class="card-title">服务器转发</h2>
@@ -1047,11 +1053,12 @@ onMounted(loadFailures)
           <section class="card" aria-labelledby="profiles-title">
               <h2 id="profiles-title" class="card-title">配置方案</h2>
               <p class="card-note">
-                把整套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成命名方案，一键换家；功能开关不属于方案。
+                每套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成一个命名方案，一键换家；功能开关不属于方案。
+                在上方「对话端点」卡里的「新建方案」表中填写并存入；这里负责挑一个用。
               </p>
               <div class="profile-row">
                 <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
-                  <option value="" disabled>暂无方案，先在下面保存一个</option>
+                  <option value="" disabled>暂无方案，先在上方「新建方案」里存一个</option>
                   <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
                     {{ profile.name }}
                   </option>
@@ -1061,18 +1068,6 @@ onMounted(loadFailures)
                 </button>
                 <button type="button" class="ghost" :disabled="selectedProfileId === ''" @click="onDeleteProfile">
                   删除
-                </button>
-              </div>
-              <div class="profile-row">
-                <input
-                  v-model="profileName"
-                  type="text"
-                  placeholder="方案名，如：硅基流动·本地直连"
-                  aria-label="方案名称"
-                  class="grow"
-                />
-                <button type="button" class="ghost" :disabled="profileName.trim() === ''" @click="onSaveProfile">
-                  存为方案
                 </button>
               </div>
               <div v-if="profileHint" class="feedback" :class="profileHint.kind" aria-live="polite">

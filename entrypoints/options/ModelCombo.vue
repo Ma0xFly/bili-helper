@@ -224,11 +224,31 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 输入样式继承全局 input 规则；这里只管下拉列表自身。 */
+/* 样式自足：父组件 App.vue 的 style 是 scoped（元素选择器也带作用域标记），
+   穿不到子组件的 input 上——这里必须自带一份，否则输入框会退回浏览器默认外观
+   （2px inset 边框、21px 高），与设置页其它输入框不是一个样。 */
 .model-combo {
   position: relative;
   display: flex;
   flex-direction: column;
+}
+
+.model-combo input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--bh-border-hairline);
+  background: var(--bh-surface-input);
+  font-size: 13.5px;
+  font-family: inherit;
+  color: var(--bh-text-primary);
+  outline: none;
+}
+
+.model-combo input:focus {
+  border-color: var(--bh-primary);
+  box-shadow: 0 0 0 3px var(--bh-shadow-focus);
 }
 
 /* 浮层在 body 下（Teleport 出去），scoped 的 data-v 标记照样带在元素上，样式照常生效。 */

@@ -44,7 +44,7 @@ function snapshot(overrides: Partial<AiProfileSettings> = {}): AiProfileSettings
   }
 }
 
-describe('saveProfileFromCurrent（存为方案）', () => {
+describe('saveProfileFromCurrent（新建方案）', () => {
   it('快照连接字段；应用时整体覆盖回主设置，功能开关保持现状', async () => {
     // 存一份带另一套端点的快照，验证方案只搬连接字段。
     await saveProfileFromCurrent('B 端点', snapshot({ apiUrl: 'https://b.example/v1', model: 'm-b' }))
@@ -60,8 +60,8 @@ describe('saveProfileFromCurrent（存为方案）', () => {
     expect((await readAiSettings()).apiKey).toBe('k-a') // 未进快照的字段原样保留
   })
 
-  it('快照取传入的当前值，不读存储里的旧值（表单改动未保存也能存档）', async () => {
-    // 存储里还是 beforeEach 的旧端点；传入的快照是「此刻表单里的值」。
+  it('快照取传入的当前值，不读存储里的旧值（新表填的即存档内容）', async () => {
+    // 存储里还是 beforeEach 的旧端点；传入的快照是「新建方案表此刻填的值」。
     await saveProfileFromCurrent(
       '新端点',
       snapshot({ apiUrl: 'https://new-endpoint.example/v1', model: 'm-new' }),
@@ -71,6 +71,20 @@ describe('saveProfileFromCurrent（存为方案）', () => {
     expect(profiles[0]?.settings.model).toBe('m-new')
     // 存档不改动主设置本身（应用才写回）
     expect((await readAiSettings()).apiUrl).toBe('https://a.example/v1')
+  })
+
+  it('空白新表也能存档：空端点/空 Key 归一为空串（不继承主设置）', async () => {
+    // 新表是「从零填」的：什么都不填就存，方案里就是空值，不会偷偷继承主设置。
+    await saveProfileFromCurrent(
+      '空白方案',
+      snapshot({ apiUrl: '', apiKey: '', model: '', embedBaseUrl: '', embedModel: '' }),
+    )
+    const profiles = await readAiProfiles()
+    expect(profiles[0]?.settings.apiUrl).toBe('')
+    expect(profiles[0]?.settings.apiKey).toBe('')
+    expect(profiles[0]?.settings.model).toBe('')
+    expect(profiles[0]?.settings.embedBaseUrl).toBe('')
+    expect(profiles[0]?.settings.embedModel).toBe('')
   })
 
   it('空名单独抛错；同名覆盖而不是重复堆积', async () => {
