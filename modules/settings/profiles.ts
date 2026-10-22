@@ -3,7 +3,6 @@
 // 连接字段的存档，应用 = 把快照字段合并回主设置（功能开关不属于方案，保持原样）。
 
 import {
-  readAiSettings,
   writeAiSettings,
   type AiMode,
   type AiSettings,
@@ -116,12 +115,19 @@ function newId(): string {
 /**
  * 把当前主设置的连接字段存成方案。同名覆盖（更新快照与时间）而不是重复堆积；
  * 超上限淘汰最旧的方案（存档语义下静默淘汰比报错打断更可预期）。
+ *
+ * 快照来源是**调用方传入的当前值**（设置页传表单当前值），不是读存储：
+ * 存储里是「上次点保存设置时的值」，用户改完表单直接点「存为方案」时读存储会存进旧值，
+ * 表现为「存了方案但内容是上一次的、随后应用把旧值写回」——存档的是此刻的配置。
  */
-export async function saveProfileFromCurrent(rawName: string): Promise<AiProfile[]> {
+export async function saveProfileFromCurrent(
+  rawName: string,
+  current: AiProfileSettings,
+): Promise<AiProfile[]> {
   const name = rawName.trim()
   if (name === '') throw new Error('先给方案起个名字')
   const profiles = await readAiProfiles()
-  const settings = profileSettingsOf(await readAiSettings())
+  const settings = normalizeProfileSettings(current)
   const existing = profiles.find((profile) => profile.name === name)
   const profile: AiProfile = {
     id: existing?.id ?? newId(),

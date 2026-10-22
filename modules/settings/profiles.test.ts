@@ -8,6 +8,7 @@ import {
   profileSettingsOf,
   readAiProfiles,
   saveProfileFromCurrent,
+  type AiProfileSettings,
 } from './profiles'
 
 beforeEach(async () => {
@@ -26,11 +27,27 @@ async function storedProfiles(): Promise<unknown> {
   return result.aiAssistantProfiles
 }
 
+/** 构造一份连接快照（测试里显式给值，不依赖存储里的现状）。 */
+function snapshot(overrides: Partial<AiProfileSettings> = {}): AiProfileSettings {
+  return {
+    apiUrl: 'https://a.example/v1',
+    model: 'm-a',
+    apiKey: 'k-a',
+    apiFormat: 'openai',
+    embedBaseUrl: '',
+    embedModel: '',
+    embedKey: '',
+    mode: 'local',
+    serverBaseUrl: '',
+    serverToken: '',
+    ...overrides,
+  }
+}
+
 describe('saveProfileFromCurrent（存为方案）', () => {
   it('快照连接字段；应用时整体覆盖回主设置，功能开关保持现状', async () => {
-    // 给主设置带上非默认的功能开关与另一套端点，验证方案只搬连接字段。
-    await writeAiSettings({ apiUrl: 'https://b.example/v1', model: 'm-b', adSkipEnabled: true })
-    await saveProfileFromCurrent('B 端点')
+    // 存一份带另一套端点的快照，验证方案只搬连接字段。
+    await saveProfileFromCurrent('B 端点', snapshot({ apiUrl: 'https://b.example/v1', model: 'm-b' }))
 
     // 切到另一套配置（含不同功能开关），应用方案后连接字段还原、开关不动。
     await writeAiSettings({ apiUrl: 'https://c.example/v1', model: 'm-c', adSkipEnabled: false })
@@ -40,23 +57,35 @@ describe('saveProfileFromCurrent（存为方案）', () => {
     expect(applied.apiUrl).toBe('https://b.example/v1')
     expect(applied.model).toBe('m-b')
     expect(applied.adSkipEnabled).toBe(false) // 方案不带功能开关：保持当前值
-    expect((await readAiSettings()).apiKey).toBe('k-a') // 继承自 beforeEach 的 Key 原样保留
+    expect((await readAiSettings()).apiKey).toBe('k-a') // 未进快照的字段原样保留
+  })
+
+  it('快照取传入的当前值，不读存储里的旧值（表单改动未保存也能存档）', async () => {
+    // 存储里还是 beforeEach 的旧端点；传入的快照是「此刻表单里的值」。
+    await saveProfileFromCurrent(
+      '新端点',
+      snapshot({ apiUrl: 'https://new-endpoint.example/v1', model: 'm-new' }),
+    )
+    const profiles = await readAiProfiles()
+    expect(profiles[0]?.settings.apiUrl).toBe('https://new-endpoint.example/v1')
+    expect(profiles[0]?.settings.model).toBe('m-new')
+    // 存档不改动主设置本身（应用才写回）
+    expect((await readAiSettings()).apiUrl).toBe('https://a.example/v1')
   })
 
   it('空名单独抛错；同名覆盖而不是重复堆积', async () => {
-    await expect(saveProfileFromCurrent('   ')).rejects.toThrow(/名字/)
-    await saveProfileFromCurrent('A')
-    await writeAiSettings({ apiUrl: 'https://x.example/v1' })
-    const second = await saveProfileFromCurrent('A')
+    await expect(saveProfileFromCurrent('   ', snapshot())).rejects.toThrow(/名字/)
+    await saveProfileFromCurrent('A', snapshot({ model: 'm-1' }))
+    const second = await saveProfileFromCurrent('A', snapshot({ model: 'm-2' }))
     expect(second).toHaveLength(1)
     expect(second[0]?.name).toBe('A')
-    expect(second[0]?.settings.apiUrl).toBe('https://x.example/v1')
+    // 覆盖用的是新快照，不是旧快照
+    expect(second[0]?.settings.model).toBe('m-2')
   })
 
   it('超上限淘汰最旧方案（存档语义：静默淘汰比报错可预期）', async () => {
     for (let index = 0; index <= PROFILE_LIMIT; index += 1) {
-      await writeAiSettings({ model: `m-${index}` })
-      await saveProfileFromCurrent(`方案${index}`)
+      await saveProfileFromCurrent(`方案${index}`, snapshot({ model: `m-${index}` }))
     }
     const profiles = await readAiProfiles()
     expect(profiles).toHaveLength(PROFILE_LIMIT)
@@ -92,7 +121,7 @@ describe('readAiProfiles（坏形状容错）', () => {
 
 describe('deleteProfile / applyProfile 边界', () => {
   it('删除后列表落盘；应用不存在的方案抛错', async () => {
-    await saveProfileFromCurrent('临时')
+    await saveProfileFromCurrent('临时', snapshot())
     const profiles = await readAiProfiles()
     const next = await deleteProfile(profiles[0]!.id)
     expect(next).toEqual([])
@@ -101,7 +130,7 @@ describe('deleteProfile / applyProfile 边界', () => {
   })
 
   it('profileSettingsOf 只取连接字段（apiFormat 进方案，开关不进）', () => {
-    const snapshot = profileSettingsOf({
+    const result = profileSettingsOf({
       apiUrl: 'https://q.example/v1',
       model: 'm',
       apiKey: 'k',
@@ -115,7 +144,7 @@ describe('deleteProfile / applyProfile 边界', () => {
       adSkipEnabled: true,
       panelEnabled: false,
     } as Parameters<typeof profileSettingsOf>[0])
-    expect(snapshot).toEqual({
+    expect(result).toEqual({
       apiUrl: 'https://q.example/v1',
       model: 'm',
       apiKey: 'k',

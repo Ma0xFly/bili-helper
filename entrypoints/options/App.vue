@@ -39,6 +39,7 @@ import type { AiFailureEntry, DetectCostEntry } from '../../modules/ai/diagnosti
 import {
   applyProfile,
   deleteProfile,
+  profileSettingsOf,
   readAiProfiles,
   saveProfileFromCurrent,
 } from '../../modules/settings/profiles'
@@ -565,7 +566,8 @@ async function loadProfiles(): Promise<void> {
 async function onSaveProfile(): Promise<void> {
   const name = profileName.value.trim()
   try {
-    profiles.value = await saveProfileFromCurrent(name)
+    // 快照取表单当前值（不是存储里的旧值）：改完端点直接「存为方案」存的就是此刻的配置。
+    profiles.value = await saveProfileFromCurrent(name, profileSettingsOf(form))
     const saved = profiles.value.find((profile) => profile.name === name)
     if (saved) selectedProfileId.value = saved.id
     profileHint.value = { kind: 'ok', text: `方案「${name}」已保存（当前连接设置）` }

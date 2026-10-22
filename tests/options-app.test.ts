@@ -821,11 +821,15 @@ describe('options AI 助手表单', () => {
     await findButton(wrapper, '拉取模型').trigger('click')
     await flushPromises()
 
+    // 列表 Teleport 到 body（脱离卡片的 backdrop-filter 堆叠上下文），所以按 document 查。
+    const listItems = () =>
+      Array.from(document.querySelectorAll('.model-list li')).map((item) => item.textContent ?? '')
+
     const input = wrapper.find('input[aria-label="对话模型"]')
     // 聚焦展开全量（按字母序）：Alpha-model 排最前。
     await input.trigger('focus')
-    let items = wrapper.findAll('.model-list li')
-    expect(items.map((item) => item.text())).toEqual([
+    await flushPromises()
+    expect(listItems()).toEqual([
       'Alpha-model',
       'b-alpha-model',
       'beta-model',
@@ -835,14 +839,14 @@ describe('options AI 助手表单', () => {
     // 输入 b：两条都以 b 开头（startsWith 组内按字母序），gamma 被过滤；
     // contains 组会排在 startsWith 组之后（见下一步用例：alpha 命中但不以输入开头）。
     await input.setValue('b')
-    items = wrapper.findAll('.model-list li')
-    expect(items.map((item) => item.text())).toEqual(['b-alpha-model', 'beta-model'])
+    await flushPromises()
+    expect(listItems()).toEqual(['b-alpha-model', 'beta-model'])
 
     // 输入 a：'Alpha-model' 是 startsWith（大小写不敏感）排最前；其余三条只是 contains，
     // 组内按字母序——startsWith 组优先于 contains 组的规则得到验证。
     await input.setValue('a')
-    items = wrapper.findAll('.model-list li')
-    expect(items.map((item) => item.text())).toEqual([
+    await flushPromises()
+    expect(listItems()).toEqual([
       'Alpha-model',
       'b-alpha-model',
       'beta-model',
@@ -850,11 +854,40 @@ describe('options AI 助手表单', () => {
     ])
 
     // 点选写回表单并收起列表（当前列表首项即上一步过滤后的 Alpha-model）。
-    await items[0]!.trigger('mousedown')
+    const first = document.querySelector('.model-list li') as HTMLElement
+    first.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    await flushPromises()
     expect(inputValue(input.element)).toBe('Alpha-model')
     // v-show 收起 = display:none（DOM 保留，断言样式而不是节点数）。
-    const list = wrapper.find('.model-list')
-    expect((list.element as HTMLElement).style.display).toBe('none')
+    const list = document.querySelector('.model-list') as HTMLElement
+    expect(list.style.display).toBe('none')
+  })
+
+  it('模型下拉浮层在 body 下（不被卡片的 backdrop-filter 关住层级）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://a.example/v1' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'm-1' }] }), { status: 200 })),
+    )
+    await findButton(wrapper, '拉取模型').trigger('click')
+    await flushPromises()
+
+    const input = wrapper.find('input[aria-label="对话模型"]')
+    await input.trigger('focus')
+    await flushPromises()
+
+    // 浮层挂在 body（不是设置页卡片的子树）：层级由 body 裁决，吸底保存条盖不住它。
+    const list = document.querySelector('.model-list')
+    expect(list).not.toBeNull()
+    expect(list!.parentElement).toBe(document.body)
+    // 输入框与浮层用 aria-controls 关联（combobox 模式）。
+    const listId = list!.getAttribute('id')
+    expect(listId).toBeTruthy()
+    expect(input.attributes('aria-controls')).toBe(listId)
   })
 })
 
@@ -1138,5 +1171,73 @@ describe('配置备份（导出 / 导入）', () => {
     expect(features.biliHelperFeatures.videoFilter?.enabled).toBe(true)
     expect(features.biliHelperFeatures.videoFilter?.config.titleKeywords).toEqual(['带货'])
     expect(wrapper.text()).toContain('已导入')
+  })
+})
+
+describe('配置方案（存为方案 / 应用）', () => {
+  it('改完表单直接「存为方案」存的是当前表单值（不是存储里的旧值）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old', apiKey: 'k-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    // 改表单端点，但不点「保存设置」——直接存为方案。
+    await wrapper.find('input[type="url"]').setValue('https://new.example/v1')
+    await wrapper.find('input[aria-label="对话模型"]').setValue('m-new')
+    await wrapper.find('input[aria-label="方案名称"]').setValue('新方案')
+    await findButton(wrapper, '存为方案').trigger('click')
+    await flushPromises()
+
+    const stored = await chrome.storage.sync.get('aiAssistantProfiles')
+    const list = stored.aiAssistantProfiles as { name: string; settings: { apiUrl: string; model: string } }[]
+    expect(list).toHaveLength(1)
+    expect(list[0]!.name).toBe('新方案')
+    expect(list[0]!.settings.apiUrl).toBe('https://new.example/v1')
+    expect(list[0]!.settings.model).toBe('m-new')
+  })
+
+  it('同名「存为方案」覆盖旧快照（内容取当前表单值）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.find('input[aria-label="方案名称"]').setValue('A')
+    await findButton(wrapper, '存为方案').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('input[type="url"]').setValue('https://a2.example/v1')
+    await wrapper.find('input[aria-label="方案名称"]').setValue('A')
+    await findButton(wrapper, '存为方案').trigger('click')
+    await flushPromises()
+
+    const stored = await chrome.storage.sync.get('aiAssistantProfiles')
+    const list = stored.aiAssistantProfiles as { name: string; settings: { apiUrl: string } }[]
+    expect(list).toHaveLength(1)
+    expect(list[0]!.settings.apiUrl).toBe('https://a2.example/v1')
+  })
+
+  it('「应用」把方案快照写回表单与存储（快照里的新值生效）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.find('input[type="url"]').setValue('https://new.example/v1')
+    await wrapper.find('input[aria-label="方案名称"]').setValue('P')
+    await findButton(wrapper, '存为方案').trigger('click')
+    await flushPromises()
+
+    // 改回旧值并应用方案——表单应回到方案里的新值。
+    await wrapper.find('input[type="url"]').setValue('https://old.example/v1')
+    await findButton(wrapper, '应用').trigger('click')
+    await flushPromises()
+
+    expect(inputValue(wrapper.find('input[type="url"]').element)).toBe('https://new.example/v1')
+    const settings = await storedSettings()
+    expect(settings.apiUrl).toBe('https://new.example/v1')
   })
 })
