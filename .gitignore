@@ -5,6 +5,7 @@ node_modules/
 _bmad/
 _bmad-output/
 .zcode/
+.claude/
 
 # 其他本地工具目录
 .agents/
