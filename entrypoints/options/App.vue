@@ -39,10 +39,11 @@ import type { AiFailureEntry, DetectCostEntry } from '../../modules/ai/diagnosti
 import {
   applyProfile,
   deleteProfile,
+  profileSettingsOf,
   readAiProfiles,
   saveProfileFromCurrent,
 } from '../../modules/settings/profiles'
-import type { AiProfile, AiProfileSettings } from '../../modules/settings/profiles'
+import type { AiProfile } from '../../modules/settings/profiles'
 import {
   applyBackup,
   exportBackupText,
@@ -52,7 +53,6 @@ import { FEATURE_GROUPS } from '../../modules/features/config'
 import type { FeatureGroupId } from '../../modules/features/config'
 import FeaturesSection from './FeaturesSection.vue'
 import ModelCombo from './ModelCombo.vue'
-import ProfileEditorForm from './ProfileEditorForm.vue'
 
 // 侧栏分组：AI 助手 + 三个功能组（过滤视频/布局优化/功能增强）。
 // 「净化」按 PRD 砍掉不再出现；旧占位组（服务器等）一并移除——服务器配置在 AI 助手内。
@@ -553,28 +553,103 @@ async function save(): Promise<void> {
   }, 2000)
 }
 
-// ---------- 配置方案（多套连接快照，一键换家）----------
-// 新建方案走独立的新表（ProfileEditorForm），不碰主工作表单：建方案不必先改脏正在用的配置。
+// ---------- 配置方案（同一张表两种用途：编辑当前配置 / 新建方案）----------
+// 「新建方案」不另开一张表：点一下把「对话端点」这张表清空，填完直接存成命名方案。
+// 建方案期间这张表是草稿——底部主按钮变成「存为方案」，只写方案不写主设置；
+// 取消或存完就把表格原样恢复，正在用的配置一个字节都不动。
 const profiles = ref<AiProfile[]>([])
 const selectedProfileId = ref('')
+/** 方案列表卡的反馈（应用 / 删除的结果）。 */
 const profileHint = ref<Feedback | null>(null)
-/** 新表组件的句柄：保存成功后清空那张表（下次建方案仍从零填）。 */
-const profileEditor = ref<InstanceType<typeof ProfileEditorForm> | null>(null)
+/** 是否处于「新建方案」模式：这张表此刻是草稿，不是正在用的配置。 */
+const creatingProfile = ref(false)
+/** 方案名（只在新建模式下出现）。 */
+const profileName = ref('')
+/** 新建方案区的反馈（校验失败 / 存好 / 取消）。 */
+const draftHint = ref<Feedback | null>(null)
+/** 方案名与已有方案重名：提示会覆盖，避免以为存成了两个。 */
+const overwritesExisting = computed(
+  () => profiles.value.some((profile) => profile.name === profileName.value.trim()),
+)
+/**
+ * 进入新建模式前的表格内容：取消/存完后原样写回，不丢用户正在改的配置。
+ * 只备份被清空的那几个字段——总开关等其它页的即时开关不受建方案影响（它们直接写存储）。
+ */
+const profileDraftBackup = ref<
+  Pick<FormModel, 'apiUrl' | 'apiKey' | 'model' | 'apiFormat'> | null
+>(null)
 
 async function loadProfiles(): Promise<void> {
   profiles.value = await readAiProfiles()
 }
 
-async function onCreateProfile(payload: { name: string; draft: AiProfileSettings }): Promise<void> {
+/** 备份当前表格并清空「对话端点」这几项，进入新建方案模式。 */
+function startProfileDraft(): void {
+  if (creatingProfile.value) return
+  profileDraftBackup.value = {
+    apiUrl: form.apiUrl,
+    apiKey: form.apiKey,
+    model: form.model,
+    apiFormat: form.apiFormat,
+  }
+  form.apiUrl = ''
+  form.apiKey = ''
+  form.model = ''
+  form.apiFormat = 'openai'
+  // 旧端点拉到的模型列表对新端点无意义，一并清掉免得照着旧名单选。
+  chatModelOptions.value = []
+  chatModelsHint.value = ''
+  chatTest.result = null
+  profileName.value = ''
+  creatingProfile.value = true
+  draftHint.value = null
+}
+
+/** 退出新建模式：把备份原样写回表格（取消与存完都走这里）。 */
+function restoreProfileDraft(): void {
+  const backup = profileDraftBackup.value
+  if (backup) {
+    form.apiUrl = backup.apiUrl
+    form.apiKey = backup.apiKey
+    form.model = backup.model
+    form.apiFormat = backup.apiFormat
+  }
+  profileDraftBackup.value = null
+  creatingProfile.value = false
+  profileName.value = ''
+}
+
+function cancelProfileDraft(): void {
+  restoreProfileDraft()
+  draftHint.value = { kind: 'warn', text: '已取消新建，正在用的配置原样保留' }
+}
+
+/**
+ * 存为方案：快照取这张表此刻填的值。
+ * 这张表里没有的字段（向量端点、服务器转发）沿用当前设置——用户没看见的东西不静默改动。
+ */
+async function saveProfileAsDraft(): Promise<void> {
+  const name = profileName.value.trim()
+  if (name === '') {
+    draftHint.value = { kind: 'fail', text: '先给方案起个名字' }
+    return
+  }
+  if (form.apiUrl.trim() === '') {
+    draftHint.value = { kind: 'fail', text: '填一个 Base URL：方案应用后就是拿它去请求' }
+    return
+  }
+  if (form.model.trim() === '') {
+    draftHint.value = { kind: 'fail', text: '填一个模型名：端点有了还得指明用哪个模型' }
+    return
+  }
   try {
-    // 快照取新表里填的值：与主表单彻底隔离，存的就是这张表此刻的配置。
-    profiles.value = await saveProfileFromCurrent(payload.name, payload.draft)
-    const saved = profiles.value.find((profile) => profile.name === payload.name)
+    profiles.value = await saveProfileFromCurrent(name, profileSettingsOf({ ...form }))
+    const saved = profiles.value.find((profile) => profile.name === name)
     if (saved) selectedProfileId.value = saved.id
-    profileHint.value = { kind: 'ok', text: `方案「${payload.name}」已保存` }
-    profileEditor.value?.reset()
+    restoreProfileDraft()
+    profileHint.value = { kind: 'ok', text: `方案「${name}」已保存` }
   } catch (error) {
-    profileHint.value = {
+    draftHint.value = {
       kind: 'fail',
       text: error instanceof Error ? error.message : '保存失败，请重试',
     }
@@ -584,6 +659,9 @@ async function onCreateProfile(payload: { name: string; draft: AiProfileSettings
 async function onApplyProfile(): Promise<void> {
   if (selectedProfileId.value === '') return
   try {
+    // 正在新建方案时先退回普通模式：这张表的草稿内容让位给要应用的方案，
+    // 否则草稿备份还攥着旧值，之后一按「取消」就会把应用的方案覆盖回去。
+    if (creatingProfile.value) restoreProfileDraft()
     // 应用即写入存储（主设置已更新），表单同步搬运，无需再点保存。
     applyStoredToForm(await applyProfile(selectedProfileId.value))
     profileHint.value = { kind: 'ok', text: '方案已应用并保存' }
@@ -886,7 +964,7 @@ onMounted(loadFailures)
 
         <p v-if="loadError" class="load-error" role="alert">{{ loadError }}</p>
 
-          <section class="card chat-endpoint-card" aria-labelledby="chat-endpoint-title">
+          <section class="card chat-endpoint-card" :class="{ 'is-draft': creatingProfile }" aria-labelledby="chat-endpoint-title">
             <h2 id="chat-endpoint-title" class="card-title">对话端点（总结 / 提问）</h2>
             <p class="card-note">
               总结 / 提问必须有对话端点；只配向量端点时去广告自动走「极速匹配」（纯检索定界，精度略低、零对话开销）。
@@ -894,6 +972,37 @@ onMounted(loadFailures)
             <p v-if="!localEndpointsInUse" class="card-note">
               当前全部请求走服务器转发，这里的端点不会被使用；开启「失败时回退」或关掉服务器开关即恢复直连。
             </p>
+            <div class="profile-draft">
+              <div v-if="!creatingProfile" class="profile-draft-row">
+                <button type="button" class="ghost" aria-label="新建方案" @click="startProfileDraft">
+                  新建方案
+                </button>
+                <span class="field-hint profile-draft-hint">
+                  点一下把下面这张表清空，填一套新的连接配置存成命名方案。正在用的配置不受影响——取消或存完都会原样恢复。
+                </span>
+              </div>
+              <div v-else class="profile-draft-row">
+                <label class="field profile-name-field">
+                  <span class="field-label">方案名称</span>
+                  <input v-model="profileName" type="text" aria-label="方案名称" placeholder="例如：公司网关" />
+                </label>
+                <button type="button" class="ghost" aria-label="取消新建方案" @click="cancelProfileDraft">
+                  取消
+                </button>
+              </div>
+              <p v-if="creatingProfile" class="field-hint">
+                正在新建方案：下面这张表已清空，填完点下方「存为方案」。向量端点与服务器转发沿用当前设置。
+              </p>
+              <p v-if="creatingProfile && overwritesExisting" class="field-hint profile-warn">
+                已有同名方案，存下来会覆盖它。
+              </p>
+              <div v-if="draftHint" class="feedback" :class="draftHint.kind" aria-live="polite">
+                <span class="badge" aria-hidden="true">
+                  {{ draftHint.kind === 'ok' ? '✓' : draftHint.kind === 'warn' ? '!' : '✕' }}
+                </span>
+                <span>{{ draftHint.text }}</span>
+              </div>
+            </div>
             <div class="field">
               <span class="field-label">服务商预设</span>
               <select :value="chatPresetName" aria-label="服务商预设" @change="applyChatPreset">
@@ -971,11 +1080,6 @@ onMounted(loadFailures)
                 <span>{{ chatTest.result.text }}</span>
               </div>
             </div>
-            <ProfileEditorForm
-              ref="profileEditor"
-              :existing-names="profiles.map((profile) => profile.name)"
-              @submit="onCreateProfile"
-            />
           </section>
           <section class="card" aria-labelledby="server-title">
             <h2 id="server-title" class="card-title">服务器转发</h2>
@@ -1054,7 +1158,7 @@ onMounted(loadFailures)
               <h2 id="profiles-title" class="card-title">配置方案</h2>
               <p class="card-note">
                 每套连接配置（端点 / Key / 模型 / 协议 / 服务器）存成一个命名方案，一键换家；功能开关不属于方案。
-                在上方「对话端点」卡里的「新建方案」表中填写并存入；这里负责挑一个用。
+                在上方「对话端点」卡里点「新建方案」填表并存入；这里负责挑一个用。
               </p>
               <div class="profile-row">
                 <select v-model="selectedProfileId" aria-label="选择方案" :disabled="profiles.length === 0">
@@ -1079,9 +1183,14 @@ onMounted(loadFailures)
             </section>
 
         <div class="actions">
-          <button type="button" class="primary" @click="save">保存设置</button>
+          <button v-if="!creatingProfile" type="button" class="primary" @click="save">保存设置</button>
+          <button v-else type="button" class="primary" aria-label="存为方案" @click="saveProfileAsDraft">
+            存为方案
+          </button>
           <span v-if="saveHint" class="field-hint" aria-live="polite">{{ saveHint }}</span>
-          <span class="actions-note">本页改动需点「保存设置」；其它页的开关都是即时生效的</span>
+          <span class="actions-note">
+            {{ creatingProfile ? '新建方案模式：点「存为方案」只存方案，不改正在用的配置' : '本页改动需点「保存设置」；其它页的开关都是即时生效的' }}
+          </span>
         </div>
 
       </section>
@@ -2211,6 +2320,39 @@ button {
 }
 
 /* ---------- 配置方案 ---------- */
+/* 新建方案模式：同一张表被清空成草稿，整卡描边提示「现在填的是新方案」。 */
+.chat-endpoint-card.is-draft {
+  border-color: var(--bh-primary);
+  box-shadow: 0 0 0 3px var(--bh-shadow-focus), 0 8px 24px var(--bh-shadow-card);
+}
+
+.profile-draft {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--bh-border-hairline);
+}
+
+.profile-draft-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.profile-draft-hint {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-name-field {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.profile-warn {
+  color: var(--bh-warn);
+}
+
 .profile-row {
   display: flex;
   align-items: center;

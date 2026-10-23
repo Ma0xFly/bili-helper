@@ -40,9 +40,23 @@ function findButton(wrapper: ReturnType<typeof mount>, text: string) {
   return button
 }
 
-/** 连接页的「保存设置」：v-show 下八页都在 DOM 里，按页定位而非依赖文档顺序。 */
+/**
+ * 连接页的「保存设置」：v-show 下八页都在 DOM 里，按页定位而非依赖文档顺序。
+ * 建方案模式下底栏主按钮会换成「存为方案」（同样带 .primary），所以还要按文案挑准。
+ */
 function saveSettingsButton(wrapper: ReturnType<typeof mount>) {
-  return wrapper.find('.page[aria-label="连接"] .actions button.primary')
+  const button = wrapper
+    .findAll('.page[aria-label="连接"] .actions button.primary')
+    .find((item) => item.text().includes('保存设置'))
+  if (!button) throw new Error('找不到「保存设置」按钮')
+  return button
+}
+
+/** 「保存设置」在不在（建方案模式下它被换成「存为方案」）。 */
+function hasSaveSettingsButton(wrapper: ReturnType<typeof mount>): boolean {
+  return wrapper
+    .findAll('.page[aria-label="连接"] .actions button.primary')
+    .some((item) => item.text().includes('保存设置'))
 }
 
 /**
@@ -784,11 +798,13 @@ describe('options AI 助手表单', () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    // 在「新建方案」新表里填一套并存档。
-    await wrapper.find('input[aria-label="新建方案名称"]').setValue('A 方案')
-    await wrapper.find('input[aria-label="新建方案 Base URL"]').setValue('https://a.example/v1')
-    await wrapper.find('input[aria-label="新建方案模型"]').setValue('m-a')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    // 点「新建方案」把主表清空，填一套新的并存档。
+    await wrapper.find('button[aria-label="新建方案"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('input[aria-label="方案名称"]').setValue('A 方案')
+    await chatField(wrapper, 'input[type="url"]').setValue('https://a.example/v1')
+    await wrapper.find('input[aria-label="对话模型"]').setValue('m-a')
+    await wrapper.find('button[aria-label="存为方案"]').trigger('click')
     await flushPromises()
     const select = wrapper.find('select[aria-label="选择方案"]')
     expect((select.element as HTMLSelectElement).value).not.toBe('')
@@ -1185,24 +1201,94 @@ describe('配置备份（导出 / 导入）', () => {
 })
 
 describe('配置方案（新建方案 / 应用）', () => {
-  /** 新建方案的新表在「对话端点」卡里，与主工作表单完全隔离。 */
-  function editorField(wrapper: ReturnType<typeof mount>, label: string) {
-    return wrapper.find(`input[aria-label="${label}"]`)
+  /** 「新建方案」入口按钮。 */
+  function startDraftButton(wrapper: ReturnType<typeof mount>) {
+    return wrapper.find('button[aria-label="新建方案"]')
   }
 
-  it('新表填的值存成方案；主工作表单不受影响（不需先点保存设置）', async () => {
+  /** 建方案模式下的「存为方案」按钮（底栏主按钮）。 */
+  function saveDraftButton(wrapper: ReturnType<typeof mount>) {
+    return wrapper.find('button[aria-label="存为方案"]')
+  }
+
+  /** 方案名输入框（只在建方案模式出现）。 */
+  function profileNameField(wrapper: ReturnType<typeof mount>) {
+    return wrapper.find('input[aria-label="方案名称"]')
+  }
+
+  /** 进入新建方案模式并填一套连接配置。 */
+  async function fillDraft(
+    wrapper: ReturnType<typeof mount>,
+    values: { name: string; apiUrl: string; model: string; apiKey?: string },
+  ): Promise<void> {
+    await startDraftButton(wrapper).trigger('click')
+    await flushPromises()
+    await profileNameField(wrapper).setValue(values.name)
+    await chatField(wrapper, 'input[type="url"]').setValue(values.apiUrl)
+    await wrapper.find('input[aria-label="对话模型"]').setValue(values.model)
+    if (values.apiKey !== undefined) {
+      await chatField(wrapper, 'input[type="password"]').setValue(values.apiKey)
+    }
+  }
+
+  it('点「新建方案」把主表清空，正在用的配置一个字节不动', async () => {
     await chrome.storage.sync.set({
       aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old', apiKey: 'k-old' },
     })
     const wrapper = mount(App)
     await flushPromises()
 
-    // 只在新建方案的新表里填——主工作表单一行都不碰。
-    await editorField(wrapper, '新建方案名称').setValue('新方案')
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://new.example/v1')
-    await editorField(wrapper, '新建方案 API Key').setValue('k-new')
-    await editorField(wrapper, '新建方案模型').setValue('m-new')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('https://old.example/v1')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('m-old')
+
+    await startDraftButton(wrapper).trigger('click')
+    await flushPromises()
+
+    // 表被清空，等着一份新配置。
+    expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('')
+    expect(inputValue(chatField(wrapper, 'input[type="password"]').element)).toBe('')
+    // 存储里的正在用的配置没被动过。
+    expect((await storedSettings()).apiUrl).toBe('https://old.example/v1')
+    // 底栏主按钮换成「存为方案」。
+    expect(saveDraftButton(wrapper).exists()).toBe(true)
+    expect(hasSaveSettingsButton(wrapper)).toBe(false)
+  })
+
+  it('取消新建：表格原样恢复（正在用的配置一点不丢）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await startDraftButton(wrapper).trigger('click')
+    await flushPromises()
+    await chatField(wrapper, 'input[type="url"]').setValue('https://scratch.example/v1')
+
+    await wrapper.find('button[aria-label="取消新建方案"]').trigger('click')
+    await flushPromises()
+
+    expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('https://old.example/v1')
+    expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('m-old')
+    expect(hasSaveSettingsButton(wrapper)).toBe(true)
+    expect(wrapper.find('.feedback.warn').text()).toContain('已取消新建')
+  })
+
+  it('填的值存成方案；主工作表单与存储都不受影响（不需先点保存设置）', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old', apiKey: 'k-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await fillDraft(wrapper, {
+      name: '新方案',
+      apiUrl: 'https://new.example/v1',
+      model: 'm-new',
+      apiKey: 'k-new',
+    })
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
 
     const stored = await chrome.storage.sync.get('aiAssistantProfiles')
@@ -1212,57 +1298,69 @@ describe('配置方案（新建方案 / 应用）', () => {
     expect(list[0]!.settings.apiUrl).toBe('https://new.example/v1')
     expect(list[0]!.settings.apiKey).toBe('k-new')
 
-    // 主工作表单仍是旧值（建方案不污染正在用的配置）。
+    // 主工作表单恢复成正在用的旧值（建方案不污染当前配置）。
+    expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('https://old.example/v1')
     expect(inputValue(wrapper.find('input[aria-label="对话模型"]').element)).toBe('m-old')
     expect((await storedSettings()).apiUrl).toBe('https://old.example/v1')
   })
 
-  it('保存成功后新表清空（下次建方案仍从零填，不留半截旧值）', async () => {
+  it('存完后回到普通模式：主按钮变回「保存设置」，方案名输入框消失', async () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    await editorField(wrapper, '新建方案名称').setValue('一次性方案')
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://once.example/v1')
-    await editorField(wrapper, '新建方案模型').setValue('m-once')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await fillDraft(wrapper, {
+      name: '一次性方案',
+      apiUrl: 'https://once.example/v1',
+      model: 'm-once',
+    })
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
 
-    expect(inputValue(editorField(wrapper, '新建方案名称').element)).toBe('')
-    expect(inputValue(editorField(wrapper, '新建方案 Base URL').element)).toBe('')
-    expect(inputValue(editorField(wrapper, '新建方案模型').element)).toBe('')
+    expect(saveSettingsButton(wrapper).exists()).toBe(true)
+    expect(saveDraftButton(wrapper).exists()).toBe(false)
+    expect(profileNameField(wrapper).exists()).toBe(false)
   })
 
-  it('必填校验：缺端点或缺模型不存（空方案应用后会清掉正在用的连接）', async () => {
+  it('必填校验：缺方案名 / 缺端点 / 缺模型都不存（空方案应用后会清掉正在用的连接）', async () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    // 只有名字 → 不存。
-    await editorField(wrapper, '新建方案名称').setValue('缺端点')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await startDraftButton(wrapper).trigger('click')
+    await flushPromises()
+
+    // 什么都没填 → 不存。
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
     expect(await chrome.storage.sync.get('aiAssistantProfiles')).toEqual({})
+    expect(wrapper.find('.feedback.fail').text()).toContain('先给方案起个名字')
+
+    // 有名字缺端点 → 不存。
+    await profileNameField(wrapper).setValue('缺端点')
+    await saveDraftButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(await chrome.storage.sync.get('aiAssistantProfiles')).toEqual({})
+    expect(wrapper.find('.feedback.fail').text()).toContain('Base URL')
 
     // 有端点缺模型 → 仍不存。
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://x.example/v1')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await chatField(wrapper, 'input[type="url"]').setValue('https://x.example/v1')
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
     expect(await chrome.storage.sync.get('aiAssistantProfiles')).toEqual({})
+    expect(wrapper.find('.feedback.fail').text()).toContain('模型名')
   })
 
-  it('同名「新建方案」覆盖旧快照（内容取新表此刻填的值）', async () => {
+  it('同名方案覆盖旧快照（内容取这次填的值），并提示会覆盖', async () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    await editorField(wrapper, '新建方案名称').setValue('A')
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://a1.example/v1')
-    await editorField(wrapper, '新建方案模型').setValue('m-1')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await fillDraft(wrapper, { name: 'A', apiUrl: 'https://a1.example/v1', model: 'm-1' })
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
 
-    await editorField(wrapper, '新建方案名称').setValue('A')
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://a2.example/v1')
-    await editorField(wrapper, '新建方案模型').setValue('m-2')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await fillDraft(wrapper, { name: 'A', apiUrl: 'https://a2.example/v1', model: 'm-2' })
+    // 还没存之前就提示「会覆盖」，别让用户以为存成了两个。
+    expect(wrapper.text()).toContain('覆盖')
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
 
     const stored = await chrome.storage.sync.get('aiAssistantProfiles')
@@ -1279,10 +1377,8 @@ describe('配置方案（新建方案 / 应用）', () => {
     const wrapper = mount(App)
     await flushPromises()
 
-    await editorField(wrapper, '新建方案名称').setValue('P')
-    await editorField(wrapper, '新建方案 Base URL').setValue('https://new.example/v1')
-    await editorField(wrapper, '新建方案模型').setValue('m-new')
-    await wrapper.find('.profile-editor-submit').trigger('click')
+    await fillDraft(wrapper, { name: 'P', apiUrl: 'https://new.example/v1', model: 'm-new' })
+    await saveDraftButton(wrapper).trigger('click')
     await flushPromises()
 
     // 改回旧值并应用方案——表单应回到方案里的新值。
@@ -1293,5 +1389,31 @@ describe('配置方案（新建方案 / 应用）', () => {
     expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('https://new.example/v1')
     const settings = await storedSettings()
     expect(settings.apiUrl).toBe('https://new.example/v1')
+  })
+
+  it('新建方案中途点「应用」：先退出新建模式，别让草稿备份把应用的方案盖回去', async () => {
+    await chrome.storage.sync.set({
+      aiAssistantSettings: { apiUrl: 'https://old.example/v1', model: 'm-old' },
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await fillDraft(wrapper, { name: 'P', apiUrl: 'https://new.example/v1', model: 'm-new' })
+    await saveDraftButton(wrapper).trigger('click')
+    await flushPromises()
+
+    // 又点了一次「新建方案」（表被清空成草稿），此时直接点「应用」。
+    await startDraftButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(saveDraftButton(wrapper).exists()).toBe(true)
+
+    await findButton(wrapper, '应用').trigger('click')
+    await flushPromises()
+
+    // 应用后应是方案里的值，且已退出新建模式（草稿备份不能把旧值写回来）。
+    expect(inputValue(chatField(wrapper, 'input[type="url"]').element)).toBe('https://new.example/v1')
+    expect(saveDraftButton(wrapper).exists()).toBe(false)
+    expect(saveSettingsButton(wrapper).exists()).toBe(true)
+    expect((await storedSettings()).apiUrl).toBe('https://new.example/v1')
   })
 })

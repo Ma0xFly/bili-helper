@@ -60,8 +60,8 @@ describe('saveProfileFromCurrent（新建方案）', () => {
     expect((await readAiSettings()).apiKey).toBe('k-a') // 未进快照的字段原样保留
   })
 
-  it('快照取传入的当前值，不读存储里的旧值（新表填的即存档内容）', async () => {
-    // 存储里还是 beforeEach 的旧端点；传入的快照是「新建方案表此刻填的值」。
+  it('快照取传入的当前值，不读存储里的旧值（新建方案表此刻填的即存档内容）', async () => {
+    // 存储里还是 beforeEach 的旧端点；传入的快照是「新建方案那张表此刻填的值」。
     await saveProfileFromCurrent(
       '新端点',
       snapshot({ apiUrl: 'https://new-endpoint.example/v1', model: 'm-new' }),
@@ -74,7 +74,8 @@ describe('saveProfileFromCurrent（新建方案）', () => {
   })
 
   it('空白新表也能存档：空端点/空 Key 归一为空串（不继承主设置）', async () => {
-    // 新表是「从零填」的：什么都不填就存，方案里就是空值，不会偷偷继承主设置。
+    // 存储层只做归一，不做业务校验：空值就是空值，不会偷偷继承主设置。
+    // 「空方案不许存」是设置页那一层的责任（见 tests/options-app.test.ts）。
     await saveProfileFromCurrent(
       '空白方案',
       snapshot({ apiUrl: '', apiKey: '', model: '', embedBaseUrl: '', embedModel: '' }),
