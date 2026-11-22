@@ -48,6 +48,11 @@ function asPositiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
+/** cid 有效门：必须为正数——0（占位态）/负数/缺失一律视为没拿到，provider 拿 cid 直接拼请求 URL。 */
+function asCid(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
 async function fetchBiliJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { credentials: 'include', signal })
   if (!response.ok) throw new Error(`请求失败：${response.status}`)
@@ -63,13 +68,22 @@ function timeoutSignal(): AbortSignal | undefined {
 
 // ---------- 视频元数据 ----------
 
-/** 页面状态里取一条视频数据（cid/标题/时长优先走这里，零网络成本）。 */
+/**
+ * 页面状态里取一条视频数据（cid/标题/时长优先走这里，零网络成本）。
+ * 身份比对：videoData 自带 bvid 且与请求 bvid 不一致（SPA 滞后状态）→ 弃用页面状态
+ * 改走 view 接口，杜绝把旧视频的 cid/标题拼进新视频上下文。
+ */
 function metaFromPageState(bvid: string): VideoMeta | null {
   const data = videoData()
   if (!data) return null
+  if (typeof data.bvid === 'string' && data.bvid !== bvid) return null
+  const cid = asCid(data.cid)
+  // cid 门：列表页/首页 tab 的 videoData 可能只有 stat/owner（无 cid）——不算成功，
+  // 放行走 view 接口兜底；接口失败仍由 collectVideoMeta 兜成 bvid 基线形状。
+  if (cid === undefined) return null
   return {
     bvid,
-    cid: asPositiveNumber(data.cid),
+    cid,
     title: typeof data.title === 'string' ? data.title : '',
     duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : 0,
   }
@@ -86,7 +100,7 @@ async function metaFromViewApi(bvid: string): Promise<VideoMeta | null> {
     const view = data.data
     return {
       bvid,
-      cid: asPositiveNumber(view.cid),
+      cid: asCid(view.cid),
       title: typeof view.title === 'string' ? view.title : '',
       duration: typeof view.duration === 'number' && view.duration > 0 ? view.duration : 0,
     }
@@ -107,6 +121,13 @@ function isBilibiliHost(hostname: string): boolean {
   return hostname === 'bilibili.com' || hostname.endsWith('.bilibili.com')
 }
 
+/**
+ * query bvid 的严格格式门：稍后再看列表页（/list/watchlater?oid=&bvid=）与首页 WatchLater
+ * tab（/?page=WatchLater&bvid=）的 bvid 只在 query 里——校验通过才可信；
+ * 页面状态侧另有身份比对（metaFromPageState/aidFor），双层防串视频上下文。
+ */
+const QUERY_BVID_PATTERN = /^BV[0-9A-Za-z]{10}$/
+
 export function extractBvidFromUrl(source?: string | { url?: string; href?: string } | URL): string | null {
   const href = resolveHref(source)
   if (!href) return null
@@ -118,8 +139,10 @@ export function extractBvidFromUrl(source?: string | { url?: string; href?: stri
   }
   if (!isBilibiliHost(url.hostname)) return null
   const match = url.pathname.match(/^\/video\/([^/?#]+)/)
-  if (!match || !match[1]) return null
-  return match[1]
+  if (match?.[1]) return match[1]
+  // 非 /video/ 页面（列表页/首页 tab）：bvid 只认 query 参数，且必须过严格格式校验。
+  const queryBvid = url.searchParams.get('bvid')
+  return queryBvid !== null && QUERY_BVID_PATTERN.test(queryBvid) ? queryBvid : null
 }
 
 export async function collectVideoMeta(
@@ -346,9 +369,15 @@ export async function collectDanmaku(video: VideoMeta): Promise<Danmaku[]> {
 
 // ---------- 评论 ----------
 
-/** 从页面状态取 aid；没有则走 view 接口按 bvid 反查（顺带把分 P 首页 aid 找回来）。 */
+/**
+ * 从页面状态取 aid；没有则走 view 接口按 bvid 反查（顺带把分 P 首页 aid 找回来）。
+ * 身份比对：videoData 自带 bvid 且与请求视频不一致（SPA 滞后）→ 弃用页面 aid 走接口，
+ * 避免拿旧视频的 aid 拉成新视频的评论区。
+ */
 async function aidFor(video: VideoMeta): Promise<number | undefined> {
-  const fromPage = asPositiveNumber(videoData()?.aid)
+  const pageData = videoData()
+  const stale = typeof pageData?.bvid === 'string' && pageData.bvid !== video.bvid
+  const fromPage = stale ? undefined : asPositiveNumber(pageData?.aid)
   if (fromPage !== undefined) return fromPage
   try {
     const data = await fetchBiliJson(

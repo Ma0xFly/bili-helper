@@ -69,6 +69,82 @@ describe('collectVideoMeta', () => {
   it('非视频页 bvid 解出失败返回 null', async () => {
     expect(extractBvidFromUrl('https://www.bilibili.com/')).toBeNull()
   })
+
+  it('稍后再看列表播放页：query bvid 提取', async () => {
+    expect(extractBvidFromUrl('https://www.bilibili.com/list/watchlater?oid=1&bvid=BV1Xhso6yEph')).toBe(
+      'BV1Xhso6yEph',
+    )
+  })
+
+  it('首页 WatchLater tab：query bvid 提取', async () => {
+    expect(extractBvidFromUrl('https://www.bilibili.com/?page=WatchLater&bvid=BV1ZLht69E7b')).toBe(
+      'BV1ZLht69E7b',
+    )
+  })
+
+  it('非法 query bvid：严格格式校验不过 → null', async () => {
+    expect(extractBvidFromUrl('https://www.bilibili.com/?page=WatchLater&bvid=abc123')).toBeNull()
+    expect(extractBvidFromUrl('https://www.bilibili.com/?page=WatchLater&bvid=BVshort')).toBeNull()
+    expect(extractBvidFromUrl('https://www.bilibili.com/?page=WatchLater&bvid=BV1Xhso6yEphX')).toBeNull()
+  })
+
+  it('仅 oid 无 bvid → null（不做 oid 反查）', async () => {
+    expect(extractBvidFromUrl('https://www.bilibili.com/list/watchlater?oid=1')).toBeNull()
+  })
+
+  it('列表页假状态：videoData 只有 stat/owner（无 cid）不算成功，走 view 接口兜底', async () => {
+    setPageState({ videoData: { stat: { view: 1 }, owner: { mid: 2 } } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        expect(String(url)).toContain('x/web-interface/view?bvid=BV1Xhso6yEph')
+        return jsonResponse({ code: 0, data: { cid: 7, title: '列表页兜底标题', duration: 66 } })
+      }),
+    )
+    const meta = await collectVideoMeta('https://www.bilibili.com/list/watchlater?oid=1&bvid=BV1Xhso6yEph')
+    expect(meta).toEqual({ bvid: 'BV1Xhso6yEph', cid: 7, title: '列表页兜底标题', duration: 66 })
+  })
+
+  it('首页 WatchLater tab：页面状态有 cid 时直接用（零网络成本）', async () => {
+    setPageState({ videoData: { bvid: 'BV1ZLht69E7b', cid: 9, title: '首页内嵌', duration: 120 } })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const meta = await collectVideoMeta('https://www.bilibili.com/?page=WatchLater&bvid=BV1ZLht69E7b')
+    expect(meta).toEqual({ bvid: 'BV1ZLht69E7b', cid: 9, title: '首页内嵌', duration: 120 })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('滞后页面状态：videoData.bvid 与请求 bvid 不一致 → 弃用走 view 接口（不串视频上下文）', async () => {
+    setPageState({ videoData: { bvid: 'BV1abcdefghi', cid: 1, title: '上一个视频', duration: 10 } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        expect(String(url)).toContain('x/web-interface/view?bvid=BV1xx411c7mD')
+        return jsonResponse({ code: 0, data: { cid: 7, title: '接口标题', duration: 88 } })
+      }),
+    )
+    const meta = await collectVideoMeta('https://www.bilibili.com/video/BV1xx411c7mD')
+    expect(meta).toEqual({ bvid: 'BV1xx411c7mD', cid: 7, title: '接口标题', duration: 88 })
+  })
+
+  it('页面状态 cid=0（占位态）不算成功 → 走 view 接口兜底', async () => {
+    setPageState({ videoData: { bvid: 'BV1xx411c7mD', cid: 0, title: '占位', duration: 0 } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ code: 0, data: { cid: 7, title: '接口标题', duration: 88 } })),
+    )
+    const meta = await collectVideoMeta('https://www.bilibili.com/video/BV1xx411c7mD')
+    expect(meta).toEqual({ bvid: 'BV1xx411c7mD', cid: 7, title: '接口标题', duration: 88 })
+  })
+
+  it('view 接口 cid=0 同样过有效门 → meta.cid 为 undefined（provider 不以 0 发请求）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ code: 0, data: { cid: 0, title: '占位', duration: 0 } })),
+    )
+    const meta = await collectVideoMeta('https://www.bilibili.com/video/BV1xx411c7mD')
+    expect(meta).toEqual({ bvid: 'BV1xx411c7mD', cid: undefined, title: '占位', duration: 0 })
+  })
 })
 
 describe('collectSubtitles', () => {
@@ -258,6 +334,35 @@ describe('collectDanmaku', () => {
 })
 
 describe('collectComments（wbi 签名）', () => {
+  it('滞后页面状态：videoData.bvid 与请求 bvid 不一致 → 弃用页面 aid，走 view 接口反查', async () => {
+    setPageState({ videoData: { bvid: 'BV1abcdefghi', aid: 42 } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        const target = String(url)
+        if (target.includes('/x/web-interface/nav')) {
+          return jsonResponse({
+            code: 0,
+            data: {
+              wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/a.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/b.png' },
+            },
+          })
+        }
+        if (target.includes('x/web-interface/view?bvid=BV1xx411c7mD')) {
+          return jsonResponse({ code: 0, data: { aid: 999 } })
+        }
+        if (target.includes('/x/v2/reply/wbi/main')) {
+          // 旧视频的 aid=42 不得混进当前视频的评论区。
+          expect(target).toContain('oid=999')
+          expect(target).not.toContain('oid=42')
+          return jsonResponse({ code: 0, data: { replies: [{ content: { message: '对的评论' } }] } })
+        }
+        return new Response('{}', { status: 404 })
+      }),
+    )
+    expect(await collectComments(VIDEO)).toEqual([{ top: { text: '对的评论' } }])
+  })
+
   it('页面状态取 aid → wbi 签名请求 → 顶部评论文本', async () => {
     setPageState({ videoData: { bvid: 'BV1xx411c7mD', aid: 42 } })
     const fetchMock = vi.fn(async (url: RequestInfo | URL) => {

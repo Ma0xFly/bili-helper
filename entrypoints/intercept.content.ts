@@ -19,6 +19,10 @@ export default defineContentScript({
   matches: [
     'https://www.bilibili.com/',
     'https://www.bilibili.com/index.html',
+    // 首页 query 深链（如 /?page=WatchLater）：path+query 参与匹配，裸 / 匹配不到，
+    // 必须显式列出；page 参数未必紧跟 ?（/index.html?page=… 变体同理），用 ?*page= 通配兜住任意参数序。
+    'https://www.bilibili.com/?*page=*',
+    'https://www.bilibili.com/index.html?*page=*',
     'https://www.bilibili.com/video/*',
     'https://www.bilibili.com/list/*',
     'https://www.bilibili.com/v/popular/*',
