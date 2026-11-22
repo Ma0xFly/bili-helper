@@ -1,4 +1,18 @@
 {
   "extends": "./.wxt/tsconfig.json",
-  "include": ["**/*.ts", "**/*.vue"]
+  "include": [
+    "**/*.ts",
+    "**/*.vue"
+  ],
+  "exclude": [
+    "node_modules",
+    ".output",
+    "项目理解"
+  ],
+  "compilerOptions": {
+    "types": [
+      "chrome",
+      "node"
+    ]
+  }
 }
